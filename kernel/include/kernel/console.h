@@ -1,6 +1,6 @@
 #ifndef CONSOLE_H
 #define CONSOLE_H
-
+#include <stdint.h>
 // VGA color definitions (foreground/background)
 enum vga_color {
     VGA_COLOR_BLACK         = 0x0,
@@ -29,5 +29,6 @@ static inline char vga_entry_color(enum vga_color fg, enum vga_color bg) {
 void kprintf(const char* s, ...);
 void kcprintf(const char* s, const char color, ...);
 void kvprintf(const char* fmt, char color, ...);
+void set_console_write_loc(uint64_t vga_offset);
 
 #endif

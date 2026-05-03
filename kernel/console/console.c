@@ -9,6 +9,11 @@ static volatile char* vga = (volatile char*)0xB8000;
 static int cursor_x = 0;
 static int cursor_y = 0;
 
+void set_console_write_loc(uint64_t vga_offset) {
+    vga = (volatile char*)vga_offset + 0xB8000;
+}
+
+
 /* --- low-level --- */
 static inline void putc_at(int x, int y, char c, char color) {
     int i = (y * VGA_WIDTH + x) * 2;
@@ -115,6 +120,7 @@ static void print_hex(uint64_t value, int width, char color) {
 }
 
 /* --- printf core --- */
+/* --- printf core --- */
 void kvprintf(const char* fmt, char color, va_list args) {
     for (int i = 0; fmt[i]; i++) {
         if (fmt[i] != '%') {
@@ -124,8 +130,22 @@ void kvprintf(const char* fmt, char color, va_list args) {
 
         i++;
 
+        // Track length modifiers (l or ll)
+        int is_long = 0;
+        int is_long_long = 0;
+
+        while (fmt[i] == 'l') {
+            if (is_long) {
+                is_long_long = 1;
+            } else {
+                is_long = 1;
+            }
+            i++;
+        }
+
         switch (fmt[i]) {
             case 'c': {
+                // va_arg promotes chars to ints
                 char c = (char)va_arg(args, int);
                 putc(c, color);
                 break;
@@ -138,20 +158,36 @@ void kvprintf(const char* fmt, char color, va_list args) {
             }
 
             case 'd': {
-                int val = va_arg(args, int);
-                print_int(val, color);
+                if (is_long_long || is_long) {
+                    int64_t val = va_arg(args, int64_t);
+                    print_int(val, color);
+                } else {
+                    int val = va_arg(args, int);
+                    print_int((int64_t)val, color);
+                }
                 break;
             }
 
             case 'u': {
-                unsigned int val = va_arg(args, unsigned int);
-                print_uint(val, 10, color);
+                if (is_long_long || is_long) {
+                    uint64_t val = va_arg(args, uint64_t);
+                    print_uint(val, 10, color);
+                } else {
+                    unsigned int val = va_arg(args, unsigned int);
+                    print_uint((uint64_t)val, 10, color);
+                }
                 break;
             }
 
-            case 'x': {
-                unsigned int val = va_arg(args, unsigned int);
-                print_hex(val, 8, color);
+            case 'x':
+            case 'X': { // Added support for uppercase %X as well
+                if (is_long_long || is_long) {
+                    uint64_t val = va_arg(args, uint64_t);
+                    print_hex(val, 16, color); // 16 nibbles for 64-bit
+                } else {
+                    unsigned int val = va_arg(args, unsigned int);
+                    print_hex(val, 8, color);  // 8 nibbles for 32-bit
+                }
                 break;
             }
 
@@ -167,6 +203,7 @@ void kvprintf(const char* fmt, char color, va_list args) {
                 break;
 
             default:
+                // If it's an unrecognized specifier, just print it as text
                 putc('%', color);
                 putc(fmt[i], color);
                 break;

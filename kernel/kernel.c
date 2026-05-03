@@ -1,16 +1,22 @@
 #include <kernel/console.h>
 #include <kernel/panic.h>
 #include <arch/idt.h>
+#include <kernel/mm/pmm.h>
+#include <kernel/mm/vmm.h>
+#include <kernel/mm/paging.h>
+#include <arch/gdt.h>
 
-void kernel_main(void) {
-    // VGA text buffer at 0xB8000
-    //panic("Testing Panic!!");
+
+void kernel_main(uint64_t mb2_addr) {
+
     idt_init();
-    kprintf("IDT loaded\n");
+    init_pmm(mb2_addr);
+    init_paging(mb2_addr);
+    gdt_reload();
 
-    volatile uint64_t* p = (uint64_t*)0x40000000; // 1 GiB boundary
-    *p = 1;
-
+    volatile int a = 0;
+    volatile int b = 1;
+    volatile int c = b/a;
     while (1) {
         __asm__ volatile ("hlt");
     }
