@@ -9,6 +9,7 @@
 #include <kernel/mm/kheap.h>
 #include <arch/pic.h>
 #include <kernel/drivers/keyboard.h>
+#include <kernel/drivers/pit.h>
 #include <arch/irq.h>
 #include <arch/isr.h>
 
@@ -16,6 +17,7 @@ void kernel_stage2(uint64_t mb2_addr);
 
 void init_devices(){
     init_kbd();
+    init_timer(100);
 }
 
 /**

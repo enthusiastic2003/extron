@@ -3,7 +3,7 @@
 #include <arch/io.h>
 #include <kernel/console.h>
 #include <arch/irq.h>
-#include <kernel/drivers/keyboard.h>
+#include <arch/irqs.h>
 
 
 static irq_handler_fn irq_handlers[16];
@@ -33,6 +33,7 @@ void register_irq_handler(uint8_t irq, irq_handler_fn handler) {
 
 void init_irq(){
 
+    register_irq_handler(0, timer_handler);
     register_irq_handler(1, keyboard_handler);
 }
 
