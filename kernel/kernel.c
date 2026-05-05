@@ -7,8 +7,11 @@
 #include <arch/gdt.h>
 #include <stddef.h>
 #include <kernel/mm/kheap.h>
+#include <arch/pic.h>
+#include <drivers/keyboard.h>
 
 void kernel_stage2(uint64_t mb2_addr);
+
 
 
 /**
@@ -25,6 +28,9 @@ void kernel_stage1(uint64_t mb2_addr) {
     init_paging(mb2_addr);
     gdt_reload();
     vmm_init();
+    pic_init();
+    keyboard_init();
+
 
     // Prepare the new stack for Stage 2
 
@@ -39,8 +45,9 @@ void kernel_stage1(uint64_t mb2_addr) {
         "mov %%rsp, %%rbp\n\t" // Initialize base pointer
         "push $0\n\t"          // Null return address for stack traces
         "mov %2, %%rdi\n\t"    // Pass mb2_addr to RDI (first argument)
-        "jmp %1"               // Jump to stage 2
+        "jmp *%1"              // Jump to stage 2 (added * for indirect jump)
         : : "r"(new_stack_top), "r"(kernel_stage2), "r"(mb2_addr) : "memory"
+
     );
 
     // We should never reach here
@@ -55,7 +62,10 @@ void kernel_stage2(uint64_t mb2_addr) {
     kprintf("--- Kernel Stage 2: Execution Phase ---\n");
     kprintf("Successfully running on high-half virtual stack.\n");
     
-    // Perform a small test to confirm everything is still accessible
+    // Enable interrupts
+    __asm__ volatile ("sti");
+    kprintf("Interrupts enabled. Keyboard ready!\n");
+
     kprintf("Multiboot2 pointer is still: %p\n", (void*)mb2_addr);
 
     while (1) {

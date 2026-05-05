@@ -3,7 +3,11 @@ global isr6
 global isr8
 global isr13
 global isr14
+global irq0
+global irq1
 global isr_common
+
+
 
 extern isr_handler
 
@@ -39,6 +43,18 @@ isr13:
 isr14:
     push 14
     jmp isr_common
+
+irq0:
+    push 0      ; fake error code
+    push 32     ; vector
+    jmp isr_common
+
+irq1:
+
+    push 0      ; fake error code
+    push 33     ; vector
+    jmp isr_common
+
 
 ; =========================
 ; COMMON HANDLER

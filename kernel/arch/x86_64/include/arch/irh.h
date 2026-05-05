@@ -10,4 +10,6 @@ void handle_double_fault(struct isr_frame* f);    // 8
 void handle_gpf(struct isr_frame* f);             // 13
 void handle_page_fault(struct isr_frame* f);      // 14
 
+void isr_register_handler(uint8_t vector, void (*handler)(struct isr_frame*));
+
 #endif

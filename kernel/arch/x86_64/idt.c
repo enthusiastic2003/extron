@@ -13,12 +13,14 @@ static inline void idt_load(struct idt_ptr* ptr) {
 }
 
 extern void isr0();
-extern void isr14();
-extern void isr0();
 extern void isr6();
 extern void isr8();
 extern void isr13();
 extern void isr14();
+extern void irq0();
+extern void irq1();
+
+
 
 /* initialize IDT (empty for now) */
 void idt_init(void) {
@@ -41,6 +43,10 @@ void idt_init(void) {
     idt_set_entry(8,  isr8);
     idt_set_entry(13, isr13);
     idt_set_entry(14, isr14);
+    idt_set_entry(32, irq0);
+    idt_set_entry(33, irq1);
+
+
 
     idt_load(&idt_reg);
 }
