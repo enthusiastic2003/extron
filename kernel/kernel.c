@@ -58,25 +58,6 @@ void kernel_stage2(uint64_t mb2_addr) {
     // Perform a small test to confirm everything is still accessible
     kprintf("Multiboot2 pointer is still: %p\n", (void*)mb2_addr);
 
-    // --- KHEAP TEST ---
-    kprintf("Testing Kernel Heap (kmalloc)...\n");
-    
-    char* test_ptr = (char*)kmalloc(100);
-    if (test_ptr) {
-        kprintf("kmalloc(100) returned: %p\n", test_ptr);
-        
-        // Write to it
-        for(int i = 0; i < 10; i++) test_ptr[i] = 'A' + i;
-        test_ptr[10] = '\0';
-        
-        kprintf("Data written to heap: %s\n", test_ptr);
-        
-        kfree(test_ptr);
-        kprintf("Memory successfully freed.\n");
-    } else {
-        kprintf("ERROR: kmalloc returned NULL!\n");
-    }
-
     while (1) {
         __asm__ volatile ("hlt");
     }

@@ -91,7 +91,7 @@ int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
 
 
 
-phys_addr_t unmap_page(pml4_t pml4, virt_addr_t virt) {
+phys_addr_t virt_to_phys(pml4_t pml4, virt_addr_t virt) {
     phys_addr_t pdpt = get_table_if_present(pml4, PML4_IDX(virt));
     if (!pdpt) return 0;
 
@@ -102,28 +102,47 @@ phys_addr_t unmap_page(pml4_t pml4, virt_addr_t virt) {
     if (!pt) return 0;
 
     virt_addr_t* vpt = phys_to_virt(pt);
+    uint64_t entry = vpt[PT_IDX(virt)];
 
-    // Check if the page is actually present using your macro
-    if (!(vpt[PT_IDX(virt)] & PAGE_PRESENT))
+    if (!(entry & PAGE_PRESENT))
         return 0;
 
-    // Extract the raw physical address using your specific mask
-    phys_addr_t phys = vpt[PT_IDX(virt)] & PAGE_ADDR_MASK;
+    return entry & PAGE_ADDR_MASK;
+}
 
-    // Clear the entry and flush TLB
+int unmap_page(pml4_t pml4, virt_addr_t virt) {
+    phys_addr_t pdpt = get_table_if_present(pml4, PML4_IDX(virt));
+    if (!pdpt) return -1;
+
+    phys_addr_t pd = get_table_if_present(pdpt, PDPT_IDX(virt));
+    if (!pd) return -1;
+
+    phys_addr_t pt = get_table_if_present(pd, PD_IDX(virt));
+    if (!pt) return -1;
+
+    virt_addr_t* vpt = phys_to_virt(pt);
+
+    if (!(vpt[PT_IDX(virt)] & PAGE_PRESENT))
+        return -1;
+
     vpt[PT_IDX(virt)] = 0;
     flush_tlb_single(virt);
     
-    return phys;
+    return 0;
 }
 
 int kmap(virt_addr_t v, phys_addr_t p, uint64_t flags) {
     return map_page(kernel_pml4, v, p, flags);
 }
 
-phys_addr_t kunmap(virt_addr_t v) {
+int kunmap(virt_addr_t v) {
     return unmap_page(kernel_pml4, v);
 }
+
+phys_addr_t kvirt_to_phys(virt_addr_t v) {
+    return virt_to_phys(kernel_pml4, v);
+}
+
 
 void map_kernel_elf_sections(uint64_t pml4, uint64_t mb2_addr) {
     struct multiboot_tag_elf_sections* elf_tag = find_elf_sections(mb2_addr);

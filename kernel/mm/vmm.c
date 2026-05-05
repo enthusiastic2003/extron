@@ -84,7 +84,9 @@ virt_addr_t vmm_alloc_pages(size_t n) {
     }
 
     panic("VMM: kernel heap exhausted");
+    return 0;
 }
+
 
 virt_addr_t vmm_alloc_page() {
     return vmm_alloc_pages(1);
@@ -103,18 +105,20 @@ int vmm_free_pages(virt_addr_t v, size_t n) {
     for (uint64_t i = 0; i < n; i++) {
         virt_addr_t addr = v + i * PAGE_SIZE;
 
-        // kunmap unmaps the page AND gives us the physical address
-        phys_addr_t p = kunmap(addr);
+        // Use kvirt_to_phys to find the address before unmapping
+        phys_addr_t p = kvirt_to_phys(addr);
         
         if (p) {
+            kunmap(addr);
             pmm_free_page((void*)p);
         }
-        else{
-            panic("VMM: Tried to free virtual address that was never mapped: %p\n", addr);
+        else {
+            panic("VMM: Tried to free virtual address that was never mapped: %p\n", (void*)addr);
         }
 
         bitmap_clear(start + i);
     }
+
 
     return 0;
 }
