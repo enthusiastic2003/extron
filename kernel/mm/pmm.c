@@ -16,12 +16,9 @@
 extern char _kernel_start;
 extern char _kernel_end;
 
-
-
-
 struct phys_mem_info
 {
-    virt_mem_ptr bmp_phys;
+    virt_addr_t bmp_phys;
     uint64_t total_mem;
     
 } global_phys_mem_info;
@@ -40,6 +37,12 @@ static inline void bitmap_clear(uint64_t bit_idx) {
     uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
     bmp[bit_idx / 8] &= ~(1 << (bit_idx % 8));
 }
+
+static inline int bitmap_test(uint64_t bit_idx) {
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+    return bmp[bit_idx / 8] & (1 << (bit_idx % 8));
+}
+
 
 // Mark a region as used (Aligns outward to safely cover partial pages)
 static void pmm_mark_used_region(uint64_t start, uint64_t length) {
@@ -140,7 +143,7 @@ void get_bitmap_location(uint64_t mb2_addr){
         tag = mb2_next(tag);
     }
 
-    global_phys_mem_info.bmp_phys = (virt_mem_ptr) highest_reserved_addr;
+    global_phys_mem_info.bmp_phys = (virt_addr_t) highest_reserved_addr;
 
 }
 
@@ -150,7 +153,7 @@ void init_pmm(uint64_t mb2_addr) {
     get_bitmap_location(mb2_addr);
 
     // Page-align the start of our bitmap
-    global_phys_mem_info.bmp_phys = (virt_mem_ptr)align_up((uint64_t)global_phys_mem_info.bmp_phys, PAGE_SIZE);
+    global_phys_mem_info.bmp_phys = (virt_addr_t)align_up((uint64_t)global_phys_mem_info.bmp_phys, PAGE_SIZE);
 
     // Calculate how big the bitmap needs to be (1 bit per page)
     uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
@@ -229,8 +232,12 @@ uint64_t get_virtual_pmm_bitmap_location(){
     return (uint64_t)global_phys_mem_info.bmp_phys;
 }
 
+uint64_t get_pmm_total_manage(){
+    return global_phys_mem_info.total_mem;
+}
+
 void set_virtual_pmm_bitmap_location(uint64_t new_bitmap_virt_loc){
-    global_phys_mem_info.bmp_phys = (virt_mem_ptr) new_bitmap_virt_loc;
+    global_phys_mem_info.bmp_phys = (virt_addr_t) new_bitmap_virt_loc;
 }
 
 // Returns the physical address of a free 4KB page, or NULL if out of memory.
@@ -260,5 +267,10 @@ void pmm_free_page(void* phys_addr) {
         panic("PMM: Tried to free an unaligned address: 0x%lx", addr);
     }
 
-    bitmap_clear(addr_to_idx(addr));
+    uint64_t idx = addr_to_idx(addr);
+    if (!bitmap_test(idx)) {
+        panic("PMM: Double free or freeing unallocated page at 0x%lx", addr);
+    }
+
+    bitmap_clear(idx);
 }

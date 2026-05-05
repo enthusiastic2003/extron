@@ -1,5 +1,5 @@
 global _start
-extern kernel_main
+extern kernel_stage1
 
 ; --- Constants ---
 KERNEL_VMA equ 0xFFFFFFFF80000000
@@ -30,8 +30,9 @@ p3_table_high: resb 4096     ; P3 for the higher-half map
 p2_table:      resb 4096     ; The shared P2 (1 GiB)
 
 align 16
-stack_bottom: resb 16384     ; 16 KB stack
-stack_top:
+boot_stack_bottom: resb 16384     ; 16 KB temporary stack
+boot_stack_top:
+
 
 align 8
 mb2_ptr: resq 1              ; Storage for multiboot2 pointer
@@ -44,7 +45,7 @@ _start:
     mov [mb2_ptr - KERNEL_VMA], ebx
 
     ; 2. Setup the physical stack
-    mov esp, stack_top - KERNEL_VMA
+    mov esp, boot_stack_top - KERNEL_VMA
 
     ; 3. Setup paging and transition to 64-bit
     call setup_paging
@@ -151,7 +152,7 @@ long_mode_start:
     ; 2. THE STACK JUMP
     ; We are now in 64-bit mode with higher-half paging active!
     ; We move the stack pointer up to the virtual address.
-    mov rsp, stack_top
+    mov rsp, boot_stack_top
 
     ; 3. Pass Multiboot2 pointer (SysV ABI dictates first arg goes in RDI)
     ; We load it using the virtual address!
@@ -159,7 +160,7 @@ long_mode_start:
 
     ; 4. THE LONG JUMP
     ; Force an absolute jump to the higher half C kernel
-    mov rax, kernel_main
+    mov rax, kernel_stage1
     call rax
 
     ; 5. Safety Net (We should never return here)

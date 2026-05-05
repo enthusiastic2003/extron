@@ -5,18 +5,78 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/paging.h>
 #include <arch/gdt.h>
+#include <stddef.h>
+#include <kernel/mm/kheap.h>
+
+void kernel_stage2(uint64_t mb2_addr);
 
 
-void kernel_main(uint64_t mb2_addr) {
+/**
+
+ * @brief Stage 1: Initialization Phase.
+ * Runs on the temporary boot stack.
+ */
+void kernel_stage1(uint64_t mb2_addr) {
+    kprintf("--- Kernel Stage 1: Initialization ---\n");
+
 
     idt_init();
     init_pmm(mb2_addr);
     init_paging(mb2_addr);
     gdt_reload();
+    vmm_init();
 
-    volatile int a = 0;
-    volatile int b = 1;
-    volatile int c = b/a;
+    // Prepare the new stack for Stage 2
+
+    virt_addr_t new_stack_top = vmm_setup_stack();
+
+    kprintf("Transitioning to Stage 2...\n");
+
+    // Perform the stack switch and jump to Stage 2
+    // We pass mb2_addr in RDI as the first argument to kernel_stage2
+    __asm__ volatile (
+        "mov %0, %%rsp\n\t"    // Set new stack pointer
+        "mov %%rsp, %%rbp\n\t" // Initialize base pointer
+        "push $0\n\t"          // Null return address for stack traces
+        "mov %2, %%rdi\n\t"    // Pass mb2_addr to RDI (first argument)
+        "jmp %1"               // Jump to stage 2
+        : : "r"(new_stack_top), "r"(kernel_stage2), "r"(mb2_addr) : "memory"
+    );
+
+    // We should never reach here
+    while(1);
+}
+
+/**
+ * @brief Stage 2: The "Real" Kernel entry point.
+ * This function runs on the permanent 4MB virtual stack.
+ */
+void kernel_stage2(uint64_t mb2_addr) {
+    kprintf("--- Kernel Stage 2: Execution Phase ---\n");
+    kprintf("Successfully running on high-half virtual stack.\n");
+    
+    // Perform a small test to confirm everything is still accessible
+    kprintf("Multiboot2 pointer is still: %p\n", (void*)mb2_addr);
+
+    // --- KHEAP TEST ---
+    kprintf("Testing Kernel Heap (kmalloc)...\n");
+    
+    char* test_ptr = (char*)kmalloc(100);
+    if (test_ptr) {
+        kprintf("kmalloc(100) returned: %p\n", test_ptr);
+        
+        // Write to it
+        for(int i = 0; i < 10; i++) test_ptr[i] = 'A' + i;
+        test_ptr[10] = '\0';
+        
+        kprintf("Data written to heap: %s\n", test_ptr);
+        
+        kfree(test_ptr);
+        kprintf("Memory successfully freed.\n");
+    } else {
+        kprintf("ERROR: kmalloc returned NULL!\n");
+    }
+
     while (1) {
         __asm__ volatile ("hlt");
     }
