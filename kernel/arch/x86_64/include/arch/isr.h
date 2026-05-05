@@ -19,4 +19,8 @@ struct isr_frame {
 
 void isr_handler(struct isr_frame* f);
 
+void enable_interrupt();
+
+void disable_interrupt();
+
 #endif

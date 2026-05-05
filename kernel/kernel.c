@@ -7,9 +7,16 @@
 #include <arch/gdt.h>
 #include <stddef.h>
 #include <kernel/mm/kheap.h>
+#include <arch/pic.h>
+#include <kernel/drivers/keyboard.h>
+#include <arch/irq.h>
+#include <arch/isr.h>
 
 void kernel_stage2(uint64_t mb2_addr);
 
+void init_devices(){
+    init_kbd();
+}
 
 /**
 
@@ -21,6 +28,7 @@ void kernel_stage1(uint64_t mb2_addr) {
 
 
     idt_init();
+    pic_remap();
     init_pmm(mb2_addr);
     init_paging(mb2_addr);
     gdt_reload();
@@ -54,11 +62,13 @@ void kernel_stage1(uint64_t mb2_addr) {
 void kernel_stage2(uint64_t mb2_addr) {
     kprintf("--- Kernel Stage 2: Execution Phase ---\n");
     kprintf("Successfully running on high-half virtual stack.\n");
-    
-    // Perform a small test to confirm everything is still accessible
-    kprintf("Multiboot2 pointer is still: %p\n", (void*)mb2_addr);
 
+    init_devices();
+    init_irq(); 
+    enable_interrupt();
+    
     while (1) {
+        process_keyboard();
         __asm__ volatile ("hlt");
     }
 }

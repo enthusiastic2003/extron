@@ -3,6 +3,8 @@ global isr6
 global isr8
 global isr13
 global isr14
+global isr32
+global isr33
 global isr_common
 
 extern isr_handler
@@ -10,6 +12,18 @@ extern isr_handler
 section .text
 bits 64
 
+; =========================
+; IRQs
+; =========================
+isr32:
+    push 0      ; fake error code
+    push 32     ; vector
+    jmp isr_common
+
+isr33:
+    push 0      ; fake error code
+    push 33     ; vector number
+    jmp isr_common
 ; =========================
 ; NO ERROR CODE (fake it)
 ; =========================

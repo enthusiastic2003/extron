@@ -19,6 +19,8 @@ extern void isr6();
 extern void isr8();
 extern void isr13();
 extern void isr14();
+extern void isr32(); // timer
+extern void isr33(); //keyboard
 
 /* initialize IDT (empty for now) */
 void idt_init(void) {
@@ -41,6 +43,8 @@ void idt_init(void) {
     idt_set_entry(8,  isr8);
     idt_set_entry(13, isr13);
     idt_set_entry(14, isr14);
+    idt_set_entry(32, isr32);
+    idt_set_entry(33, isr33);
 
     idt_load(&idt_reg);
 }

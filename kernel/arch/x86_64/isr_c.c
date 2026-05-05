@@ -1,6 +1,7 @@
 #include <kernel/panic.h>
 #include <arch/isr.h>
 #include <arch/irh.h>
+#include <arch/irq.h>
 
 static const char* exception_names[] = {
     "Divide by Zero",              // 0
@@ -36,6 +37,13 @@ static isr_handler_fn handlers[256] = {
 };
 
 void isr_handler(struct isr_frame* f) {
+
+    /* hardware interrupts */
+    if (f->vector >= 32 && f->vector < 48) {
+        irq_handler(f);
+        return;
+    }
+
     /* Dispatch if handler exists */
     if (f->vector < 256 && handlers[f->vector]) {
         handlers[f->vector](f);
@@ -53,4 +61,12 @@ void isr_handler(struct isr_frame* f) {
           (int)f->vector,
           name,
           (void*)f->rip);
+}
+
+void enable_interrupt(){
+    __asm__ __volatile__ ("sti");
+}
+
+void disable_interrupt(){
+    __asm__ __volatile__ ("cli");
 }

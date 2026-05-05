@@ -63,6 +63,27 @@ static phys_addr_t get_table_if_present(phys_addr_t table, uint64_t index) {
     return 0;
 }
 
+int map_page_2mb(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
+    phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt));
+    if (!pdpt) return -1;
+
+    phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt));
+    if (!pd) return -1;
+
+    virt_addr_t* vpd = phys_to_virt(pd);
+    uint64_t current_entry = vpd[PD_IDX(virt)];
+
+    if (current_entry & PAGE_PRESENT) {
+        if ((current_entry & PAGE_ADDR_MASK) == (phys & PAGE_ADDR_MASK)) {
+            return 0; 
+        }
+        return -2;
+    }
+
+    vpd[PD_IDX(virt)] = (phys & PAGE_ADDR_MASK) | flags | PAGE_HUGE;
+    return 0;
+}
+
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
     phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt));
     if (!pdpt) return -1;
@@ -186,10 +207,10 @@ void init_paging(uint64_t mb2_addr) {
 
     map_kernel_elf_sections(kernel_pml4, mb2_addr);
 
-    uint64_t total = align_down(get_pmm_total_manage(), PAGE_SIZE);
+    uint64_t total = align_up(get_pmm_total_manage(), 0x200000);
 
-    for (uint64_t i = 0; i < total; i += PAGE_SIZE) {
-        if (map_page(kernel_pml4,
+    for (uint64_t i = 0; i < total; i += 0x200000) {
+        if (map_page_2mb(kernel_pml4,
                      NEW_HDDM + i,
                      i,
                      PAGE_PRESENT | PAGE_WRITE | PAGE_NX) != 0)
