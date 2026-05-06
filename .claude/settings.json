@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd ~ && pwd && find . -name \"extron\" -type d 2>/dev/null | head -5)",
+      "Read(//c/Users/Sirjan Hansda/**)",
+      "Bash(find / -name \"extron\" -type d 2>/dev/null | head -5)",
+      "Read(///wsl.localhost/Ubuntu//**)",
+      "Bash(ls -la \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\sirjan_hansda\\\\extron\")",
+      "Bash(cd \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\sirjan_hansda\\\\extron\")",
+      "Read(///wsl.localhost/Ubuntu/wsl.localhost/Ubuntu/home/sirjan_hansda/**)",
+      "Bash(cd \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\sirjan_hansda\\\\extron\" && find . -type f \\\\\\( -name \"*.c\" -o -name \"*.h\" \\\\\\) | wc -l)",
+      "Bash(cd \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\sirjan_hansda\\\\extron\" && find ./.claude -type f)",
+      "Read(///wsl.localhost/Ubuntu/wsl.localhost/Ubuntu/home/sirjan_hansda/extron/**)",
+      "Read(//home/sirjan_hansda/extron/**)",
+      "Read(///wsl.localhost/Ubuntu/home/sirjan_hansda/extron/**)",
+      "Read(//home/sirjan_hansda/extron/kernel/**)",
+      "Read(///wsl.localhost/Ubuntu/home/sirjan_hansda/extron/kernel/**)",
+      "Read(//home/sirjan_hansda/extron/kernel/mm/**)",
+      "Read(///wsl.localhost/Ubuntu/home/sirjan_hansda/extron/kernel/mm/**)",
+      "Read(//home/sirjan_hansda/extron/kernel/arch/x86_64/**)",
+      "Read(///wsl.localhost/Ubuntu/home/sirjan_hansda/extron/kernel/arch/x86_64/**)",
+      "Read(//home/sirjan_hansda/extron/kernel/arch/x86_64/include/arch/**)",
+      "Read(///wsl.localhost/Ubuntu/home/sirjan_hansda/extron/kernel/arch/x86_64/include/arch/**)"
+    ]
+  }
+}

@@ -32,8 +32,8 @@ void kernel_stage1(uint64_t mb2_addr) {
     idt_init();
     pic_remap();
     init_pmm(mb2_addr);
-    init_paging(mb2_addr);
     gdt_reload();
+    init_paging(mb2_addr);
     vmm_init();
 
     // Prepare the new stack for Stage 2

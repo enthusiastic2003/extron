@@ -1,0 +1,3 @@
+build/
+iso/boot/kernel.elf
+myos.iso

@@ -40,11 +40,15 @@ struct multiboot_tag_elf_sections* find_elf_sections(uint64_t mb2_addr) {
     return NULL;
 }
 
-static phys_addr_t get_next_table(phys_addr_t table, uint64_t index) {
+/* -------- FIXED: USER BIT HANDLING -------- */
+static phys_addr_t get_next_table(phys_addr_t table, uint64_t index, uint64_t flags) {
     virt_addr_t* t = phys_to_virt(table);
 
-    if (t[index] & PAGE_PRESENT)
+    if (t[index] & PAGE_PRESENT) {
+        if (flags & PAGE_USER)
+            t[index] |= PAGE_USER;  // upgrade existing entry if needed
         return t[index] & PAGE_ADDR_MASK;
+    }
 
     phys_addr_t new_phys = (phys_addr_t)pmm_alloc_page();
     if (!new_phys) return 0;
@@ -52,7 +56,7 @@ static phys_addr_t get_next_table(phys_addr_t table, uint64_t index) {
     virt_addr_t* v = phys_to_virt(new_phys);
     for (int i = 0; i < 512; i++) v[i] = 0;
 
-    t[index] = new_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    t[index] = new_phys | PAGE_PRESENT | PAGE_WRITE | (flags & PAGE_USER);
     return new_phys;
 }
 
@@ -64,10 +68,10 @@ static phys_addr_t get_table_if_present(phys_addr_t table, uint64_t index) {
 }
 
 int map_page_2mb(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
-    phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt));
+    phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt), flags);
     if (!pdpt) return -1;
 
-    phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt));
+    phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt), flags);
     if (!pd) return -1;
 
     virt_addr_t* vpd = phys_to_virt(pd);
@@ -85,20 +89,19 @@ int map_page_2mb(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags
 }
 
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
-    phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt));
+    phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt), flags);
     if (!pdpt) return -1;
 
-    phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt));
+    phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt), flags);
     if (!pd) return -1;
 
-    phys_addr_t pt = get_next_table(pd, PD_IDX(virt));
+    phys_addr_t pt = get_next_table(pd, PD_IDX(virt), flags);
     if (!pt) return -1;
 
     virt_addr_t* vpt = phys_to_virt(pt);
     uint64_t current_entry = vpt[PT_IDX(virt)];
 
     if (current_entry & PAGE_PRESENT) {
-        // If it's already mapped to the SAME physical address, just return success.
         if ((current_entry & PAGE_ADDR_MASK) == (phys & PAGE_ADDR_MASK)) {
             return 0; 
         }
@@ -108,9 +111,6 @@ int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
     vpt[PT_IDX(virt)] = (phys & PAGE_ADDR_MASK) | flags;
     return 0;
 }
-
-
-
 
 phys_addr_t virt_to_phys(pml4_t pml4, virt_addr_t virt) {
     phys_addr_t pdpt = get_table_if_present(pml4, PML4_IDX(virt));
@@ -164,7 +164,6 @@ phys_addr_t kvirt_to_phys(virt_addr_t v) {
     return virt_to_phys(kernel_pml4, v);
 }
 
-
 void map_kernel_elf_sections(uint64_t pml4, uint64_t mb2_addr) {
     struct multiboot_tag_elf_sections* elf_tag = find_elf_sections(mb2_addr);
     if (!elf_tag) panic("Paging: ELF sections not found");
@@ -188,7 +187,6 @@ void map_kernel_elf_sections(uint64_t pml4, uint64_t mb2_addr) {
             if (res != 0)
                 panic("Kernel ELF mapping failed for virt %p (res: %d)", (void*)v, res);
         }
-
     }
 }
 

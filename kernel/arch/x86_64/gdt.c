@@ -8,7 +8,7 @@ void gdt_reload(void) {
     
     // Size of your GDT in bytes, minus 1. 
     // If you have 3 entries (Null, Code, Data) * 8 bytes = 24. Limit = 23.
-    gdt_reg.limit = 23; 
+    gdt_reg.limit = 39; 
     
     // &gdt64 evaluates to the 0xFFFFFFFF80... virtual address
     gdt_reg.base = (uint64_t)&gdt64; 

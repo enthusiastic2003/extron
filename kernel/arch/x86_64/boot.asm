@@ -128,13 +128,25 @@ enable_long_mode:
 section .rodata
 global gdt64
 align 8
+
 gdt64:
     dq 0 ; Null descriptor
+
 .code: equ $ - gdt64
-    dq (1<<43)|(1<<44)|(1<<47)|(1<<53) ; Executable | Code | Present | 64-bit
+    dq (1<<43)|(1<<44)|(1<<47)|(1<<53)              ; kernel code
+
+.data: equ $ - gdt64
+    dq (1<<44)|(1<<47)                             ; kernel data
+
+.udata: equ $ - gdt64
+    dq (1<<44)|(1<<47)|(3<<45)                     ; user data (DPL=3)
+
+.ucode: equ $ - gdt64
+    dq (1<<43)|(1<<44)|(1<<47)|(1<<53)|(3<<45)     ; user code (DPL=3)
+
 .pointer:
     dw $ - gdt64 - 1
-    dq gdt64 - KERNEL_VMA ; Physical address of the GDT!
+    dq gdt64 - KERNEL_VMA
 
 
 ; --- 64-Bit Kernel Entry ---
