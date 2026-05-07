@@ -1,0 +1,14 @@
+TARFS: Found module 'initrd' at 0xffff800000114000 - 0xffff800000116800
+--- TARFS File List ---
+File: ./ (Size: 0 bytes)
+File: ./test.txt (Size: 43 bytes)
+-----------------------
+Opened file: ./test.txt
+File size: 43 bytes
+Content:
+Hello from the tarfs! This is a test file.
+
+sad
+Current Time is 9 seconds after boot
+asdasd
+Current Time is 16 seconds after boot

@@ -36,19 +36,25 @@ $(BUILD)/kernel.elf: $(OBJ)
 	$(LD) -T kernel/linker.ld -o $@ $(OBJ) -nostdlib
 
 # --- ISO ---
-iso: $(BUILD)/kernel.elf
+iso: $(BUILD)/kernel.elf $(BUILD)/initrd.tar
 	mkdir -p iso/boot/grub
 	cp $(BUILD)/kernel.elf iso/boot/kernel.elf
+	cp $(BUILD)/initrd.tar iso/boot/initrd.tar
 	cp boot/grub/grub.cfg iso/boot/grub/grub.cfg
 	grub-mkrescue -o myos.iso iso
 
+# --- Initrd ---
+$(BUILD)/initrd.tar: $(shell find initrd -type f)
+	mkdir -p $(BUILD)
+	tar -cf $(BUILD)/initrd.tar -C initrd .
+
 # --- Run (QEMU helper) ---
 run: all
-	qemu-system-x86_64 -cdrom myos.iso
+	qemu-system-x86_64 -cdrom myos.iso -serial file:kernel.log
 
 # --- Debug (QEMU + GDB stub) ---
 debug: all
-	qemu-system-x86_64 -cdrom myos.iso -s -S
+	qemu-system-x86_64 -cdrom myos.iso -s -S -serial file:kernel.log
 
 # --- Clean ---
 clean:

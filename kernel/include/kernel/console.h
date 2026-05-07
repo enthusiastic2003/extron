@@ -29,6 +29,9 @@ static inline char vga_entry_color(enum vga_color fg, enum vga_color bg) {
 void kprintf(const char* s, ...);
 void kcprintf(const char* s, const char color, ...);
 void kvprintf(const char* fmt, char color, ...);
+void clear_screen(char color);
+void set_cursor(int x, int y);
 void set_console_write_loc(uint64_t vga_offset);
+void init_serial(void);
 
 #endif

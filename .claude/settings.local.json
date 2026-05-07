@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls -la /home/sirjan_hansda/ 2>&1 | head -20)",
-      "Read(///wsl.localhost/Ubuntu/home/**)"
-    ]
-  }
-}

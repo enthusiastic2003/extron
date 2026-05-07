@@ -144,6 +144,10 @@ gdt64:
 .ucode: equ $ - gdt64
     dq (1<<43)|(1<<44)|(1<<47)|(1<<53)|(3<<45)     ; user code (DPL=3)
 
+.tss: equ $ - gdt64
+    dq 0    ; TSS descriptor low  (patched at runtime by tss_init)
+    dq 0    ; TSS descriptor high (patched at runtime by tss_init)
+
 .pointer:
     dw $ - gdt64 - 1
     dq gdt64 - KERNEL_VMA
