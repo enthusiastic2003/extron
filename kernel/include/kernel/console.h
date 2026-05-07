@@ -32,6 +32,5 @@ void kvprintf(const char* fmt, char color, ...);
 void clear_screen(char color);
 void set_cursor(int x, int y);
 void set_console_write_loc(uint64_t vga_offset);
-void init_serial(void);
 
 #endif

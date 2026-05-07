@@ -15,6 +15,7 @@
 #include <arch/isr.h>
 #include <kernel/fs/tar.h>
 #include <kernel/klibc/string.h>
+#include <kernel/drivers/serial.h>
 
 void kernel_stage2(uint64_t mb2_addr);
 
