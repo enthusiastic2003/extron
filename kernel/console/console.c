@@ -238,3 +238,8 @@ void set_cursor(int x, int y) {
     cursor_x = x;
     cursor_y = y;
 }
+
+/* --- raw byte output used by syscall write --- */
+void console_putc(char c) {
+    putc(c, 0x0F);
+}

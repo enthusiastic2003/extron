@@ -17,6 +17,7 @@
 #include <kernel/klibc/string.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/proc/exec.h>
+#include <kernel/proc/syscall.h>
 
 void kernel_stage2(uint64_t mb2_addr);
 
@@ -95,6 +96,8 @@ void kernel_stage2(uint64_t mb2_addr) {
     tss_init(KERNEL_STACK_RANGE_START + KERNEL_STACK_GUARD + KERNEL_STACK_SIZE);
     kprintf("TSS: loaded (RSP0 = %p)\n",
             (void*)(KERNEL_STACK_RANGE_START + KERNEL_STACK_GUARD + KERNEL_STACK_SIZE));
+
+    syscall_init();
 
     init_devices();
     tar_init(mb2_addr);
