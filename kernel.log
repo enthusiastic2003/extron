@@ -1,5 +1,5 @@
 --- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0012c000, End=0x0012e800, Cmdline="initrd"
+Module Found: Start=0x00115000, End=0x00117800, Cmdline="initrd"
 Memory Map:
   Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
   Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
@@ -9,7 +9,7 @@ Memory Map:
   Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
   Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
 Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
-PMM Initialized! Bitmap at 0x000000000012f000, Size: 4096 bytes
+PMM Initialized! Bitmap at 0x0000000000118000, Size: 4096 bytes
 Paging initialized.
 VMM: Bitmap initialized (4194304 bytes)
 VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
@@ -17,10 +17,10 @@ Transitioning to Stage 2...
 --- Kernel Stage 2: Execution Phase ---
 Successfully running on high-half virtual stack.
 TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000012c000 - 0xffff80000012e800
+TARFS: Found module 'initrd' at 0xffff800000115000 - 0xffff800000117800
 --- TARFS File List ---
 File: ./ (Size: 0 bytes)
-File: ./test (Size: 6336 bytes)
+File: ./test (Size: 4888 bytes)
 File: ./test.txt (Size: 43 bytes)
 -----------------------
 Opened file: ./test.txt
@@ -28,10 +28,24 @@ File size: 43 bytes
 Content:
 Hello from the tarfs! This is a test file.
 
+[SCHED] Scheduler initialized
 [LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 108 | memsz 108 | flags R-X
 [LOADER] Binary loaded, entry point: 0x0000000000400000
-[EXEC] proc=0xffffc00000018060  kstack=0xffffc00000010000..0xffffc00000018000
+[SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007ffffffff000)
 Hello from userland!!
 Kernel Here: Completed user's request!!
-fasdfasd
-Current Time is 5 seconds after boot
+
+Current Time is 2 seconds after boot
+
+Current Time is 2 seconds after boot
+
+Current Time is 3 seconds after boot
+
+Current Time is 4 seconds after boot
+
+Current Time is 6 seconds after boot
+
+Current Time is 11 seconds after boot
+
+Current Time is 16 seconds after boot
+asdasd

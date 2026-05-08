@@ -121,6 +121,7 @@ syscall_entry:
 
     ; --- restore user RSP from proc struct (r10 is caller-saved) ---
     mov r10, [current_proc]
+    mov [r10 + PROC_KERNEL_RSP], rsp    ; ← save kernel RSP back
     mov rsp, [r10 + PROC_USER_RSP]
 
     ; --- return to ring 3 ---

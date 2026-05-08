@@ -16,12 +16,18 @@ void pic_eoi(uint8_t irq) {
 
 void irq_handler(struct isr_frame* f) {
     uint8_t irq = f->vector - 32;
-    
+
+    /*
+     * Send EOI *before* dispatching.  The timer handler now calls
+     * schedule() which may context-switch away from this stack —
+     * if we haven't ACK'd the PIC yet, future IRQs on this line
+     * will be masked until we come back, starving the timer.
+     */
+    pic_eoi(irq);
+
     if (irq_handlers[irq]) {
         irq_handlers[irq](f);
     }
-
-    pic_eoi(irq);
 }
 
 

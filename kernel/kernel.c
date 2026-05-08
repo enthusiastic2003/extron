@@ -18,6 +18,7 @@
 #include <kernel/drivers/serial.h>
 #include <kernel/proc/exec.h>
 #include <kernel/proc/syscall.h>
+#include <kernel/proc/sched.h>
 
 void kernel_stage2(uint64_t mb2_addr);
 
@@ -105,11 +106,21 @@ void kernel_stage2(uint64_t mb2_addr) {
     enable_interrupt();
 
     read_test_file();
-    exec("./test");
 
-    
+    /* --- Scheduler bootstrap --- */
+    sched_init();
+
+    struct proc *init = create_init_proc("./test");
+    if (init) {
+        sched_add(init);
+    } else {
+        kprintf("Failed to create init process!\n");
+    }
+
+    sched_start();  /* never returns */
+
+    /* Should never reach here */
     while (1) {
-        process_keyboard();
         __asm__ volatile ("hlt");
     }
 }

@@ -4,10 +4,10 @@ LD      = x86_64-elf-gcc
 
 CFLAGS  = -ffreestanding -O2 -Wall -Wextra -mcmodel=large \
           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib \
-          -Ikernel/include -Ikernel/arch/x86_64/include -g
+          -Ikernel/include -Ikernel/arch/x86_64/include
 
 USER_CFLAGS = -ffreestanding -O2 -nostdlib -mno-red-zone \
-              -fno-stack-protector -no-pie -Wall -Wextra -g
+              -fno-stack-protector -no-pie -Wall -Wextra
 
 BUILD   = build
 
