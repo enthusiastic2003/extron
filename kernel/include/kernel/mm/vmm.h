@@ -1,10 +1,10 @@
 #ifndef VMM_H
 #define VMM_H
+#
 
-
-typedef uint64_t virt_addr_t;
 #include <stdint.h>
 #include <kernel/mm/pmm.h>
+typedef uint64_t virt_addr_t;
 
 #define KERNEL_VMA 0xFFFFFFFF80000000ULL
 #define NEW_HDDM 0xFFFF800000000000ULL

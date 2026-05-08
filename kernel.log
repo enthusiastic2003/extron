@@ -1,6 +1,26 @@
-TARFS: Found module 'initrd' at 0xffff800000114000 - 0xffff800000116800
+--- Kernel Stage 1: Initialization ---
+Module Found: Start=0x00115000, End=0x00117800, Cmdline="initrd"
+Memory Map:
+  Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
+  Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
+  Region: Addr=0x00000000000f0000, Length=0x0000000000010000 bytes, Type=2
+  Region: Addr=0x0000000000100000, Length=0x0000000007ee0000 bytes, Type=1
+  Region: Addr=0x0000000007fe0000, Length=0x0000000000020000 bytes, Type=2
+  Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
+  Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
+Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
+PMM Initialized! Bitmap at 0x0000000000118000, Size: 4096 bytes
+Paging initialized.
+VMM: Bitmap initialized (4194304 bytes)
+VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
+Transitioning to Stage 2...
+--- Kernel Stage 2: Execution Phase ---
+Successfully running on high-half virtual stack.
+TSS: loaded (RSP0 = 0xffffd00000401000)
+TARFS: Found module 'initrd' at 0xffff800000115000 - 0xffff800000117800
 --- TARFS File List ---
 File: ./ (Size: 0 bytes)
+File: ./test (Size: 4776 bytes)
 File: ./test.txt (Size: 43 bytes)
 -----------------------
 Opened file: ./test.txt
@@ -8,3 +28,14 @@ File size: 43 bytes
 Content:
 Hello from the tarfs! This is a test file.
 
+[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 68 | memsz 68 | flags R-X
+[LOADER] Binary loaded, entry point: 0x0000000000400000
+
+=== KERNEL PANIC ===
+
+General Protection Fault (#GP)
+err=00000000
+RIP=0x0000000000400000
+
+
+System halted.

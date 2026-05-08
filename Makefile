@@ -6,6 +6,9 @@ CFLAGS  = -ffreestanding -O2 -Wall -Wextra -mcmodel=large \
           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib \
           -Ikernel/include -Ikernel/arch/x86_64/include
 
+USER_CFLAGS = -ffreestanding -O2 -nostdlib -mno-red-zone \
+              -fno-stack-protector -no-pie -Wall -Wextra
+
 BUILD   = build
 
 # --- Source discovery ---
@@ -43,8 +46,12 @@ iso: $(BUILD)/kernel.elf $(BUILD)/initrd.tar
 	cp boot/grub/grub.cfg iso/boot/grub/grub.cfg
 	grub-mkrescue -o myos.iso iso
 
+# --- User binaries ---
+initrd/test: user/test.c user/user.ld
+	$(CC) $(USER_CFLAGS) -T user/user.ld -o $@ user/test.c
+
 # --- Initrd ---
-$(BUILD)/initrd.tar: $(shell find initrd -type f)
+$(BUILD)/initrd.tar: initrd/test $(shell find initrd -type f)
 	mkdir -p $(BUILD)
 	tar -cf $(BUILD)/initrd.tar -C initrd .
 
@@ -58,6 +65,6 @@ debug: all
 
 # --- Clean ---
 clean:
-	rm -rf $(BUILD) iso myos.iso
+	rm -rf $(BUILD) iso myos.iso initrd/test
 
 .PHONY: all iso run debug clean

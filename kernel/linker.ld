@@ -32,5 +32,13 @@ SECTIONS {
         *(.bss*)
     }
 
-    _kernel_end = .;             
+    /DISCARD/ : {
+    *(.eh_frame*)
+    *(.eh_frame_hdr*)
+    *(.note*)
+    *(.comment)
+    *(.gcc_except_table*)
+    }            
+
+    _kernel_end = .;
 }

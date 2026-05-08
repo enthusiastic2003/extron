@@ -38,10 +38,13 @@ void init_paging(uint64_t mb2_addr);
 
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags);
 int unmap_page(pml4_t pml4, virt_addr_t virt);
-phys_addr_t virt_to_phys(pml4_t pml4, virt_addr_t virt);
 
 int kmap(virt_addr_t v, phys_addr_t p, uint64_t flags);
 int kunmap(virt_addr_t v);
 phys_addr_t kvirt_to_phys(virt_addr_t v);
-
+uint64_t* phys_to_virt_hhdm(phys_addr_t p);
+uint64_t* virt_to_phys_hhdm(virt_addr_t v);
+phys_addr_t create_user_pml4(void);
+void load_cr3(uint64_t phys_addr);
+void flush_tlb(void);
 #endif

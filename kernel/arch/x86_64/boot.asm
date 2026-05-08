@@ -130,24 +130,18 @@ global gdt64
 align 8
 
 gdt64:
-    dq 0 ; Null descriptor
-
+    dq 0
 .code: equ $ - gdt64
     dq (1<<43)|(1<<44)|(1<<47)|(1<<53)              ; kernel code
-
 .data: equ $ - gdt64
-    dq (1<<44)|(1<<47)                             ; kernel data
-
+    dq (1<<41)|(1<<44)|(1<<47)                      ; kernel data (+ W)
 .udata: equ $ - gdt64
-    dq (1<<44)|(1<<47)|(3<<45)                     ; user data (DPL=3)
-
+    dq (1<<41)|(1<<44)|(1<<47)|(3<<45)              ; user data   (+ W)
 .ucode: equ $ - gdt64
-    dq (1<<43)|(1<<44)|(1<<47)|(1<<53)|(3<<45)     ; user code (DPL=3)
-
+    dq (1<<43)|(1<<44)|(1<<47)|(1<<53)|(3<<45)      ; user code
 .tss: equ $ - gdt64
-    dq 0    ; TSS descriptor low  (patched at runtime by tss_init)
-    dq 0    ; TSS descriptor high (patched at runtime by tss_init)
-
+    dq 0
+    dq 0
 .pointer:
     dw $ - gdt64 - 1
     dq gdt64 - KERNEL_VMA

@@ -16,11 +16,11 @@
 #include <kernel/fs/tar.h>
 #include <kernel/klibc/string.h>
 #include <kernel/drivers/serial.h>
+#include <kernel/proc/exec.h>
 
 void kernel_stage2(uint64_t mb2_addr);
 
 void init_devices(){
-    init_serial();
     init_kbd();
     init_timer(100);
 }
@@ -51,6 +51,8 @@ void read_test_file(){
  * Runs on the temporary boot stack.
  */
 void kernel_stage1(uint64_t mb2_addr) {
+        init_serial();
+
     kprintf("--- Kernel Stage 1: Initialization ---\n");
 
 
@@ -100,6 +102,8 @@ void kernel_stage2(uint64_t mb2_addr) {
     enable_interrupt();
 
     read_test_file();
+    exec("./test");
+
     
     while (1) {
         process_keyboard();

@@ -10,15 +10,19 @@
 static uint64_t g_hhdm_offset = 0;
 static phys_addr_t kernel_pml4;
 
-static inline uint64_t* phys_to_virt(phys_addr_t p) {
+uint64_t* phys_to_virt_hhdm(phys_addr_t p) {
     return (uint64_t*)(p + g_hhdm_offset);
 }
 
-static inline void load_cr3(uint64_t phys_addr) {
+uint64_t* virt_to_phys_hhdm(virt_addr_t v) {
+    return (uint64_t*)(v - g_hhdm_offset);
+}
+
+void load_cr3(uint64_t phys_addr) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(phys_addr) : "memory");
 }
 
-static inline void flush_tlb(void) {
+void flush_tlb(void) {
     uint64_t cr3_val;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
     __asm__ volatile("mov %0, %%cr3" : : "r"(cr3_val) : "memory");
@@ -42,7 +46,7 @@ struct multiboot_tag_elf_sections* find_elf_sections(uint64_t mb2_addr) {
 
 /* -------- FIXED: USER BIT HANDLING -------- */
 static phys_addr_t get_next_table(phys_addr_t table, uint64_t index, uint64_t flags) {
-    virt_addr_t* t = phys_to_virt(table);
+    virt_addr_t* t = phys_to_virt_hhdm(table);
 
     if (t[index] & PAGE_PRESENT) {
         if (flags & PAGE_USER)
@@ -53,7 +57,7 @@ static phys_addr_t get_next_table(phys_addr_t table, uint64_t index, uint64_t fl
     phys_addr_t new_phys = (phys_addr_t)pmm_alloc_page();
     if (!new_phys) return 0;
 
-    virt_addr_t* v = phys_to_virt(new_phys);
+    virt_addr_t* v = phys_to_virt_hhdm(new_phys);
     for (int i = 0; i < 512; i++) v[i] = 0;
 
     t[index] = new_phys | PAGE_PRESENT | PAGE_WRITE | (flags & PAGE_USER);
@@ -61,7 +65,7 @@ static phys_addr_t get_next_table(phys_addr_t table, uint64_t index, uint64_t fl
 }
 
 static phys_addr_t get_table_if_present(phys_addr_t table, uint64_t index) {
-    virt_addr_t* t = phys_to_virt(table);
+    virt_addr_t* t = phys_to_virt_hhdm(table);
     if (t[index] & PAGE_PRESENT)
         return t[index] & PAGE_ADDR_MASK;
     return 0;
@@ -74,7 +78,7 @@ int map_page_2mb(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags
     phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt), flags);
     if (!pd) return -1;
 
-    virt_addr_t* vpd = phys_to_virt(pd);
+    virt_addr_t* vpd = phys_to_virt_hhdm(pd);
     uint64_t current_entry = vpd[PD_IDX(virt)];
 
     if (current_entry & PAGE_PRESENT) {
@@ -98,7 +102,7 @@ int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
     phys_addr_t pt = get_next_table(pd, PD_IDX(virt), flags);
     if (!pt) return -1;
 
-    virt_addr_t* vpt = phys_to_virt(pt);
+    virt_addr_t* vpt = phys_to_virt_hhdm(pt);
     uint64_t current_entry = vpt[PT_IDX(virt)];
 
     if (current_entry & PAGE_PRESENT) {
@@ -113,22 +117,32 @@ int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
 }
 
 phys_addr_t virt_to_phys(pml4_t pml4, virt_addr_t virt) {
-    phys_addr_t pdpt = get_table_if_present(pml4, PML4_IDX(virt));
-    if (!pdpt) return 0;
+    uint64_t* pml4_v = phys_to_virt_hhdm(pml4);
+    uint64_t pml4e = pml4_v[PML4_IDX(virt)];
+    if (!(pml4e & PAGE_PRESENT)) return 0;
 
-    phys_addr_t pd = get_table_if_present(pdpt, PDPT_IDX(virt));
-    if (!pd) return 0;
+    uint64_t* pdpt_v = phys_to_virt_hhdm(pml4e & PAGE_ADDR_MASK);
+    uint64_t pdpte = pdpt_v[PDPT_IDX(virt)];
+    if (!(pdpte & PAGE_PRESENT)) return 0;
 
-    phys_addr_t pt = get_table_if_present(pd, PD_IDX(virt));
-    if (!pt) return 0;
+    /* 1 GB huge page at PDPT level */
+    if (pdpte & PAGE_HUGE)
+        return (pdpte & PAGE_ADDR_MASK) | (virt & 0x3FFFFFFF);  /* 30-bit offset */
 
-    virt_addr_t* vpt = phys_to_virt(pt);
-    uint64_t entry = vpt[PT_IDX(virt)];
+    uint64_t* pd_v = phys_to_virt_hhdm(pdpte & PAGE_ADDR_MASK);
+    uint64_t pde = pd_v[PD_IDX(virt)];
+    if (!(pde & PAGE_PRESENT)) return 0;
 
-    if (!(entry & PAGE_PRESENT))
-        return 0;
+    /* 2 MB huge page at PD level */
+    if (pde & PAGE_HUGE)
+        return (pde & PAGE_ADDR_MASK) | (virt & 0x1FFFFF);  /* 21-bit offset */
 
-    return entry & PAGE_ADDR_MASK;
+    uint64_t* pt_v = phys_to_virt_hhdm(pde & PAGE_ADDR_MASK);
+    uint64_t pte = pt_v[PT_IDX(virt)];
+    if (!(pte & PAGE_PRESENT)) return 0;
+
+    /* 4 KB page */
+    return (pte & PAGE_ADDR_MASK) | (virt & 0xFFF);  /* 12-bit offset */
 }
 
 int unmap_page(pml4_t pml4, virt_addr_t virt) {
@@ -141,7 +155,7 @@ int unmap_page(pml4_t pml4, virt_addr_t virt) {
     phys_addr_t pt = get_table_if_present(pd, PD_IDX(virt));
     if (!pt) return -1;
 
-    virt_addr_t* vpt = phys_to_virt(pt);
+    virt_addr_t* vpt = phys_to_virt_hhdm(pt);
 
     if (!(vpt[PT_IDX(virt)] & PAGE_PRESENT))
         return -1;
@@ -194,14 +208,26 @@ phys_addr_t allocate_table_zeroed() {
     phys_addr_t p = (phys_addr_t)pmm_alloc_page();
     if (!p) panic("Page table alloc failed");
 
-    uint64_t* v = phys_to_virt(p);
+    uint64_t* v = phys_to_virt_hhdm(p);
     for (int i = 0; i < 512; i++) v[i] = 0;
 
     return p;
 }
 
+void preinit_kernel_pml4_entries(phys_addr_t pml4) {
+    uint64_t* entries = phys_to_virt_hhdm(pml4);
+    for (int i = 256; i < 512; i++) {
+        if (entries[i] & PAGE_PRESENT) continue;
+
+        phys_addr_t pdpt = allocate_table_zeroed();
+        entries[i] = pdpt | PAGE_PRESENT | PAGE_WRITE;
+    }
+}
+
 void init_paging(uint64_t mb2_addr) {
     kernel_pml4 = allocate_table_zeroed();
+
+    preinit_kernel_pml4_entries(kernel_pml4);   // ← ADD THIS LINE
 
     map_kernel_elf_sections(kernel_pml4, mb2_addr);
 
@@ -227,4 +253,20 @@ void init_paging(uint64_t mb2_addr) {
         get_virtual_pmm_bitmap_location() + NEW_HDDM);
 
     kprintf("Paging initialized.\n");
+}
+
+phys_addr_t create_user_pml4(void) {
+    phys_addr_t new_pml4 = allocate_table_zeroed();
+    if (!new_pml4) return 0;
+
+    uint64_t* new_entries    = phys_to_virt_hhdm(new_pml4);
+    uint64_t* kernel_entries = phys_to_virt_hhdm(kernel_pml4);
+
+    /* Share kernel half — copy top-level entries 256-511 only */
+    for (int i = 256; i < 512; i++) {
+        new_entries[i] = kernel_entries[i];
+    }
+
+    /* Lower half (0-255) is already zero from allocate_table_zeroed */
+    return new_pml4;
 }
