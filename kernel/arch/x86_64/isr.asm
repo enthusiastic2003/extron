@@ -1,65 +1,104 @@
-global isr0
-global isr6
-global isr8
-global isr13
-global isr14
-global isr32
-global isr33
-global isr_common
+; ============================================================
+; ISR stubs for all 256 interrupt vectors
+;
+; Vectors with CPU-pushed error codes:
+;   8, 10, 11, 12, 13, 14, 17, 21, 29, 30
+; All others get a dummy error code pushed (0).
+; ============================================================
 
+global isr_stub_table
 extern isr_handler
 
 section .text
 bits 64
 
-; =========================
-; IRQs
-; =========================
-isr32:
-    push 0      ; fake error code
-    push 32     ; vector
+; ----- Macro: stub WITHOUT error code -----
+%macro ISR_NO_ERR 1
+isr_stub_%1:
+    push 0              ; dummy error code
+    push %1             ; vector number
     jmp isr_common
+%endmacro
 
-isr33:
-    push 0      ; fake error code
-    push 33     ; vector number
+; ----- Macro: stub WITH error code (CPU already pushed it) -----
+%macro ISR_ERR 1
+isr_stub_%1:
+    push %1             ; vector number (error code already on stack)
     jmp isr_common
-; =========================
-; NO ERROR CODE (fake it)
-; =========================
+%endmacro
 
-isr0:
-    push 0
-    push 0
-    jmp isr_common
+; ============================================================
+; Generate all 256 stubs
+; ============================================================
 
-isr6:
-    push 0
-    push 6
-    jmp isr_common
+; Exceptions 0-7: no error code
+ISR_NO_ERR 0
+ISR_NO_ERR 1
+ISR_NO_ERR 2
+ISR_NO_ERR 3
+ISR_NO_ERR 4
+ISR_NO_ERR 5
+ISR_NO_ERR 6
+ISR_NO_ERR 7
 
-; =========================
-; HAS ERROR CODE (CPU pushes it)
-; =========================
+; Exception 8: Double Fault (has error code)
+ISR_ERR 8
 
-isr8:
-    push 8
-    jmp isr_common
+; Exception 9: no error code
+ISR_NO_ERR 9
 
-isr13:
-    push 13
-    jmp isr_common
+; Exceptions 10-14: have error code
+ISR_ERR 10
+ISR_ERR 11
+ISR_ERR 12
+ISR_ERR 13
+ISR_ERR 14
 
-isr14:
-    push 14
-    jmp isr_common
+; Exceptions 15-16: no error code
+ISR_NO_ERR 15
+ISR_NO_ERR 16
 
-; =========================
-; COMMON HANDLER
-; =========================
+; Exception 17: Alignment Check (has error code)
+ISR_ERR 17
 
+; Exceptions 18-20: no error code
+ISR_NO_ERR 18
+ISR_NO_ERR 19
+ISR_NO_ERR 20
+
+; Exception 21: Control Protection (has error code)
+ISR_ERR 21
+
+; Exceptions 22-28: no error code
+ISR_NO_ERR 22
+ISR_NO_ERR 23
+ISR_NO_ERR 24
+ISR_NO_ERR 25
+ISR_NO_ERR 26
+ISR_NO_ERR 27
+ISR_NO_ERR 28
+
+; Exception 29: VMM Communication (has error code)
+ISR_ERR 29
+
+; Exception 30: Security Exception (has error code)
+ISR_ERR 30
+
+; Exception 31: reserved, no error code
+ISR_NO_ERR 31
+
+; IRQs and software interrupts 32-255: no error code
+%assign i 32
+%rep 224
+    ISR_NO_ERR i
+%assign i i+1
+%endrep
+
+; ============================================================
+; Common handler — saves all registers, calls C isr_handler
+; ============================================================
 isr_common:
-    ; save registers
+    ; save general-purpose registers
     push rax
     push rbx
     push rcx
@@ -76,10 +115,10 @@ isr_common:
     push r14
     push r15
 
-    mov rdi, rsp
+    mov rdi, rsp        ; arg1 = pointer to isr_frame
     call isr_handler
 
-    ; restore registers
+    ; restore general-purpose registers
     pop r15
     pop r14
     pop r13
@@ -96,5 +135,17 @@ isr_common:
     pop rbx
     pop rax
 
-    add rsp, 16     ; pop vector + error code
+    add rsp, 16         ; pop vector + error code
     iretq
+
+; ============================================================
+; Stub pointer table — used by idt_init() in C
+; ============================================================
+section .data
+align 8
+isr_stub_table:
+%assign i 0
+%rep 256
+    dq isr_stub_%+i
+%assign i i+1
+%endrep

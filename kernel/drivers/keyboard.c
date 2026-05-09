@@ -61,3 +61,26 @@ void process_keyboard(void) {
         }
     }
 }
+
+uint64_t kbd_read(char *buf, uint64_t count)
+{
+    uint64_t n = 0;
+
+    while (n < count && kbd_buf.tail != kbd_buf.head) {
+        uint8_t sc = kbd_buf.kb_buff[kbd_buf.tail];
+        kbd_buf.tail = (kbd_buf.tail + 1) % KEYBOARD_BUFFER_SIZE;
+
+        if (sc & 0x80)
+            continue;   // key release — skip
+        if (sc >= sizeof(scancode_to_ascii))
+            continue;   // out of table — skip
+
+        char c = scancode_to_ascii[sc];
+        if (!c)
+            continue;   // unmapped — skip
+
+        buf[n++] = c;
+    }
+
+    return n;
+}

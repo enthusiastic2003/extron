@@ -104,9 +104,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     tar_init(mb2_addr);
     init_irq(); 
     enable_interrupt();
-
-    read_test_file();
-
+    
     /* --- Scheduler bootstrap --- */
     sched_init();
 

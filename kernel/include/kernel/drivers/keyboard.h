@@ -15,4 +15,5 @@ struct keyboard_buffer {
 void init_kbd(void);
 void kbd_buf_push(uint8_t scancode);
 void process_keyboard(void);
+uint64_t kbd_read(char *buf, uint64_t count); // ← new
 #endif

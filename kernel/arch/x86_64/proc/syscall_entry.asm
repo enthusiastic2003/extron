@@ -120,9 +120,22 @@ syscall_entry:
     pop rcx         ; user RIP
 
     ; --- restore user RSP from proc struct (r10 is caller-saved) ---
-    mov r10, [current_proc]
-    mov [r10 + PROC_KERNEL_RSP], rsp    ; ← save kernel RSP back
-    mov rsp, [r10 + PROC_USER_RSP]
+    ; mov r10, [current_proc]
+    ; mov [r10 + PROC_KERNEL_RSP], rsp    ; ← save kernel RSP back
+    ; mov rsp, [r10 + PROC_USER_RSP]
 
     ; --- return to ring 3 ---
-    o64 sysret
+    ; o64 sysret
+
+    ; --- restore user RSP from proc struct ---
+    mov r10, [current_proc]
+    mov [r10 + PROC_KERNEL_RSP], rsp    ; save kernel RSP for next syscall
+    mov r10, [r10 + PROC_USER_RSP]      ; r10 = user RSP (don't switch yet)
+
+    ; --- build IRETQ frame on kernel stack, then return ---
+    push 0x1B       ; SS     = user data, RPL=3  (explicit — bypass SYSRET bug)
+    push r10        ; RSP    = user stack
+    push r11        ; RFLAGS (saved by SYSCALL)
+    push 0x23       ; CS     = user code, RPL=3
+    push rcx        ; RIP    (saved by SYSCALL)
+    iretq

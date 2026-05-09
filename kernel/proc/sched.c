@@ -22,8 +22,7 @@ struct proc *current_proc = NULL;
 static struct proc *run_queue_head = NULL;
 static struct proc *run_queue_tail = NULL;
 
-/* Idle context — used when no process is running (kernel bootstrap) */
-static struct cpu_context idle_context;
+
 
 /* ---------------------------------------------------------------
  * my_cpu — accessor for the currently running process

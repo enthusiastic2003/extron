@@ -21,5 +21,6 @@ static inline long write(int fd,
 
 void _start(void) {
     write(1, "Hello from userland!!\n", 22);
+    write(1, "Hello from userland! AGAIN!\n", 22);
     for (;;);
 }
