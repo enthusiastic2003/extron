@@ -10,6 +10,9 @@
 #include <kernel/console.h>
 #include <kernel/klibc/string.h>
 #include <kernel/proc/exec.h>
+
+#include <kernel/proc/proc.h>
+
 #include <stdbool.h>
 
 /* -------------------------------------------------------------
@@ -39,12 +42,12 @@ static spinlock_t   proc_table_lock  = SPINLOCK_INIT;
 static uint64_t     next_pid         = 0;
 
 void proc_table_init(void) {
-    spin_lock(&proc_table_lock);
+    irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++)
         proc_table[i] = NULL;
     proc_table_count = 0;
     next_pid         = 0;
-    spin_unlock(&proc_table_lock);
+    irq_spin_unlock(&proc_table_lock);
     kprintf("[PROC] Process table initialized (capacity %u)\n",
             (unsigned)MAX_PROCS);
 }
@@ -84,7 +87,7 @@ static void proc_table_remove_locked(struct proc *p) {
  * or callers must hold a higher-level lock across use.
  * ------------------------------------------------------------- */
 struct proc *proc_lookup(uint64_t pid) {
-    spin_lock(&proc_table_lock);
+    irq_spin_lock(&proc_table_lock);
     struct proc *found = NULL;
     for (size_t i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i] && proc_table[i]->pid == pid) {
@@ -92,7 +95,7 @@ struct proc *proc_lookup(uint64_t pid) {
             break;
         }
     }
-    spin_unlock(&proc_table_lock);
+    irq_spin_unlock(&proc_table_lock);
     return found;
 }
 
@@ -105,12 +108,12 @@ struct proc *proc_lookup(uint64_t pid) {
  * read-only enumeration: ps, signal broadcast, debug dumps.
  * ------------------------------------------------------------- */
 void proc_for_each(void (*fn)(struct proc *, void *), void *arg) {
-    spin_lock(&proc_table_lock);
+    irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i])
             fn(proc_table[i], arg);
     }
-    spin_unlock(&proc_table_lock);
+    irq_spin_unlock(&proc_table_lock);
 }
 
 /* -------------------------------------------------------------
@@ -124,15 +127,15 @@ struct proc *proc_alloc(struct proc *parent) {
     memset(p, 0, sizeof(*p));
 
     /* Reserve a slot and assign PID atomically */
-    spin_lock(&proc_table_lock);
+    irq_spin_lock(&proc_table_lock);
     if (!proc_table_add_locked(p)) {
-        spin_unlock(&proc_table_lock);
+        irq_spin_unlock(&proc_table_lock);
         kprintf("[PROC] Process table full, cannot allocate\n");
         kfree(p);
         return NULL;
     }
     p->pid = next_pid++;
-    spin_unlock(&proc_table_lock);
+    irq_spin_unlock(&proc_table_lock);
 
     p->state = PROC_UNUSED;
 
@@ -189,9 +192,9 @@ void proc_destroy(struct proc *p) {
 
     /* Then remove from the global process table so PID lookups
        can no longer hand it out. */
-    spin_lock(&proc_table_lock);
+    irq_spin_lock(&proc_table_lock);
     proc_table_remove_locked(p);
-    spin_unlock(&proc_table_lock);
+    irq_spin_unlock(&proc_table_lock);
 
     proc_free(p);
 }
@@ -251,15 +254,17 @@ void sleep(void *chan, spinlock_t *lk) {
     struct proc *p = my_cpu();
     // KASSERT(p != NULL);
     // KASSERT(p->state == PROC_RUNNING);
-
+    //  kprintf("We are in sleep\n");
     irq_spin_lock(&proc_table_lock);
     irq_spin_unlock(lk);
 
     p->chan = chan;
     proc_set_sleeping(p);
+    // kprintf("We are in going into schedule\n");
 
     irq_spin_unlock(&proc_table_lock);
     schedule();
+    // kprintf("Returned from schedule()\n");
 
     /* --- woken --- */
     irq_spin_lock(lk);
@@ -284,3 +289,30 @@ void wakeup(void *chan) {
     irq_spin_unlock(&proc_table_lock);
 }
 
+
+
+void proc_dump_table(void) {
+    irq_spin_lock(&proc_table_lock);
+
+    kprintf("\n");
+    kprintf("========================================\n");
+    kprintf("PID STATE CR3 CHAN\n");
+    kprintf("----------------------------------------\n");
+
+    for (size_t i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = proc_table[i];
+        if (!p)
+            continue;
+
+        kprintf("%llu ", p->pid);
+        kprintf("%s ", proc_state_str(p->state));
+        kprintf("0x%llx ", p->cr3);
+        kprintf("0x%llx\n", (uint64_t)p->chan);
+    }
+
+    kprintf("----------------------------------------\n");
+    kprintf("TOTAL: %llu\n", proc_table_count);
+    kprintf("========================================\n");
+
+    irq_spin_unlock(&proc_table_lock);
+}

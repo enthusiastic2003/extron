@@ -18,6 +18,7 @@ void           sched_start(void);               /* launch first process (never r
 /* Returns the currently running process.
  * All C code should use this instead of touching any global. */
 struct proc   *my_cpu(void);
+void proc_first_run(void);
 
 /* Assembly routine in switch.asm */
 extern void    context_switch(struct cpu_context *old, struct cpu_context *new_ctx);

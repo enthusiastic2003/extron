@@ -19,6 +19,7 @@
 #include <kernel/proc/exec.h>
 #include <kernel/proc/syscall.h>
 #include <kernel/proc/sched.h>
+#include <kernel/proc/proc.h>
 
 void kernel_stage2(uint64_t mb2_addr);
 
@@ -74,12 +75,13 @@ void kernel_stage1(uint64_t mb2_addr) {
     // Perform the stack switch and jump to Stage 2
     // We pass mb2_addr in RDI as the first argument to kernel_stage2
     __asm__ volatile (
-        "mov %0, %%rsp\n\t"    // Set new stack pointer
-        "mov %%rsp, %%rbp\n\t" // Initialize base pointer
-        "push $0\n\t"          // Null return address for stack traces
-        "mov %2, %%rdi\n\t"    // Pass mb2_addr to RDI (first argument)
-        "jmp %1"               // Jump to stage 2
-        : : "r"(new_stack_top), "r"(kernel_stage2), "r"(mb2_addr) : "memory"
+        "mov %0, %%rsp\n\t"
+        "mov %%rsp, %%rbp\n\t"
+        "push $0\n\t"
+        "jmp *%1"
+        :
+        : "r"(new_stack_top), "r"(kernel_stage2), "D"(mb2_addr)
+        : "memory"
     );
 
     // We should never reach here
@@ -106,11 +108,16 @@ void kernel_stage2(uint64_t mb2_addr) {
     enable_interrupt();
     
     /* --- Scheduler bootstrap --- */
+    proc_table_init();
     sched_init();
 
     struct proc *init = create_init_proc("./test");
+    struct proc* init2 =  load_executable_from_binary( "./test2", init);
+
+    
     if (init) {
         sched_add(init);
+        sched_add(init2);
     } else {
         kprintf("Failed to create init process!\n");
     }

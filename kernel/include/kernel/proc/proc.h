@@ -85,6 +85,17 @@ struct proc {
     struct proc       *next;        /* run-queue link */
 };
 
+static const char *proc_state_str(enum proc_state s) {
+    switch (s) {
+        case PROC_UNUSED:    return "UNUSED";
+        case PROC_RUNNABLE:  return "RUNNABLE";
+        case PROC_RUNNING:   return "RUNNING";
+        case PROC_SLEEPING:  return "SLEEPING";
+        case PROC_ZOMBIE:    return "ZOMBIE";
+        default:             return "UNKNOWN";
+    }
+}
+
 /* -------------------------------------------------------------
  * Process management
  * ------------------------------------------------------------- */
@@ -107,5 +118,7 @@ void proc_set_zombie(struct proc *p);
 
 void wakeup(void *chan);
 void sleep(void *chan, spinlock_t *lk);
+void proc_table_init(void);
+void proc_dump_table(void);
 
 #endif /* PROC_H */

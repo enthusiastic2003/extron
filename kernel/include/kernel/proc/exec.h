@@ -7,5 +7,6 @@
 
 void enter_userspace(uint64_t entry, uint64_t user_rsp);
 struct proc* create_init_proc(const char* binary_path);
+struct proc* load_executable_from_binary(const char* binary_path, struct proc* parent);
 
 #endif // !EXEC_H
