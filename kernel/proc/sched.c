@@ -217,7 +217,7 @@ void sched_start(void) {
 
 void proc_first_run(void) {
     struct proc* current_proc = my_cpu();
-    
+        
     enter_userspace(
         current_proc->tf->rip,
         current_proc->tf->rsp

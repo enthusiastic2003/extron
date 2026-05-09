@@ -102,10 +102,10 @@ isr_common:
     push rax
     push rbx
     push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
+    push rdx ; rdx
+    push rsi ; rbp 
+    push rdi ; rdi 
+    push rbp ; rsi
     push r8
     push r9
     push r10

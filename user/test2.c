@@ -40,6 +40,6 @@ static inline long read(int fd, void* buf, unsigned long count)
 
 void _start(void) {
     for(;;){
-        write(1, "Welcome from test2\n", 19);
+        // write(1, "Welcome from test2\n", 19);
     }
 }

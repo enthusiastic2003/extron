@@ -67,6 +67,9 @@ struct proc {
     uint64_t        kernel_rsp;     /* 0x00 */
     uint64_t        user_rsp;       /* 0x08 */
 
+    virt_addr_t     kernel_stack_base;
+    virt_addr_t     kernel_stack_top;
+
     uint64_t        pid;
     enum proc_state state;
 
@@ -75,9 +78,6 @@ struct proc {
     phys_addr_t     cr3;
 
     struct cpu_context context;
-
-    virt_addr_t     kernel_stack_base;
-    virt_addr_t     kernel_stack_top;
 
     struct trap_frame *tf;
 

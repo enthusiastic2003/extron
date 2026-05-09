@@ -8,8 +8,11 @@ extern syscall_dispatch
 extern current_proc         ; struct proc * — set by exec() before ring-3 entry
 
 ; Byte offsets inside struct proc (must match proc.h)
-%define PROC_KERNEL_RSP  0
-%define PROC_USER_RSP    8
+%define PROC_KERNEL_RSP         0
+%define PROC_USER_RSP           8
+%define PROC_KERNEL_STACK_BASE 16
+%define PROC_KERNEL_STACK_TOP  24
+
 
 ; ---------------------------------------------------------------
 ; Public symbols
@@ -108,7 +111,7 @@ syscall_entry:
     mov [r10 + PROC_USER_RSP], rsp
 
     ; load kernel rsp
-    mov rsp, [r10 + PROC_KERNEL_RSP]
+    mov rsp, [r10 + PROC_KERNEL_STACK_TOP]
 
     ; ------------------------------------------------------------
     ; Save full userspace context
