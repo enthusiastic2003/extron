@@ -6,14 +6,18 @@
 #include <kernel/proc/proc.h>
 
 // ----------------------------------------------------------------
+// Forward declarations
+// ----------------------------------------------------------------
+static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count);
+static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count);
+
+// ----------------------------------------------------------------
 // Syscall table
 // ----------------------------------------------------------------
-
 
 static const syscall_fn syscall_table[] = {
     [SYS_WRITE] = sys_write,
     [SYS_READ]  = sys_read,
-
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -40,9 +44,6 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count)
     if (fd != 0)
         return (uint64_t)-1;
     
-    struct proc* p = my_cpu();
-    proc_set_sleeping(p);
-
     return kbd_read((char *)buf_addr, count);
 }
 

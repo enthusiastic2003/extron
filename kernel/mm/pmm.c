@@ -6,7 +6,10 @@
 #include <boot/multiboot2.h>
 #include <kernel/panic.h>
 #include <kernel/console.h>
+#include <kernel/sync/spinlock.h>
 #include <stdint.h>
+
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 
 
@@ -242,19 +245,21 @@ void set_virtual_pmm_bitmap_location(uint64_t new_bitmap_virt_loc){
 
 // Returns the physical address of a free 4KB page, or NULL if out of memory.
 void* pmm_alloc_page(void) {
+    spin_lock(&pmm_lock);
+
     uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
     uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
 
     for (uint64_t i = 0; i < max_pages; i++) {
         // Check if the bit is 0 (Free)
         if ((bmp[i / 8] & (1 << (i % 8))) == 0) {
-            
             bitmap_set(i);
+            spin_unlock(&pmm_lock);
             return (void*)idx_to_addr(i);
-            
         }
     }
 
+    spin_unlock(&pmm_lock);
     panic("PMM: Out of memory!");
     return NULL; 
 }

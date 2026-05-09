@@ -3,9 +3,11 @@
 #include <kernel/mm/paging.h>
 #include <kernel/panic.h>
 #include <kernel/console.h>
+#include <kernel/sync/spinlock.h>
 
 static uint8_t* vmm_bitmap = (uint8_t*)VMM_BITMAP_VIRT_START;
 static uint64_t last_allocated_index = 0;
+static spinlock_t vmm_lock = SPINLOCK_INIT;
 
 /* ---- bitmap ---- */
 
@@ -44,6 +46,8 @@ void vmm_init() {
 /* ---- alloc ---- */
 
 virt_addr_t vmm_alloc_pages(size_t n) {
+    spin_lock(&vmm_lock);
+
     uint64_t total = KERNEL_HEAP_SIZE / PAGE_SIZE;
     uint64_t found = 0, start = 0;
 
@@ -75,7 +79,9 @@ virt_addr_t vmm_alloc_pages(size_t n) {
                     }
 
                     last_allocated_index = start + n;
-                    return KERNEL_HEAP_START + start * PAGE_SIZE;
+                    virt_addr_t result = KERNEL_HEAP_START + start * PAGE_SIZE;
+                    spin_unlock(&vmm_lock);
+                    return result;
                 }
             } else {
                 found = 0;
@@ -83,6 +89,7 @@ virt_addr_t vmm_alloc_pages(size_t n) {
         }
     }
 
+    spin_unlock(&vmm_lock);
     panic("VMM: kernel heap exhausted");
     return 0;
 }
@@ -118,7 +125,6 @@ int vmm_free_pages(virt_addr_t v, size_t n) {
 
         bitmap_clear(start + i);
     }
-
 
     return 0;
 }

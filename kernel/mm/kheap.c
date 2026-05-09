@@ -1,12 +1,15 @@
 #include <kernel/mm/kheap.h>
+#include <kernel/sync/spinlock.h>
+
+static spinlock_t heap_lock = SPINLOCK_INIT;
 
 int liballoc_lock() {
-    // TODO: Add spinlock/interrupt disable here
+    spin_lock(&heap_lock);
     return 0;
 }
 
 int liballoc_unlock() {
-    // TODO: Release spinlock/enable interrupts here
+    spin_unlock(&heap_lock);
     return 0;
 }
 

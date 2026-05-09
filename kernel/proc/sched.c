@@ -2,6 +2,7 @@
 #include <kernel/proc/proc.h>
 #include <kernel/proc/exec.h>
 #include <kernel/mm/paging.h>
+#include <kernel/sync/spinlock.h>   /* adjust path if spinlock.h lives elsewhere */
 #include <kernel/console.h>
 #include <arch/tss.h>
 #include <arch/isr.h>
@@ -17,12 +18,17 @@
 struct proc *current_proc = NULL;
 
 /* ---------------------------------------------------------------
- * Run queue — simple singly-linked circular list
+ * Run queue — array of struct proc pointers
+ *
+ * Entries [0 .. run_queue_count) are live. Removal compacts by
+ * shifting trailing entries down so the array stays dense.
+ * Protected by run_queue_lock.
  * --------------------------------------------------------------- */
-static struct proc *run_queue_head = NULL;
-static struct proc *run_queue_tail = NULL;
+#define RUN_QUEUE_CAPACITY 256
 
-
+static struct proc *run_queue[RUN_QUEUE_CAPACITY];
+static size_t       run_queue_count = 0;
+static spinlock_t   run_queue_lock  = SPINLOCK_INIT;
 
 /* ---------------------------------------------------------------
  * my_cpu — accessor for the currently running process
@@ -35,9 +41,12 @@ struct proc *my_cpu(void) {
  * sched_init
  * --------------------------------------------------------------- */
 void sched_init(void) {
-    run_queue_head = NULL;
-    run_queue_tail = NULL;
-    current_proc   = NULL;
+    spin_lock(&run_queue_lock);
+    for (size_t i = 0; i < RUN_QUEUE_CAPACITY; i++)
+        run_queue[i] = NULL;
+    run_queue_count = 0;
+    current_proc    = NULL;
+    spin_unlock(&run_queue_lock);
     kprintf("[SCHED] Scheduler initialized\n");
 }
 
@@ -48,44 +57,35 @@ void sched_add(struct proc *p) {
     if (!p)
         return;
 
-    p->next = NULL;
-
-    if (!run_queue_head) {
-        run_queue_head = p;
-        run_queue_tail = p;
-    } else {
-        run_queue_tail->next = p;
-        run_queue_tail = p;
+    spin_lock(&run_queue_lock);
+    if (run_queue_count >= RUN_QUEUE_CAPACITY) {
+        spin_unlock(&run_queue_lock);
+        kprintf("[SCHED] Run queue full, cannot add PID %llu\n", p->pid);
+        return;
     }
+    run_queue[run_queue_count++] = p;
+    spin_unlock(&run_queue_lock);
 }
 
 /* ---------------------------------------------------------------
  * sched_remove — remove a process from the run queue
  * --------------------------------------------------------------- */
 void sched_remove(struct proc *p) {
-    if (!p || !run_queue_head)
+    if (!p)
         return;
 
-    /* Head removal */
-    if (run_queue_head == p) {
-        run_queue_head = p->next;
-        if (run_queue_tail == p)
-            run_queue_tail = NULL;
-        p->next = NULL;
-        return;
+    spin_lock(&run_queue_lock);
+    for (size_t i = 0; i < run_queue_count; i++) {
+        if (run_queue[i] == p) {
+            /* Shift trailing entries down to keep the array compact */
+            for (size_t j = i; j + 1 < run_queue_count; j++)
+                run_queue[j] = run_queue[j + 1];
+            run_queue_count--;
+            run_queue[run_queue_count] = NULL;
+            break;
+        }
     }
-
-    /* Walk the list */
-    struct proc *prev = run_queue_head;
-    while (prev->next && prev->next != p)
-        prev = prev->next;
-
-    if (prev->next == p) {
-        prev->next = p->next;
-        if (run_queue_tail == p)
-            run_queue_tail = prev;
-        p->next = NULL;
-    }
+    spin_unlock(&run_queue_lock);
 }
 
 /* ---------------------------------------------------------------
@@ -106,26 +106,70 @@ void schedule(void) {
     if (!old)
         return;
 
+    spin_lock(&run_queue_lock);
+
     /* Look for a different RUNNABLE process in the queue */
-    struct proc *next = run_queue_head;
-    while (next) {
-        if (next->state == PROC_RUNNABLE)
+    struct proc *next     = NULL;
+    size_t       next_idx = 0;
+    for (size_t i = 0; i < run_queue_count; i++) {
+        if (run_queue[i]->state == PROC_RUNNABLE) {
+            next     = run_queue[i];
+            next_idx = i;
             break;
-        next = next->next;
+        }
     }
 
-    /* No other process to run — keep running old */
-    if (!next)
-        return;
+    /* No runnable process found */
+    if (!next) {
+        spin_unlock(&run_queue_lock);
+
+        /* If old can keep running, just stay on it. */
+        if (old->state == PROC_RUNNING)
+            return;
+
+        /* Otherwise idle until an IRQ makes someone runnable.
+           sti+hlt is a single atomic pair on x86 — no IRQ can
+           land between them. */
+        for (;;) {
+            __asm__ volatile ("sti; hlt; cli");
+
+            spin_lock(&run_queue_lock);
+            int any_runnable = 0;
+            for (size_t i = 0; i < run_queue_count; i++) {
+                if (run_queue[i]->state == PROC_RUNNABLE) {
+                    any_runnable = 1;
+                    break;
+                }
+            }
+            spin_unlock(&run_queue_lock);
+
+            if (any_runnable)
+                break;  /* fall through to retry the scan below */
+        }
+
+        /* Re-enter schedule() to actually pick the new runnable.
+           Tail-call: this returns into our caller normally. */
+        return schedule();
+    }
 
     /* --- We found a different process, perform the switch --- */
-    sched_remove(next);
+
+    /* Remove next from the queue (compact the array) */
+    for (size_t j = next_idx; j + 1 < run_queue_count; j++)
+        run_queue[j] = run_queue[j + 1];
+    run_queue_count--;
+    run_queue[run_queue_count] = NULL;
 
     /* Demote old: put it back in the queue if it was still running */
     if (old->state == PROC_RUNNING) {
         old->state = PROC_RUNNABLE;
-        sched_add(old);
+        if (run_queue_count < RUN_QUEUE_CAPACITY)
+            run_queue[run_queue_count++] = old;
+        else
+            kprintf("[SCHED] Run queue full, dropping PID %llu\n", old->pid);
     }
+
+    spin_unlock(&run_queue_lock);
 
     next->state  = PROC_RUNNING;
     current_proc = next;
@@ -151,15 +195,23 @@ void schedule(void) {
  * enter_userspace() to jump into ring 3.
  * --------------------------------------------------------------- */
 void sched_start(void) {
-    struct proc *p = run_queue_head;
+    spin_lock(&run_queue_lock);
 
-    if (!p) {
+    if (run_queue_count == 0) {
+        spin_unlock(&run_queue_lock);
         kprintf("[SCHED] No process to start!\n");
         for (;;)
             __asm__ volatile("hlt");
     }
 
-    sched_remove(p);
+    /* Pop the first entry */
+    struct proc *p = run_queue[0];
+    for (size_t j = 0; j + 1 < run_queue_count; j++)
+        run_queue[j] = run_queue[j + 1];
+    run_queue_count--;
+    run_queue[run_queue_count] = NULL;
+
+    spin_unlock(&run_queue_lock);
 
     p->state     = PROC_RUNNING;
     current_proc = p;

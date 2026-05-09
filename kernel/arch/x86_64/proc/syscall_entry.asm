@@ -80,16 +80,53 @@ syscall_init:
 ;   rsp = user stack        (NOT switched — we do it)
 ;   IF  = 0                 (cleared by SFMASK)
 ; ---------------------------------------------------------------
-syscall_entry:
-    ; --- stack switch via current_proc ---
-    ; r10 is caller-saved and not a syscall argument register for us.
-    mov r10, [current_proc]         ; r10 = struct proc *
-    mov [r10 + PROC_USER_RSP], rsp  ; proc->user_rsp  = user RSP
-    mov rsp, [r10 + PROC_KERNEL_RSP]; RSP = proc->kernel_rsp
+global syscall_entry
+extern current_proc
+extern syscall_dispatch
 
-    ; --- save user return context + callee-saved regs ---
-    push rcx        ; user RIP  (needed by SYSRET)
-    push r11        ; user RFLAGS (needed by SYSRET)
+; x86-64 SYSCALL ABI on entry:
+;   rax = syscall number
+;   rdi = arg1
+;   rsi = arg2
+;   rdx = arg3
+;   rcx = user RIP
+;   r11 = user RFLAGS
+;
+; We preserve the entire userspace register state except:
+;   rax = syscall return value
+;   rcx/r11 = architecturally clobbered by SYSCALL
+
+syscall_entry:
+
+    ; ------------------------------------------------------------
+    ; Switch to kernel stack
+    ; ------------------------------------------------------------
+
+    mov r10, [current_proc]
+
+    ; save user rsp
+    mov [r10 + PROC_USER_RSP], rsp
+
+    ; load kernel rsp
+    mov rsp, [r10 + PROC_KERNEL_RSP]
+
+    ; ------------------------------------------------------------
+    ; Save full userspace context
+    ; ------------------------------------------------------------
+
+    ; syscall return state
+    push rcx
+    push r11
+
+    ; caller-saved
+    push rdi
+    push rsi
+    push rdx
+    push r8
+    push r9
+    push r10
+
+    ; callee-saved
     push rbx
     push rbp
     push r12
@@ -97,45 +134,81 @@ syscall_entry:
     push r14
     push r15
 
-    ; --- re-order for C calling convention ---
-    ; Want: rdi=nr, rsi=arg1, rdx=arg2, rcx=arg3
-    ; Have: rax=nr, rdi=arg1, rsi=arg2, rdx=arg3
-    ; Work back-to-front so no value is overwritten before it's moved.
-    mov rcx, rdx    ; arg3 -> 4th C param  (rcx already saved on stack)
-    mov rdx, rsi    ; arg2 -> 3rd C param
-    mov rsi, rdi    ; arg1 -> 2nd C param
-    mov rdi, rax    ; nr   -> 1st C param
+    ; ------------------------------------------------------------
+    ; Prepare C calling convention
+    ;
+    ; syscall_dispatch(
+    ;     nr,
+    ;     arg1,
+    ;     arg2,
+    ;     arg3
+    ; )
+    ; ------------------------------------------------------------
 
+    mov rcx, rdx
+    mov rdx, rsi
+    mov rsi, rdi
+    mov rdi, rax
+
+    ; stack is 16-byte aligned here
     call syscall_dispatch
-    ; return value now in rax
 
-    ; --- restore callee-saved regs + return context ---
+    ; return value already in rax
+
+    ; ------------------------------------------------------------
+    ; Restore userspace registers
+    ; ------------------------------------------------------------
+
+    ; callee-saved
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbp
     pop rbx
-    pop r11         ; user RFLAGS
-    pop rcx         ; user RIP
 
-    ; --- restore user RSP from proc struct (r10 is caller-saved) ---
-    ; mov r10, [current_proc]
-    ; mov [r10 + PROC_KERNEL_RSP], rsp    ; ← save kernel RSP back
-    ; mov rsp, [r10 + PROC_USER_RSP]
+    ; caller-saved
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    pop rsi
+    pop rdi
 
-    ; --- return to ring 3 ---
-    ; o64 sysret
+    ; syscall return state
+    pop r11
+    pop rcx
 
-    ; --- restore user RSP from proc struct ---
+    ; ------------------------------------------------------------
+    ; Restore kernel stack pointer into proc struct
+    ; ------------------------------------------------------------
+
     mov r10, [current_proc]
-    mov [r10 + PROC_KERNEL_RSP], rsp    ; save kernel RSP for next syscall
-    mov r10, [r10 + PROC_USER_RSP]      ; r10 = user RSP (don't switch yet)
+    mov [r10 + PROC_KERNEL_RSP], rsp
 
-    ; --- build IRETQ frame on kernel stack, then return ---
-    push 0x1B       ; SS     = user data, RPL=3  (explicit — bypass SYSRET bug)
-    push r10        ; RSP    = user stack
-    push r11        ; RFLAGS (saved by SYSCALL)
-    push 0x23       ; CS     = user code, RPL=3
-    push rcx        ; RIP    (saved by SYSCALL)
+    ; fetch saved user rsp
+    mov r10, [r10 + PROC_USER_RSP]
+
+    ; ------------------------------------------------------------
+    ; Build IRETQ frame
+    ; ------------------------------------------------------------
+
+    ; SS
+    push 0x1B
+
+    ; RSP
+    push r10
+
+    ; RFLAGS
+    push r11
+
+    ; CS
+    push 0x23
+
+    ; RIP
+    push rcx
+
+    ; avoid leaking kernel ptrs
+    xor r10, r10
+
     iretq

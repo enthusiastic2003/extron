@@ -1,5 +1,5 @@
 --- Kernel Stage 1: Initialization ---
-Module Found: Start=0x00119000, End=0x0011b800, Cmdline="initrd"
+Module Found: Start=0x0011a000, End=0x0011c800, Cmdline="initrd"
 Memory Map:
   Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
   Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
@@ -9,7 +9,7 @@ Memory Map:
   Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
   Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
 Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
-PMM Initialized! Bitmap at 0x000000000011c000, Size: 4096 bytes
+PMM Initialized! Bitmap at 0x000000000011d000, Size: 4096 bytes
 Paging initialized.
 VMM: Bitmap initialized (4194304 bytes)
 VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
@@ -17,11 +17,12 @@ Transitioning to Stage 2...
 --- Kernel Stage 2: Execution Phase ---
 Successfully running on high-half virtual stack.
 TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff800000119000 - 0xffff80000011b800
+TARFS: Found module 'initrd' at 0xffff80000011a000 - 0xffff80000011c800
 [SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 132 | memsz 132 | flags R-X
+[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 340 | memsz 340 | flags R-X
 [LOADER] Binary loaded, entry point: 0x0000000000400000
 [SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007ffffffff000)
-Hello from userland!!
-Kernel Here: Completed user's request!!
-sad
+Welcome to Ucerland!
+Welcome to Userland! > hello
+Echo: hello
+> 

@@ -12,6 +12,10 @@ void timer_handler(struct isr_frame* f) {
         // kprintf("[TIMER] vec=%llu cs=0x%llx ss=0x%llx rip=0x%llx rsp=0x%llx\n",
         //         f->vector, f->cs, f->ss, f->rip, f->rsp);
     timer_debug_count++;
+
+    // if((timer_debug_count%200 == 0) && (timer_debug_count!=0)){
+    //     kprintf("%ld has passed since boot\n", timer_debug_count/200);
+    // }
     
-    schedule();
+    // schedule();
 }

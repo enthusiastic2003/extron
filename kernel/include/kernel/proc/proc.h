@@ -8,6 +8,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/proc/trap.h>
+#include <kernel/sync/spinlock.h>
 
 /* Segment selectors — must match GDT layout */
 #define USER_CS 0x23
@@ -69,6 +70,8 @@ struct proc {
     uint64_t        pid;
     enum proc_state state;
 
+    void            *chan;          /* <--- ADD THIS: The wait channel */
+
     phys_addr_t     cr3;
 
     struct cpu_context context;
@@ -101,5 +104,8 @@ void proc_set_running(struct proc *p);
 void proc_set_sleeping(struct proc *p);
 
 void proc_set_zombie(struct proc *p);
+
+void wakeup(void *chan);
+void sleep(void *chan, spinlock_t *lk);
 
 #endif /* PROC_H */
