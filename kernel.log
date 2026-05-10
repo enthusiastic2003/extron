@@ -1,106 +1,109 @@
 --- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0011b000, End=0x0011d800, Cmdline="initrd"
+Module Found: Start=0x0013a000, End=0x0013f000, Cmdline="initrd"
 Memory Map:
   Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
   Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
   Region: Addr=0x00000000000f0000, Length=0x0000000000010000 bytes, Type=2
-  Region: Addr=0x0000000000100000, Length=0x0000000007ee0000 bytes, Type=1
-  Region: Addr=0x0000000007fe0000, Length=0x0000000000020000 bytes, Type=2
+  Region: Addr=0x0000000000100000, Length=0x00000000bfee0000 bytes, Type=1
+  Region: Addr=0x00000000bffe0000, Length=0x0000000000020000 bytes, Type=2
   Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
   Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
-Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
-PMM Initialized! Bitmap at 0x000000000011e000, Size: 4096 bytes
+Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 3144576 KB
+PMM Initialized! Bitmap at 0x0000000000140000, Size: 98304 bytes
 Paging initialized.
+PMM Stats:
+  Total managed:    786400 pages  (3071 MiB,  2 GiB)
+  Free (handout):   785829 pages  (3069 MiB)
+  Used / reserved:  571 pages  (2 MiB)
 VMM: Bitmap initialized (4194304 bytes)
 VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
 Transitioning to Stage 2...
 --- Kernel Stage 2: Execution Phase ---
 Successfully running on high-half virtual stack.
 TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000011b000 - 0xffff80000011d800
+TARFS: Found module 'initrd' at 0xffff80000013a000 - 0xffff80000013f000
 [PROC] Process table initialized (capacity 256)
 [SCHED] Scheduler initialized
 [LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 300 | memsz 300 | flags R-X
 [LOADER] Binary loaded, entry point: 0x0000000000400000
-[SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007ffffffff000)
-Input: asdasd
---- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0011b000, End=0x0011d800, Cmdline="initrd"
-Memory Map:
-  Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
-  Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
-  Region: Addr=0x00000000000f0000, Length=0x0000000000010000 bytes, Type=2
-  Region: Addr=0x0000000000100000, Length=0x0000000007ee0000 bytes, Type=1
-  Region: Addr=0x0000000007fe0000, Length=0x0000000000020000 bytes, Type=2
-  Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
-  Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
-Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
-PMM Initialized! Bitmap at 0x000000000011e000, Size: 4096 bytes
-Paging initialized.
-VMM: Bitmap initialized (4194304 bytes)
-VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
-Transitioning to Stage 2...
---- Kernel Stage 2: Execution Phase ---
-Successfully running on high-half virtual stack.
-TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000011b000 - 0xffff80000011d800
-[PROC] Process table initialized (capacity 256)
-[SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 300 | memsz 300 | flags R-X
+[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 172 | memsz 172 | flags R-X
 [LOADER] Binary loaded, entry point: 0x0000000000400000
 [SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007ffffffff000)
-Input: asdasd
-You typed: asdasd
---- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0011b000, End=0x0011d800, Cmdline="initrd"
-Memory Map:
-  Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
-  Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
-  Region: Addr=0x00000000000f0000, Length=0x0000000000010000 bytes, Type=2
-  Region: Addr=0x0000000000100000, Length=0x0000000007ee0000 bytes, Type=1
-  Region: Addr=0x0000000007fe0000, Length=0x0000000000020000 bytes, Type=2
-  Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
-  Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
-Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
-PMM Initialized! Bitmap at 0x000000000011e000, Size: 4096 bytes
-Paging initialized.
-VMM: Bitmap initialized (4194304 bytes)
-VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
-Transitioning to Stage 2...
---- Kernel Stage 2: Execution Phase ---
-Successfully running on high-half virtual stack.
-TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000011b000 - 0xffff80000011d800
-[PROC] Process table initialized (capacity 256)
-[SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 300 | memsz 300 | flags R-X
-[LOADER] Binary loaded, entry point: 0x0000000000400000
-[SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007ffffffff000)
-Input: asdasd
-You typed: asdasd
---- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0011b000, End=0x0011d800, Cmdline="initrd"
-Memory Map:
-  Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
-  Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
-  Region: Addr=0x00000000000f0000, Length=0x0000000000010000 bytes, Type=2
-  Region: Addr=0x0000000000100000, Length=0x0000000007ee0000 bytes, Type=1
-  Region: Addr=0x0000000007fe0000, Length=0x0000000000020000 bytes, Type=2
-  Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
-  Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
-Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 129920 KB
-PMM Initialized! Bitmap at 0x000000000011e000, Size: 4096 bytes
-Paging initialized.
-VMM: Bitmap initialized (4194304 bytes)
-VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
-Transitioning to Stage 2...
---- Kernel Stage 2: Execution Phase ---
-Successfully running on high-half virtual stack.
-TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000011b000 - 0xffff80000011d800
-[PROC] Process table initialized (capacity 256)
-[SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 300 | memsz 300 | flags R-X
-[LOADER] Binary loaded, entry point: 0x0000000000400000
-[SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007ffffffff000)
-Input: 
+Input: Test2: sleeping for 2 seconds...
+Test2: woke up!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 SLEEPING 0x0000000000a42000 0xffffffff8010c140
+1 RUNNING 0x0000000000a68000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Test2: sleeping for 2 seconds...
+hello
+You typed: hello
+
+Sleeping for 5 seconds...
+Test2: woke up!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 SLEEPING 0x0000000000a42000 0x0000000000000000
+1 RUNNING 0x0000000000a68000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Test2: sleeping for 2 seconds...
+..Test2: woke up!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 SLEEPING 0x0000000000a42000 0x0000000000000000
+1 RUNNING 0x0000000000a68000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Test2: sleeping for 2 seconds...
+..Test2: woke up!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 SLEEPING 0x0000000000a42000 0x0000000000000000
+1 RUNNING 0x0000000000a68000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Test2: sleeping for 2 seconds...
+.
+
+Input: heTest2: woke up!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 RUNNABLE 0x0000000000a42000 0x0000000000000000
+1 RUNNING 0x0000000000a68000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Test2: sleeping for 2 seconds...
+llo
+You typed: hello
+
+Sleeping for 5 seconds...
+.Test2: woke up!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 SLEEPING 0x0000000000a42000 0x0000000000000000
+1 RUNNING 0x0000000000a68000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Test2: sleeping for 2 seconds...
+..

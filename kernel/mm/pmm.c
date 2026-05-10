@@ -8,7 +8,7 @@
 #include <kernel/console.h>
 #include <kernel/sync/spinlock.h>
 #include <stdint.h>
-
+#include <kernel/klibc/builtins.h>
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 
@@ -148,6 +148,46 @@ void get_bitmap_location(uint64_t mb2_addr){
 
     global_phys_mem_info.bmp_phys = (virt_addr_t) highest_reserved_addr;
 
+}
+
+void pmm_print_stats(void) {
+    spin_lock(&pmm_lock);
+
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint64_t* bmp64 = (uint64_t*)global_phys_mem_info.bmp_phys;
+
+    uint64_t used_pages = 0;
+    uint64_t full_words = max_pages / 64;
+    uint64_t leftover_bits = max_pages % 64;
+
+    // Fast path: count set bits 64 at a time with popcount.
+    for (uint64_t i = 0; i < full_words; i++) {
+        used_pages += __builtin_popcountll(bmp64[i]);
+    }
+
+    // Handle the trailing partial word (mask off bits beyond max_pages,
+    // since the bitmap is rounded up to PAGE_SIZE and those padding bits
+    // were initialized to 1 / "used" but don't represent real pages).
+    if (leftover_bits) {
+        uint64_t mask = (1ULL << leftover_bits) - 1;
+        used_pages += __builtin_popcountll(bmp64[full_words] & mask);
+    }
+
+    uint64_t free_pages = max_pages - used_pages;
+
+    spin_unlock(&pmm_lock);
+
+    uint64_t total_bytes = max_pages * PAGE_SIZE;
+    uint64_t free_bytes  = free_pages * PAGE_SIZE;
+    uint64_t used_bytes  = used_pages * PAGE_SIZE;
+
+    kprintf("PMM Stats:\n");
+    kprintf("  Total managed:    %lu pages  (%lu MiB,  %lu GiB)\n",
+            max_pages, total_bytes >> 20, total_bytes >> 30);
+    kprintf("  Free (handout):   %lu pages  (%lu MiB)\n",
+            free_pages, free_bytes >> 20);
+    kprintf("  Used / reserved:  %lu pages  (%lu MiB)\n",
+            used_pages, used_bytes >> 20);
 }
 
 void init_pmm(uint64_t mb2_addr) {

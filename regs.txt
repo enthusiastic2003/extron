@@ -9,3 +9,12 @@ Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
 Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
 Ending remote debugging.
 [Inferior 1 (process 1) detached]
+Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
+Ending remote debugging.
+[Inferior 1 (process 1) detached]
+Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
+Ending remote debugging.
+[Inferior 1 (process 1) detached]
+Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
+Ending remote debugging.
+[Inferior 1 (process 1) detached]

@@ -25,7 +25,7 @@ static inline uint64_t align_down(uint64_t x, uint64_t a) {
     return x & ~(a - 1);
 }
 
-
+void pmm_print_stats(void);
 void scan_mb2_header(uint64_t );
 void init_pmm(uint64_t);
 void pmm_free_page(void*);

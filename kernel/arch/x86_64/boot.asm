@@ -125,7 +125,7 @@ enable_long_mode:
 
 
 ; --- 64-Bit Global Descriptor Table ---
-section .rodata
+section .data
 global gdt64
 align 8
 

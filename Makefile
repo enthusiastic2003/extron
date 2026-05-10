@@ -4,10 +4,10 @@ LD      = x86_64-elf-gcc
 
 CFLAGS  = -ffreestanding -O2 -Wall -Wextra -mcmodel=large \
           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib \
-          -Ikernel/include -Ikernel/arch/x86_64/include 
+          -Ikernel/include -Ikernel/arch/x86_64/include -g
 
 USER_CFLAGS = -ffreestanding -O2 -nostdlib -mno-red-zone \
-              -fno-stack-protector -no-pie -Wall -Wextra 
+              -fno-stack-protector -no-pie -Wall -Wextra -g
 
 BUILD   = build
 
@@ -92,7 +92,7 @@ iso: $(BUILD)/kernel.elf $(BUILD)/initrd.tar
 # ------------------------------------------------------------------
 
 run: all
-	qemu-system-x86_64 \
+	qemu-system-x86_64 -m 3G \
 		-cdrom myos.iso \
 		-serial file:kernel.log
 
@@ -101,7 +101,7 @@ run: all
 # ------------------------------------------------------------------
 
 debug: all
-	qemu-system-x86_64 \
+	qemu-system-x86_64 -m 3G \
 		-cdrom myos.iso \
 		-s -S \
 		-serial file:kernel.log
