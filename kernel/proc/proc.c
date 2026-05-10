@@ -289,7 +289,20 @@ void wakeup(void *chan) {
     irq_spin_unlock(&proc_table_lock);
 }
 
-
+void proc_wakeup_expired(uint64_t now) {
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = proc_table[i];
+        if (p && p->state == PROC_SLEEPING && p->chan == NULL) {
+            if (now >= p->sleep_until) {
+                p->sleep_until = 0;
+                proc_set_runnable(p);
+                sched_add(p);
+            }
+        }
+    }
+    irq_spin_unlock(&proc_table_lock);
+}
 
 void proc_dump_table(void) {
     irq_spin_lock(&proc_table_lock);

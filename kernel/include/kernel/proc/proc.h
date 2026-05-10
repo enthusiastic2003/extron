@@ -83,6 +83,8 @@ struct proc {
 
     struct proc       *parent;
     struct proc       *next;        /* run-queue link */
+
+    uint64_t          sleep_until;  /* Wake up when ticks >= sleep_until */
 };
 
 static const char *proc_state_str(enum proc_state s) {
@@ -120,5 +122,6 @@ void wakeup(void *chan);
 void sleep(void *chan, spinlock_t *lk);
 void proc_table_init(void);
 void proc_dump_table(void);
+void proc_wakeup_expired(uint64_t now);
 
 #endif /* PROC_H */

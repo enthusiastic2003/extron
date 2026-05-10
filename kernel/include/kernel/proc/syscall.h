@@ -7,6 +7,8 @@
 
 #define SYS_WRITE   1
 #define SYS_READ    0
+#define SYS_SLEEP   2
+#define SYS_PROC_DUMP 3
 
 typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
 

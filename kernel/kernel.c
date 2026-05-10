@@ -96,7 +96,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     kprintf("--- Kernel Stage 2: Execution Phase ---\n");
     kprintf("Successfully running on high-half virtual stack.\n");
 
-    tss_init(KERNEL_STACK_RANGE_START + KERNEL_STACK_GUARD + KERNEL_STACK_SIZE);
+    // tss_init(KERNEL_STACK_RANGE_START + KERNEL_STACK_GUARD + KERNEL_STACK_SIZE);
     kprintf("TSS: loaded (RSP0 = %p)\n",
             (void*)(KERNEL_STACK_RANGE_START + KERNEL_STACK_GUARD + KERNEL_STACK_SIZE));
 
@@ -112,12 +112,12 @@ void kernel_stage2(uint64_t mb2_addr) {
     sched_init();
 
     struct proc *init = create_init_proc("./test");
-    struct proc* init2 =  load_executable_from_binary( "./test2", init);
+    // struct proc* init2 =  load_executable_from_binary( "./test2", init);
 
     
     if (init) {
         sched_add(init);
-        sched_add(init2);
+        // sched_add(init2);
     } else {
         kprintf("Failed to create init process!\n");
     }
