@@ -10,6 +10,7 @@
 // ----------------------------------------------------------------
 // Forward declarations
 // ----------------------------------------------------------------
+
 static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count);
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count);
 static uint64_t sys_sleep(uint64_t seconds, uint64_t arg2, uint64_t arg3);
@@ -34,6 +35,17 @@ static const syscall_fn syscall_table[] = {
     [SYS_EXIT]       = sys_exit,
 };
 
+static const char *syscall_names[] = {
+    [SYS_READ]       = "read",
+    [SYS_WRITE]      = "write",
+    [SYS_SLEEP]      = "sleep",
+    [SYS_PROC_DUMP]  = "proc_dump",
+    [SYS_ANON_ALLOC] = "anon_alloc",
+    [SYS_ANON_FREE]  = "anon_free",
+    [SYS_TCB_SET]    = "tcb_set",
+    [SYS_EXIT]       = "exit",
+};
+
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
 
 // ----------------------------------------------------------------
@@ -42,36 +54,55 @@ static const syscall_fn syscall_table[] = {
 
 static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count)
 {
-    if (fd != 1)
+    if (fd != 1 && fd != 2) {
+        kprintf("  [write] unsupported fd=%d\n", (int)fd);
         return (uint64_t)-1;
+    }
 
     const char *buf = (const char *)buf_addr;
-    for (uint64_t i = 0; i < count; i++)
+    kprintf("  [write] fd=%d count=%d data: \"", (int)fd, (int)count);
+    for (uint64_t i = 0; i < count && i < 64; i++)
         console_putc(buf[i]);
+    kprintf("\"\n");
 
     return count;
 }
 
-
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count)
 {
-    if (fd != 0)
+    kprintf("[SYS_READ] fd=%llu buf=0x%llx count=%llu\n",
+            fd, buf_addr, count);
+
+    if (fd != 0) {
+        kprintf("[SYS_READ] unsupported fd %llu\n", fd);
         return (uint64_t)-1;
-    
-    return kbd_read((char *)buf_addr, count);
+    }
+
+    uint64_t ret = kbd_read((char *)buf_addr, count);
+
+    kprintf("[SYS_READ] returned %llu\n", ret);
+
+    return ret;
 }
 
-
-static uint64_t sys_sleep(uint64_t seconds, uint64_t arg2, uint64_t arg3)
+static uint64_t sys_sleep(uint64_t seconds,
+                          uint64_t arg2,
+                          uint64_t arg3)
 {
     (void)arg2;
     (void)arg3;
-    struct proc *p = my_cpu();
-    if (!p) return (uint64_t)-1;
 
-    uint64_t ticks_to_sleep = seconds * 100; // 100 Hz
+    kprintf("[SYS_SLEEP] seconds=%llu\n", seconds);
+
+    struct proc *p = my_cpu();
+    if (!p)
+        return (uint64_t)-1;
+
+    uint64_t ticks_to_sleep = seconds * 100;
+
     p->sleep_until = time_now() + ticks_to_sleep;
     p->chan = NULL;
+
     proc_set_sleeping(p);
 
     schedule();
@@ -79,63 +110,113 @@ static uint64_t sys_sleep(uint64_t seconds, uint64_t arg2, uint64_t arg3)
     return 0;
 }
 
-
-static uint64_t sys_proc_dump(uint64_t arg1, uint64_t arg2, uint64_t arg3)
+static uint64_t sys_proc_dump(uint64_t arg1,
+                              uint64_t arg2,
+                              uint64_t arg3)
 {
     (void)arg1;
     (void)arg2;
     (void)arg3;
+
+    kprintf("[SYS_PROC_DUMP]\n");
+
     proc_dump_table();
+
     return 0;
 }
 
-static uint64_t sys_anon_allocate(uint64_t size, uint64_t arg2, uint64_t arg3)
+static uint64_t sys_anon_allocate(uint64_t size,
+                                  uint64_t arg2,
+                                  uint64_t arg3)
 {
-    (void)arg2; (void)arg3;
-    struct proc *p = my_cpu();
-    if (!p || !p->mm) return (uint64_t)-1;
+    (void)arg2;
+    (void)arg3;
 
-    virt_addr_t addr = vm_allocate_region(p->mm, (size_t)size,
-                                          VM_READ | VM_WRITE | VM_USER);
+    kprintf("[SYS_ANON_ALLOC] size=%llu\n", size);
+
+    struct proc *p = my_cpu();
+
+    if (!p || !p->mm)
+        return (uint64_t)-1;
+
+    virt_addr_t addr =
+        vm_allocate_region(p->mm,
+                           (size_t)size,
+                           VM_READ | VM_WRITE | VM_USER);
+
+    kprintf("[SYS_ANON_ALLOC] returned 0x%llx\n", addr);
+
     return addr ? addr : (uint64_t)-1;
 }
 
-static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3)
+static uint64_t sys_anon_free(uint64_t addr,
+                              uint64_t size,
+                              uint64_t arg3)
 {
     (void)arg3;
-    struct proc *p = my_cpu();
-    if (!p || !p->mm) return (uint64_t)-1;
 
-    vm_free_region(p->mm, (virt_addr_t)addr, (size_t)size);
+    kprintf("[SYS_ANON_FREE] addr=0x%llx size=%llu\n",
+            addr, size);
+
+    struct proc *p = my_cpu();
+
+    if (!p || !p->mm)
+        return (uint64_t)-1;
+
+    vm_free_region(p->mm,
+                   (virt_addr_t)addr,
+                   (size_t)size);
+
     return 0;
 }
 
-
-static uint64_t sys_tcb_set(uint64_t addr, uint64_t arg2, uint64_t arg3)
+static uint64_t sys_tcb_set(uint64_t addr,
+                            uint64_t arg2,
+                            uint64_t arg3)
 {
-    (void)arg2; (void)arg3;
+    (void)arg2;
+    (void)arg3;
+
+    kprintf("[SYS_TCB_SET] fs_base=0x%llx\n", addr);
+
     struct proc *p = my_cpu();
-    if (!p) return (uint64_t)-1;
+
+    if (!p)
+        return (uint64_t)-1;
 
     p->fs_base = addr;
-    __asm__ volatile("wrmsr" ::
-        "c"(0xC0000100U),
-        "a"((uint32_t)addr),
-        "d"((uint32_t)(addr >> 32)));
+
+    __asm__ volatile(
+        "wrmsr"
+        :
+        : "c"(0xC0000100U),
+          "a"((uint32_t)addr),
+          "d"((uint32_t)(addr >> 32)));
+
     return 0;
 }
 
-static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3)
+static uint64_t sys_exit(uint64_t status,
+                         uint64_t arg2,
+                         uint64_t arg3)
 {
-    (void)status; (void)arg2; (void)arg3;
+    (void)arg2;
+    (void)arg3;
+
+    kprintf("[SYS_EXIT] status=%llu\n", status);
+
     struct proc *p = my_cpu();
-    if (!p) for (;;) __asm__ volatile("hlt");
+
+    if (!p)
+        for (;;)
+            __asm__ volatile("hlt");
 
     proc_set_zombie(p);
+
     sched_remove(p);
-    /* Kernel stack is still in use — do not free here.
-       The process is no longer runnable; schedule() will idle. */
+
     schedule();
+
     __builtin_unreachable();
 }
 
@@ -148,8 +229,23 @@ uint64_t syscall_dispatch(uint64_t nr,
                           uint64_t arg2,
                           uint64_t arg3)
 {
-    if (nr >= SYSCALL_COUNT || !syscall_table[nr])
-        return (uint64_t)-1;
+    const char *name =
+        (nr < SYSCALL_COUNT && syscall_names[nr])
+            ? syscall_names[nr]
+            : "unknown";
 
-    return syscall_table[nr](arg1, arg2, arg3);
+    kprintf("[SYSCALL #%d] %s\n", (int)nr, name);
+    kprintf("  arg1=0x%lx (%ld)\n", arg1, (int64_t)arg1);
+    kprintf("  arg2=0x%lx (%ld)\n", arg2, (int64_t)arg2);
+    kprintf("  arg3=0x%lx (%ld)\n", arg3, (int64_t)arg3);
+
+    if (nr >= SYSCALL_COUNT || !syscall_table[nr]) {
+        kprintf("  -> INVALID SYSCALL\n");
+        return (uint64_t)-1;
+    }
+
+    uint64_t ret = syscall_table[nr](arg1, arg2, arg3);
+
+    kprintf("  -> ret=0x%lx (%ld)\n", ret, (int64_t)ret);
+    return ret;
 }

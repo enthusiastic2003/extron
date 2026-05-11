@@ -112,12 +112,11 @@ void kernel_stage2(uint64_t mb2_addr) {
     proc_table_init();
     sched_init();
 
-    struct proc *init  = create_init_proc("./test2");
-    struct proc *init2 = load_executable_from_binary("./test", init);
+    struct proc *init  = create_init_proc("./test");
+    // struct proc *init2 = load_executable_from_binary("./test", init);
 
-    if (init && init2) {
+    if (init) {
         sched_add(init);
-        sched_add(init2);
     } else {
         kprintf("Failed to create init processes!\n");
     }
