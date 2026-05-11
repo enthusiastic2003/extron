@@ -62,6 +62,7 @@ struct proc* create_init_proc(const char* binary_path){
 
     p->state = PROC_RUNNABLE;
     p->cr3   = user_pml4;
+    p->mm    = vm_space_create(user_pml4);
 
     /* scheduler-resume rsp */
     p->kernel_rsp = kstack_top;
@@ -120,6 +121,7 @@ struct proc* load_executable_from_binary(const char* binary_path, struct proc* p
 
     p->state = PROC_RUNNABLE;
     p->cr3   = user_pml4;
+    p->mm    = vm_space_create(user_pml4);
 
     /* scheduler-resume rsp */
     p->kernel_rsp = kstack_top;

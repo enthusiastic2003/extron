@@ -255,6 +255,33 @@ void init_paging(uint64_t mb2_addr) {
     kprintf("Paging initialized.\n");
 }
 
+// --- 3. The Translator (paging.c) ---
+uint64_t arch_translate_vm_flags(int vm_flags) {
+    uint64_t hw_flags = 0;
+
+    // If the memory is meant to exist at all, it must be PRESENT
+    if (vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) {
+        hw_flags |= PAGE_PRESENT;
+    }
+
+    if (vm_flags & VM_WRITE) {
+        hw_flags |= PAGE_WRITE;
+    }
+
+    if (vm_flags & VM_USER) {
+        hw_flags |= PAGE_USER;
+    }
+
+    // If the CPU supports NX, and the user did NOT request Execute permissions,
+    // we should actively prevent execution. 
+    // (Requires EFER.NXE to be enabled in early boot!)
+    if (!(vm_flags & VM_EXEC)) {
+        hw_flags |= PAGE_NX; 
+    }
+
+    return hw_flags;
+}
+
 phys_addr_t create_user_pml4(void) {
     phys_addr_t new_pml4 = allocate_table_zeroed();
     if (!new_pml4) return 0;

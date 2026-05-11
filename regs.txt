@@ -18,3 +18,8 @@ Ending remote debugging.
 Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
 Ending remote debugging.
 [Inferior 1 (process 1) detached]
+Detaching from program: /mnt/d/extron/build/kernel.elf, process 1
+Ending remote debugging.
+[Inferior 1 (process 1) detached]
+⚠️ warning: BFD: reopening /mnt/d/extron/build/kernel.elf: No such file or directory
+❌️ Remote connection closed

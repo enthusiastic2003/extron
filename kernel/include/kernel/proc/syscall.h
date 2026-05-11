@@ -5,10 +5,14 @@
 // Syscall numbers
 // ----------------------------------------------------------------
 
-#define SYS_WRITE   1
-#define SYS_READ    0
-#define SYS_SLEEP   2
-#define SYS_PROC_DUMP 3
+#define SYS_READ        0
+#define SYS_WRITE       1
+#define SYS_SLEEP       2
+#define SYS_PROC_DUMP   3
+#define SYS_ANON_ALLOC  4
+#define SYS_ANON_FREE   5
+#define SYS_TCB_SET     6   /* set FS base for TLS (mlibc sys_tcb_set) */
+#define SYS_EXIT        7   /* terminate current process */
 
 typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
 

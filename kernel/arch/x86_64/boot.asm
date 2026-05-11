@@ -105,9 +105,11 @@ enable_long_mode:
     mov eax, (p4_table - KERNEL_VMA)
     mov cr3, eax
 
-    ; Enable Physical Address Extension (PAE)
+    ; Enable PAE + SSE OS support in CR4
     mov eax, cr4
-    or  eax, (1 << 5)
+    or  eax, (1 << 5)   ; PAE
+    or  eax, (1 << 9)   ; OSFXSR  — required for SSE/SSE2, else #UD
+    or  eax, (1 << 10)  ; OSXMMEXCPT — SSE exceptions routed to OS handler
     mov cr4, eax
 
     ; Enable Long Mode (LME) via EFER MSR
@@ -116,9 +118,11 @@ enable_long_mode:
     or  eax, (1 << 8) | (1 << 11) ; LME is bit 8, NXE is bit 11
     wrmsr
 
-    ; Enable Paging (PG) and Protected Mode (PE)
+    ; Enable Paging + Protected Mode, clear EM (no emulation), set MP
     mov eax, cr0
-    or  eax, (1 << 31) | (1 << 0)
+    and eax, ~(1 << 2)              ; clear EM — SSE fault instead of emulation trap
+    or  eax, (1 << 1)               ; MP — monitor co-processor
+    or  eax, (1 << 31) | (1 << 0)  ; PG + PE
     mov cr0, eax
 
     ret

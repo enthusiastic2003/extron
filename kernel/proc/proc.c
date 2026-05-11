@@ -167,6 +167,10 @@ void proc_free(struct proc *p) {
             PROC_KERNEL_STACK_PAGES
         );
     }
+    if (p->mm) {
+        vm_space_destroy(p->mm);
+        p->mm = NULL;
+    }
     kfree(p);
 }
 

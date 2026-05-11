@@ -6,8 +6,9 @@ CFLAGS  = -ffreestanding -O2 -Wall -Wextra -mcmodel=large \
           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib \
           -Ikernel/include -Ikernel/arch/x86_64/include -g
 
-USER_CFLAGS = -ffreestanding -O2 -nostdlib -mno-red-zone \
-              -fno-stack-protector -no-pie -Wall -Wextra -g
+USER_CFLAGS = -ffreestanding -nostdlib -mno-red-zone \
+              -fno-stack-protector -no-pie -Wall -Wextra -g \
+              -mno-mmx -mno-sse -mno-sse2
 
 BUILD   = build
 

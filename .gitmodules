@@ -1,0 +1,3 @@
+[submodule "external/mlibc"]
+	path = external/mlibc
+	url = https://github.com/managarm/mlibc.git

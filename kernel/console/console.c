@@ -14,6 +14,18 @@ void set_console_write_loc(uint64_t vga_offset) {
     vga = (volatile char*)vga_offset + 0xB8000;
 }
 
+/* --- hardware cursor --- */
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static void update_hw_cursor(void) {
+    uint16_t pos = cursor_y * VGA_WIDTH + cursor_x;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
+}
 
 /* --- low-level --- */
 static inline void putc_at(int x, int y, char c, char color) {
@@ -31,6 +43,8 @@ void clear_screen(char color) {
     }
     cursor_x = 0;
     cursor_y = 0;
+
+    update_hw_cursor();   // <-- add
 }
 
 /* --- scrolling --- */
@@ -49,6 +63,8 @@ static void scroll(void) {
     }
 
     cursor_y = VGA_HEIGHT - 1;
+
+    update_hw_cursor();   // <-- add
 }
 
 
@@ -77,6 +93,8 @@ static void putc(char c, char color) {
     if (cursor_y >= VGA_HEIGHT) {
         scroll();
     }
+
+    update_hw_cursor();   // <-- add
 }
 
 static void puts_col(const char* s, char color) {
@@ -237,6 +255,7 @@ void kcprintf(const char* fmt, const char color, ...) {
 void set_cursor(int x, int y) {
     cursor_x = x;
     cursor_y = y;
+    update_hw_cursor();
 }
 
 /* --- raw byte output used by syscall write --- */

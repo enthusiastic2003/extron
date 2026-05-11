@@ -9,6 +9,24 @@
 #include <stddef.h>
 
 /* ---------------------------------------------------------------
+ * IA32_FS_BASE MSR helpers (for TLS / mlibc TCB)
+ * --------------------------------------------------------------- */
+#define MSR_FS_BASE 0xC0000100U
+
+static inline uint64_t read_fs_base(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(MSR_FS_BASE));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void write_fs_base(uint64_t base) {
+    __asm__ volatile("wrmsr" ::
+        "c"(MSR_FS_BASE),
+        "a"((uint32_t)base),
+        "d"((uint32_t)(base >> 32)));
+}
+
+/* ---------------------------------------------------------------
  * The raw current-process pointer.
  *
  * NOT static — the linker symbol must be visible to
@@ -160,6 +178,9 @@ void schedule(void) {
     if (old->cr3 != next->cr3)
         load_cr3(next->cr3);
 
+    old->fs_base = read_fs_base();
+    write_fs_base(next->fs_base);
+
     context_switch(&old->context, &next->context);
 }
 
@@ -211,15 +232,14 @@ void sched_start(void) {
     /* Reset kernel_rsp to the clean stack top for future syscalls */
     p->kernel_rsp = p->kernel_stack_top;
 
+    write_fs_base(p->fs_base);
+
     /* Jump to ring 3 — never returns */
     enter_userspace(entry, user_rsp);
 }
 
 void proc_first_run(void) {
-    struct proc* current_proc = my_cpu();
-        
-    enter_userspace(
-        current_proc->tf->rip,
-        current_proc->tf->rsp
-    );
+    struct proc *p = my_cpu();
+    write_fs_base(p->fs_base);
+    enter_userspace(p->tf->rip, p->tf->rsp);
 }

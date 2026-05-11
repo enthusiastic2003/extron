@@ -28,14 +28,19 @@
 #define PD_IDX(v)   (((v) >> 21) & 0x1FF)
 #define PT_IDX(v)   (((v) >> 12) & 0x1FF)
 
-// Page Table Entry Flags
-#define PAGE_PRESENT (1ULL << 0)
-#define PAGE_WRITE   (1ULL << 1)
-#define PAGE_USER    (1ULL << 2)
-#define PAGE_NX      (1ULL << 63)
+// --- Custom OS Software Flags (Bits 9-11) ---
+// The CPU ignores these. We use them for VMM logic.
+#define PAGE_CUSTOM_COW    (1ULL << 9)  // 1 = This is a Copy-On-Write page
+#define PAGE_CUSTOM_SHARED (1ULL << 10) // 1 = Shared IPC memory
+#define PAGE_CUSTOM_SWAP   (1ULL << 11) // 1 = Page is swapped to disk
+
+// --- 1. The OS Generic Definitions (vmm.h) ---
+#define VM_READ  (1 << 0)
+#define VM_WRITE (1 << 1)
+#define VM_EXEC  (1 << 2)
+#define VM_USER  (1 << 3)
 
 void init_paging(uint64_t mb2_addr);
-
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags);
 int unmap_page(pml4_t pml4, virt_addr_t virt);
 
@@ -47,4 +52,8 @@ uint64_t* virt_to_phys_hhdm(virt_addr_t v);
 phys_addr_t create_user_pml4(void);
 void load_cr3(uint64_t phys_addr);
 void flush_tlb(void);
+
+
+/* Syscall related processes */
+uint64_t arch_translate_vm_flags(int vm_flags);
 #endif

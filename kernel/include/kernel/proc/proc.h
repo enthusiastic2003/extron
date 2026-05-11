@@ -64,11 +64,17 @@ enum proc_state {
  * ------------------------------------------------------------- */
 struct proc {
     /* ---- offsets 0x00, 0x08: must match syscall_entry.asm ---- */
+    /* 
+       ---- The first 4 entries must be: kernel_rsp , user_rsp, kernel_stack_base, kernel_stack_top 
+       ---- This ordering is specified in the syscall entry, DO NOT MODIFY
+    */
     uint64_t        kernel_rsp;     /* 0x00 */
     uint64_t        user_rsp;       /* 0x08 */
 
     virt_addr_t     kernel_stack_base;
     virt_addr_t     kernel_stack_top;
+
+    uint64_t        fs_base;        /* IA32_FS_BASE — saved/restored on switch */
 
     uint64_t        pid;
     enum proc_state state;
@@ -76,6 +82,8 @@ struct proc {
     void            *chan;          /* <--- ADD THIS: The wait channel */
 
     phys_addr_t     cr3;
+
+    struct vm_space *mm;  // Pointer to the memory management context
 
     struct cpu_context context;
 

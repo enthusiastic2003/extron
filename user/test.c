@@ -1,80 +1,48 @@
-// syscalls.h (or directly in your test file)
-
 static inline long write(int fd, const void* buf, unsigned long count)
 {
     long ret;
-
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "a"(1),           // SYS_WRITE
-          "D"(fd),
-          "S"(buf),
-          "d"(count)
+        : "a"(1), "D"(fd), "S"(buf), "d"(count)
         : "rcx", "r11", "memory"
     );
-
-    return ret;
-}
-
-static inline long read(int fd, void* buf, unsigned long count)
-{
-    long ret;
-
-    __asm__ volatile (
-        "syscall"
-        : "=a"(ret)
-        : "a"(0),           // SYS_READ
-          "D"(fd),
-          "S"(buf),
-          "d"(count)
-        : "rcx", "r11", "memory"
-    );
-
     return ret;
 }
 
 static inline long sleep(unsigned long seconds)
 {
     long ret;
-
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "a"(2),           // SYS_SLEEP
-          "D"(seconds)
+        : "a"(2), "D"(seconds)
         : "rcx", "r11", "memory"
     );
-
     return ret;
 }
 
+static inline void exit(int status)
+{
+    __asm__ volatile (
+        "syscall"
+        :: "a"(7), "D"(status)   // SYS_EXIT
+        : "rcx", "r11", "memory"
+    );
+    for (;;);   // unreachable — silences noreturn warning
+}
+
 // ----------------------------------------------------------------
-// Entry Point
+// Entry Point — runs 3 times then exits cleanly
 // ----------------------------------------------------------------
 
 void _start(void)
 {
-    char buf[128];
-
-    for (;;) {
-
-        write(1, "Input: ", 7);
-
-        long n = read(0, buf, sizeof(buf));
-
-        write(1, "You typed: ", 11);
-
-        if (n > 0)
-            write(1, buf, n);
-
-        write(1, "\nSleeping for 5 seconds...\n", 27);
-
-        for (int i = 0; i < 5; i++) {
-            sleep(1);
-            write(1, ".", 1);
-        }
-
-        write(1, "\n\n", 2);
+    for (int i = 0; i < 3; i++) {
+        write(1, "test: alive\n", 12);
+        sleep(1);
     }
+
+    write(1, "test: calling exit(0)\n", 22);
+    exit(0);
 }
