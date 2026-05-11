@@ -60,18 +60,18 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count)
     }
 
     const char *buf = (const char *)buf_addr;
-    kprintf("  [write] fd=%d count=%d data: \"", (int)fd, (int)count);
+    //kprintf("[SYS_WRITE] fd=%d buf=0x%lx count=%lu\n", (int)fd, buf_addr, count);
     for (uint64_t i = 0; i < count && i < 64; i++)
         console_putc(buf[i]);
-    kprintf("\"\n");
+    //kprintf("\"\n");
 
     return count;
 }
 
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count)
 {
-    kprintf("[SYS_READ] fd=%llu buf=0x%llx count=%llu\n",
-            fd, buf_addr, count);
+    //kprintf("[SYS_READ] fd=%llu buf=0x%llx count=%llu\n",
+            // fd, buf_addr, count);
 
     if (fd != 0) {
         kprintf("[SYS_READ] unsupported fd %llu\n", fd);
@@ -80,7 +80,7 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count)
 
     uint64_t ret = kbd_read((char *)buf_addr, count);
 
-    kprintf("[SYS_READ] returned %llu\n", ret);
+    // kprintf("[SYS_READ] returned %llu\n", ret);
 
     return ret;
 }
@@ -92,7 +92,7 @@ static uint64_t sys_sleep(uint64_t seconds,
     (void)arg2;
     (void)arg3;
 
-    kprintf("[SYS_SLEEP] seconds=%llu\n", seconds);
+    // kprintf("[SYS_SLEEP] seconds=%llu\n", seconds);
 
     struct proc *p = my_cpu();
     if (!p)
@@ -118,7 +118,7 @@ static uint64_t sys_proc_dump(uint64_t arg1,
     (void)arg2;
     (void)arg3;
 
-    kprintf("[SYS_PROC_DUMP]\n");
+    // kprintf("[SYS_PROC_DUMP]\n");
 
     proc_dump_table();
 
@@ -132,7 +132,7 @@ static uint64_t sys_anon_allocate(uint64_t size,
     (void)arg2;
     (void)arg3;
 
-    kprintf("[SYS_ANON_ALLOC] size=%llu\n", size);
+    // kprintf("[SYS_ANON_ALLOC] size=%llu\n", size);
 
     struct proc *p = my_cpu();
 
@@ -144,7 +144,7 @@ static uint64_t sys_anon_allocate(uint64_t size,
                            (size_t)size,
                            VM_READ | VM_WRITE | VM_USER);
 
-    kprintf("[SYS_ANON_ALLOC] returned 0x%llx\n", addr);
+    // kprintf("[SYS_ANON_ALLOC] returned 0x%llx\n", addr);
 
     return addr ? addr : (uint64_t)-1;
 }
@@ -155,8 +155,8 @@ static uint64_t sys_anon_free(uint64_t addr,
 {
     (void)arg3;
 
-    kprintf("[SYS_ANON_FREE] addr=0x%llx size=%llu\n",
-            addr, size);
+    // kprintf("[SYS_ANON_FREE] addr=0x%llx size=%llu\n",
+    //         addr, size);
 
     struct proc *p = my_cpu();
 
@@ -177,7 +177,7 @@ static uint64_t sys_tcb_set(uint64_t addr,
     (void)arg2;
     (void)arg3;
 
-    kprintf("[SYS_TCB_SET] fs_base=0x%llx\n", addr);
+    // kprintf("[SYS_TCB_SET] fs_base=0x%llx\n", addr);
 
     struct proc *p = my_cpu();
 
@@ -203,7 +203,7 @@ static uint64_t sys_exit(uint64_t status,
     (void)arg2;
     (void)arg3;
 
-    kprintf("[SYS_EXIT] status=%llu\n", status);
+    // kprintf("[SYS_EXIT] status=%llu\n", status);
 
     struct proc *p = my_cpu();
 
@@ -234,10 +234,10 @@ uint64_t syscall_dispatch(uint64_t nr,
             ? syscall_names[nr]
             : "unknown";
 
-    kprintf("[SYSCALL #%d] %s\n", (int)nr, name);
-    kprintf("  arg1=0x%lx (%ld)\n", arg1, (int64_t)arg1);
-    kprintf("  arg2=0x%lx (%ld)\n", arg2, (int64_t)arg2);
-    kprintf("  arg3=0x%lx (%ld)\n", arg3, (int64_t)arg3);
+    // kprintf("[SYSCALL #%d] %s\n", (int)nr, name);
+    // kprintf("  arg1=0x%lx (%ld)\n", arg1, (int64_t)arg1);
+    // kprintf("  arg2=0x%lx (%ld)\n", arg2, (int64_t)arg2);
+    // kprintf("  arg3=0x%lx (%ld)\n", arg3, (int64_t)arg3);
 
     if (nr >= SYSCALL_COUNT || !syscall_table[nr]) {
         kprintf("  -> INVALID SYSCALL\n");
@@ -246,6 +246,6 @@ uint64_t syscall_dispatch(uint64_t nr,
 
     uint64_t ret = syscall_table[nr](arg1, arg2, arg3);
 
-    kprintf("  -> ret=0x%lx (%ld)\n", ret, (int64_t)ret);
+    // kprintf("  -> ret=0x%lx (%ld)\n", ret, (int64_t)ret);
     return ret;
 }
