@@ -119,13 +119,26 @@ struct proc* load_executable_from_binary(const char* binary_path, struct proc* p
         kprintf("Couldn't parse the binary file\n");
     }
 
+    phys_addr_t stack_top_phys = 0;
+
     // Allocate pages, map them R+W+USER+NX into user_pml4
     for (uint64_t i = 0; i < USER_STACK_SIZE; i += PAGE_SIZE) {
         phys_addr_t p = (phys_addr_t)pmm_alloc_page();
         memset(phys_to_virt_hhdm(p), 0, PAGE_SIZE);
         map_page(user_pml4, USER_STACK_TOP - USER_STACK_SIZE + i, p,
                 PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
+        if (i == USER_STACK_SIZE - PAGE_SIZE)
+            stack_top_phys = p;  // save the top page
     }
+
+    // Write initial stack via HHDM
+    uint64_t *stack = (uint64_t*)((uint8_t*)phys_to_virt_hhdm(stack_top_phys) + PAGE_SIZE);
+
+    *--stack = 0;  // auxv AT_NULL value
+    *--stack = 0;  // auxv AT_NULL key
+    *--stack = 0;  // envp NULL terminator
+    *--stack = 0;  // argv NULL terminator
+    *--stack = 0;  // argc = 0
 
     struct proc* p = proc_alloc(parent);
 
@@ -139,8 +152,20 @@ struct proc* load_executable_from_binary(const char* binary_path, struct proc* p
 
     memset(tf, 0, sizeof(*tf));
 
+    // Calculate the user virtual RSP
+    uint64_t stack_offset = (uint64_t)((uint8_t*)phys_to_virt_hhdm(stack_top_phys) + PAGE_SIZE) 
+                        - (uint64_t)stack;
+    uintptr_t user_rsp = USER_STACK_TOP - stack_offset;
+
+    /* SysV x86_64 ABI:
+    * stack must satisfy RSP % 16 == 8 at process entry.
+    */
+    user_rsp &= ~0xFULL;
+    user_rsp -= 8;
+
+    tf->rsp = user_rsp;
+
     tf->rip     = entry_pt;
-    tf->rsp     = USER_STACK_TOP - 16;
     tf->cs      = USER_CS;
     tf->ss      = USER_DS;
     tf->rflags  = 0x202;
@@ -152,7 +177,7 @@ struct proc* load_executable_from_binary(const char* binary_path, struct proc* p
     /* scheduler-resume rsp */
     p->kernel_rsp = kstack_top;
 
-    p->user_rsp = USER_STACK_TOP - 16;
+    p->user_rsp = tf->rsp;
 
     p->tf = tf;
 

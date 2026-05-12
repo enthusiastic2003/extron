@@ -1,5 +1,5 @@
 --- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0013c000, End=0x00396800, Cmdline="initrd"
+Module Found: Start=0x0013c000, End=0x005f1000, Cmdline="initrd"
 Memory Map:
   Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
   Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
@@ -9,24 +9,122 @@ Memory Map:
   Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
   Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
 Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 3144576 KB
-PMM Initialized! Bitmap at 0x0000000000397000, Size: 98304 bytes
+PMM Initialized! Bitmap at 0x00000000005f2000, Size: 98304 bytes
 Paging initialized.
 PMM Stats:
   Total managed:    786400 pages  (3071 MiB,  2 GiB)
-  Free (handout):   785232 pages  (3067 MiB)
-  Used / reserved:  1168 pages  (4 MiB)
+  Free (handout):   784629 pages  (3064 MiB)
+  Used / reserved:  1771 pages  (6 MiB)
 VMM: Bitmap initialized (4194304 bytes)
 VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
 Transitioning to Stage 2...
 --- Kernel Stage 2: Execution Phase ---
 Successfully running on high-half virtual stack.
 TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000013c000 - 0xffff800000396800
+TARFS: Found module 'initrd' at 0xffff80000013c000 - 0xffff8000005f1000
 [PROC] Process table initialized (capacity 256)
 [SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr=0x0000000000400000 offset=0x0000000000000000 filesz=616192 memsz=616192 flags=R-X
-[LOADER] PT_LOAD: vaddr=0x0000000000497700 offset=0x0000000000096700 filesz=4752 memsz=38360 flags=RW-
+[LOADER] PT_LOAD: vaddr=0x0000000000400000 offset=0x0000000000000000 filesz=616360 memsz=616360 flags=R-X
+[LOADER] PT_LOAD: vaddr=0x00000000004977a8 offset=0x00000000000967a8 filesz=4744 memsz=38352 flags=RW-
+[LOADER] Binary loaded, entry point: 0x0000000000400170
+[LOADER] PT_LOAD: vaddr=0x0000000000400000 offset=0x0000000000000000 filesz=616376 memsz=616376 flags=R-X
+[LOADER] PT_LOAD: vaddr=0x00000000004977b8 offset=0x00000000000967b8 filesz=4776 memsz=38336 flags=RW-
 [LOADER] Binary loaded, entry point: 0x0000000000400170
 [SCHED] Launching PID 0 (entry=0x0000000000400170, user_rsp=0x00007fffffffefc8)
-Enter something: this is sirjanh
-You entered: this is sirjanh
+Enter something: Sleep test starting...
+Looping ... 0
+Looping ... 1
+Looping ... 2
+Looping ... 3
+Looping ... 4
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 SLEEPING 0x0000000000ef2000 0xffffffff8010c1e0
+1 SLEEPING 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Looping ... 5
+helLooping ... 6
+lo
+You entered: hello
+Looping ... 7
+Looping ... 8
+Looping ... 9
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 ZOMBIE 0x0000000000ef2000 0x0000000000000000
+1 SLEEPING 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Looping ... 10
+Looping ... 11
+Looping ... 12
+Looping ... 13
+Looping ... 14
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 ZOMBIE 0x0000000000ef2000 0x0000000000000000
+1 SLEEPING 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Looping ... 15
+Looping ... 16
+Looping ... 17
+Looping ... 18
+Looping ... 19
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 ZOMBIE 0x0000000000ef2000 0x0000000000000000
+1 SLEEPING 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Looping ... 20
+Looping ... 21
+Looping ... 22
+Looping ... 23
+Looping ... 24
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 ZOMBIE 0x0000000000ef2000 0x0000000000000000
+1 SLEEPING 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Looping ... 25
+Looping ... 26
+Looping ... 27
+Looping ... 28
+Looping ... 29
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 ZOMBIE 0x0000000000ef2000 0x0000000000000000
+1 SLEEPING 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================
+Sleep test finished!
+
+========================================
+PID STATE CR3 CHAN
+----------------------------------------
+0 ZOMBIE 0x0000000000ef2000 0x0000000000000000
+1 ZOMBIE 0x0000000000fb8000 0x0000000000000000
+----------------------------------------
+TOTAL: 2
+========================================

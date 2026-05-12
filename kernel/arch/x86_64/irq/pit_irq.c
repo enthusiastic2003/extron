@@ -12,6 +12,11 @@ void timer_handler(struct isr_frame* f) {
 
     timer_debug_count++;
     
+    // Dump process table every 5 seconds (100 Hz * 5)
+    if (timer_debug_count % 500 == 0) {
+        proc_dump_table();
+    }
+    
     if ((f->cs & 3) == 3) {
         schedule();
 

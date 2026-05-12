@@ -86,19 +86,22 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count)
 }
 
 static uint64_t sys_sleep(uint64_t seconds,
-                          uint64_t arg2,
+                          uint64_t nanos,
                           uint64_t arg3)
 {
-    (void)arg2;
     (void)arg3;
-
-    // kprintf("[SYS_SLEEP] seconds=%llu\n", seconds);
 
     struct proc *p = my_cpu();
     if (!p)
         return (uint64_t)-1;
 
-    uint64_t ticks_to_sleep = seconds * 100;
+    // 100 Hz timer -> 1 tick = 10ms = 10,000,000 nanos
+    uint64_t ticks_to_sleep = (seconds * 100) + (nanos / 10000000);
+    
+    // Always sleep at least 1 tick if any time was requested, so we don't return instantly
+    if (ticks_to_sleep == 0 && (seconds > 0 || nanos > 0)) {
+        ticks_to_sleep = 1;
+    }
 
     p->sleep_until = time_now() + ticks_to_sleep;
     p->chan = NULL;
