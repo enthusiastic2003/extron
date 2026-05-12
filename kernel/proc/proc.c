@@ -10,7 +10,7 @@
 #include <kernel/console.h>
 #include <kernel/klibc/string.h>
 #include <kernel/proc/exec.h>
-
+#include <arch/tss.h>
 #include <kernel/proc/proc.h>
 
 #include <stdbool.h>
