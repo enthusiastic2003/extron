@@ -23,8 +23,14 @@ typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
 // Called once at boot to configure SYSCALL/SYSRET MSRs.
 void syscall_init(void);
 
+struct syscall_frame {
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    
+    uint64_t user_rip;
+    uint64_t user_rflags;
+    uint64_t user_rsp;
+} __attribute__((packed));
+
 // Invoked by the assembly landing pad; returns the syscall result.
-uint64_t syscall_dispatch(uint64_t nr,
-                          uint64_t arg1,
-                          uint64_t arg2,
-                          uint64_t arg3);
+uint64_t syscall_dispatch(struct syscall_frame *f);

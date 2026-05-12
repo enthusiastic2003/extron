@@ -227,11 +227,12 @@ static uint64_t sys_exit(uint64_t status,
 // Dispatcher
 // ----------------------------------------------------------------
 
-uint64_t syscall_dispatch(uint64_t nr,
-                          uint64_t arg1,
-                          uint64_t arg2,
-                          uint64_t arg3)
+uint64_t syscall_dispatch(struct syscall_frame *f)
 {
+    uint64_t nr = f->rax;
+    uint64_t arg1 = f->rdi;
+    uint64_t arg2 = f->rsi;
+    uint64_t arg3 = f->rdx;
     const char *name =
         (nr < SYSCALL_COUNT && syscall_names[nr])
             ? syscall_names[nr]
