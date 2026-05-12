@@ -71,7 +71,15 @@ struct proc* create_init_proc(const char* binary_path){
     // Calculate the user virtual RSP
     uint64_t stack_offset = (uint64_t)((uint8_t*)phys_to_virt_hhdm(stack_top_phys) + PAGE_SIZE) 
                         - (uint64_t)stack;
-    tf->rsp = USER_STACK_TOP - stack_offset;
+    uintptr_t user_rsp = USER_STACK_TOP - stack_offset;
+
+    /* SysV x86_64 ABI:
+    * stack must satisfy RSP % 16 == 8 at process entry.
+    */
+    user_rsp &= ~0xFULL;
+    user_rsp -= 8;
+
+    tf->rsp = user_rsp;
 
     tf->rip     = entry_pt;
     tf->cs      = USER_CS;

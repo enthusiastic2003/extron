@@ -6,21 +6,15 @@ CFLAGS  = -ffreestanding -O2 -Wall -Wextra -mcmodel=large \
           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib \
           -Ikernel/include -Ikernel/arch/x86_64/include -g
 
-# mlibc paths
-MLIBC_DIR   = usr
-MLIBC_INC   = $(MLIBC_DIR)/include
-MLIBC_LIB   = $(MLIBC_DIR)/lib
-CRT1        = $(MLIBC_LIB)/crt1.o
+USER_CC = x86_64-extron-gcc
 
-USER_CFLAGS  = -Wall -Wextra -g \
-               -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-               -fno-stack-protector -no-pie \
-               -nostdlib -nostdinc \
-               -I$(MLIBC_INC)
+# Userspace
+USER_CFLAGS = -Wall -Wextra -g \
+              -mno-red-zone \
+              -mno-mmx -mno-sse -mno-sse2 \
+              -fno-stack-protector
 
-USER_LDFLAGS = -Wl,--whole-archive -L$(MLIBC_LIB) -lc -Wl,--no-whole-archive \
-				-Wl,--allow-multiple-definition \
-				-lgcc
+USER_LDFLAGS = -no-pie
 
 BUILD   = build
 
@@ -46,11 +40,8 @@ $(BUILD)/kernel/%.o: kernel/%.asm
 $(BUILD)/kernel.elf: $(OBJ)
 	$(LD) -T kernel/linker.ld -o $@ $(OBJ) -nostdlib
 
-initrd/%: usr/%.c usr/user.ld
-	$(CC) $(USER_CFLAGS) -T usr/user.ld \
-	    $(CRT1) $< \
-	    $(USER_LDFLAGS) \
-	    -o $@
+initrd/%: usr/%.c
+	$(USER_CC) $(USER_CFLAGS) $< $(USER_LDFLAGS) -o $@
 
 $(BUILD)/initrd.tar: $(USER_PROGS)
 	mkdir -p $(BUILD)

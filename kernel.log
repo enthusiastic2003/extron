@@ -1,5 +1,5 @@
 --- Kernel Stage 1: Initialization ---
-Module Found: Start=0x0013c000, End=0x00530800, Cmdline="initrd"
+Module Found: Start=0x0013c000, End=0x00396800, Cmdline="initrd"
 Memory Map:
   Region: Addr=0x0000000000000000, Length=0x000000000009fc00 bytes, Type=1
   Region: Addr=0x000000000009fc00, Length=0x0000000000000400 bytes, Type=2
@@ -9,40 +9,26 @@ Memory Map:
   Region: Addr=0x00000000fffc0000, Length=0x0000000000040000 bytes, Type=2
   Region: Addr=0x000000fd00000000, Length=0x0000000300000000 bytes, Type=2
 Basic Meminfo: Lower Memory = 639 KB, Upper Memory = 3144576 KB
-PMM Initialized! Bitmap at 0x0000000000531000, Size: 98304 bytes
+PMM Initialized! Bitmap at 0x0000000000397000, Size: 98304 bytes
 Paging initialized.
 PMM Stats:
   Total managed:    786400 pages  (3071 MiB,  2 GiB)
-  Free (handout):   784822 pages  (3065 MiB)
-  Used / reserved:  1578 pages  (6 MiB)
+  Free (handout):   785232 pages  (3067 MiB)
+  Used / reserved:  1168 pages  (4 MiB)
 VMM: Bitmap initialized (4194304 bytes)
 VMM: stack at 0xffffd00000001000 (top 0xffffd00000401000)
 Transitioning to Stage 2...
 --- Kernel Stage 2: Execution Phase ---
 Successfully running on high-half virtual stack.
 TSS: loaded (RSP0 = 0xffffd00000401000)
-TARFS: Found module 'initrd' at 0xffff80000013c000 - 0xffff800000530800
+TARFS: Found module 'initrd' at 0xffff80000013c000 - 0xffff800000396800
 [PROC] Process table initialized (capacity 256)
 [SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr 0x0000000000400000 | filesz 945152 | memsz 981448 | flags RWX
-[LOADER] Binary loaded, entry point: 0x0000000000400000
-[SCHED] Launching PID 0 (entry=0x0000000000400000, user_rsp=0x00007fffffffefd8)
-[SYSCALL #6] tcb_set
-  arg1=0x00000000004e7300 (5141248)
-  arg2=0x00000000004e7300 (5141248)
-  arg3=0x00000000004e7300 (5141248)
-[SYS_TCB_SET] fs_base=0x00000000004e7300
-  -> ret=0x0000000000000000 (0)
-
-=== KERNEL PANIC ===
-
-PAGE FAULT
-addr=0x0000000000000000
-type=non-present page
-access=read
-mode=user
- 
-RIP=0x0000000000443fe0
-
-
-System halted.
+[LOADER] PT_LOAD: vaddr=0x0000000000400000 offset=0x0000000000000000 filesz=616288 memsz=616288 flags=R-X
+[LOADER] PT_LOAD: vaddr=0x0000000000497760 offset=0x0000000000096760 filesz=4752 memsz=39032 flags=RW-
+[LOADER] Binary loaded, entry point: 0x0000000000400170
+[SCHED] Launching PID 0 (entry=0x0000000000400170, user_rsp=0x00007fffffffefc8)
+[mlibc] printf called
+Enter something: this is sirjanh
+[mlibc] printf called
+You entered: this is sirjanh

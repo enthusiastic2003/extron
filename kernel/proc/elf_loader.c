@@ -68,34 +68,43 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
     return ELF_OK;
 }
 
-int parse_and_load_binary(virt_addr_t binary_mem_loc, size_t buffer_size, pml4_t user_pml4, virt_addr_t* out_entry_point) {
-    Elf64_Ehdr* ehdr = (Elf64_Ehdr*)binary_mem_loc;
-    
+int parse_and_load_binary(virt_addr_t binary_mem_loc,
+                          size_t buffer_size,
+                          pml4_t user_pml4,
+                          virt_addr_t *out_entry_point) {
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)binary_mem_loc;
+
     /* Validate ELF */
     Elf64_ValidationResult result = elf64_validate(ehdr, buffer_size);
-    if (result != ELF_OK) {
+    if(result != ELF_OK) {
         kprintf("[LOADER] ELF validation failed: %d\n", result);
         return result;
     }
 
-    const Elf64_Phdr* phdr = (const Elf64_Phdr*)((uint8_t*)ehdr + ehdr->e_phoff);
-    
-    /* Verify first PT_LOAD is at expected base (0x400000) */
+    const Elf64_Phdr *phdr =
+        (const Elf64_Phdr *)((uint8_t *)ehdr + ehdr->e_phoff);
+
+    /* Verify first PT_LOAD base */
     bool found_first_load = false;
-    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD && !found_first_load) {
-            if (phdr[i].p_vaddr != ELF_USER_EXPECTED_BASE) {
-                kprintf("[LOADER] First PT_LOAD at 0x%llx, expected 0x%llx\n",
-                        phdr[i].p_vaddr, (uint64_t)ELF_USER_EXPECTED_BASE);
-                return -10; /* ELF_ERR_BASE from validator */
+
+    for(Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if(phdr[i].p_type == PT_LOAD && !found_first_load) {
+            if(phdr[i].p_vaddr != ELF_USER_EXPECTED_BASE) {
+                kprintf(
+                    "[LOADER] First PT_LOAD at 0x%llx, expected 0x%llx\n",
+                    phdr[i].p_vaddr,
+                    (uint64_t)ELF_USER_EXPECTED_BASE
+                );
+                return -10;
             }
+
             found_first_load = true;
             break;
         }
     }
 
-    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type != PT_LOAD)
+    for(Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if(phdr[i].p_type != PT_LOAD)
             continue;
 
         Elf64_Addr  vaddr  = phdr[i].p_vaddr;
@@ -104,41 +113,101 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc, size_t buffer_size, pml4_t
         Elf64_Xword memsz  = phdr[i].p_memsz;
         Elf64_Word  pflags = phdr[i].p_flags;
 
-        kprintf("[LOADER] PT_LOAD: vaddr 0x%llx | filesz %llu | memsz %llu | flags %c%c%c\n",
-                vaddr, filesz, memsz,
-                (pflags & PF_R) ? 'R' : '-',
-                (pflags & PF_W) ? 'W' : '-',
-                (pflags & PF_X) ? 'X' : '-');
+        kprintf(
+            "[LOADER] PT_LOAD: "
+            "vaddr=0x%llx offset=0x%llx "
+            "filesz=%llu memsz=%llu flags=%c%c%c\n",
+            vaddr,
+            offset,
+            filesz,
+            memsz,
+            (pflags & PF_R) ? 'R' : '-',
+            (pflags & PF_W) ? 'W' : '-',
+            (pflags & PF_X) ? 'X' : '-'
+        );
 
         uint64_t page_flags = PAGE_PRESENT | PAGE_USER;
-        if (pflags & PF_W)    page_flags |= PAGE_WRITE;
-        if (!(pflags & PF_X)) page_flags |= PAGE_NX;
 
-        uint64_t total_pages = (memsz + PAGE_SIZE - 1) / PAGE_SIZE;
-        const uint8_t* file_data = (const uint8_t*)binary_mem_loc + offset;
+        if(pflags & PF_W)
+            page_flags |= PAGE_WRITE;
 
-        /* Treat all segments uniformly: allocate fresh pages, copy data */
-        for (uint64_t page = 0; page < total_pages; page++) {
-            phys_addr_t phys = (phys_addr_t)pmm_alloc_page();
-            uint8_t* dst = (uint8_t*)phys_to_virt_hhdm(phys);
+        if(!(pflags & PF_X))
+            page_flags |= PAGE_NX;
 
-            uint64_t page_start = page * PAGE_SIZE;
-            uint64_t file_bytes = (page_start < filesz)
-                ? ((filesz - page_start > PAGE_SIZE) ? PAGE_SIZE : filesz - page_start)
-                : 0;
+        /* ELF segments may not be page aligned */
+        uint64_t aligned_vaddr  = vaddr  & ~(PAGE_SIZE - 1);
+        uint64_t aligned_offset = offset & ~(PAGE_SIZE - 1);
 
-            if (file_bytes > 0)
-                memcpy(dst, file_data + page_start, file_bytes);
-            if (file_bytes < PAGE_SIZE)
-                memset(dst + file_bytes, 0, PAGE_SIZE - file_bytes);
+        uint64_t page_delta = vaddr - aligned_vaddr;
 
-            map_page(user_pml4, vaddr + page_start, phys, page_flags);
+        uint64_t total_mem =
+            page_delta + memsz;
+
+        uint64_t total_pages =
+            (total_mem + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        const uint8_t *file_base =
+            (const uint8_t *)binary_mem_loc + aligned_offset;
+
+        for(uint64_t page = 0; page < total_pages; page++) {
+            phys_addr_t phys =
+                (phys_addr_t)pmm_alloc_page();
+
+            uint8_t *dst =
+                (uint8_t *)phys_to_virt_hhdm(phys);
+
+            memset(dst, 0, PAGE_SIZE);
+
+            uint64_t page_file_offset =
+                page * PAGE_SIZE;
+
+            uint64_t segment_file_start =
+                page_delta;
+
+            if(page_file_offset + PAGE_SIZE > segment_file_start &&
+               page_file_offset < segment_file_start + filesz) {
+
+                uint64_t copy_start_in_page = 0;
+
+                if(segment_file_start > page_file_offset)
+                    copy_start_in_page =
+                        segment_file_start - page_file_offset;
+
+                uint64_t file_data_offset =
+                    page_file_offset + copy_start_in_page;
+
+                uint64_t remaining =
+                    segment_file_start + filesz - file_data_offset;
+
+                uint64_t copy_size =
+                    PAGE_SIZE - copy_start_in_page;
+
+                if(copy_size > remaining)
+                    copy_size = remaining;
+
+                memcpy(
+                    dst + copy_start_in_page,
+                    file_base + file_data_offset,
+                    copy_size
+                );
+            }
+
+            map_page(
+                user_pml4,
+                aligned_vaddr + page * PAGE_SIZE,
+                phys,
+                page_flags
+            );
         }
     }
 
-    out_entry_point[0] = ehdr->e_entry;
-    kprintf("[LOADER] Binary loaded, entry point: 0x%llx\n", ehdr->e_entry);
+    *out_entry_point = ehdr->e_entry;
+
+    kprintf(
+        "[LOADER] Binary loaded, entry point: 0x%llx\n",
+        ehdr->e_entry
+    );
+
     return 0;
 }
-
 

@@ -8,6 +8,8 @@ set confirm off
 set logging file regs.txt
 set logging enabled on
 
+add-symbol-file initrd/test
+
 layout split
 layout regs
 

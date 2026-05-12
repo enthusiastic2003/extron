@@ -1,6 +1,16 @@
 #include <stdio.h>
 
 int main(void) {
-    printf("Hello from extron userspace!\n");
+    char buf[128];
+
+    printf("Enter something: ");
+    fflush(stdout);
+
+    if(fgets(buf, sizeof(buf), stdin)) {
+        printf("You entered: %s", buf);
+    } else {
+        printf("Input failed\n");
+    }
+
     return 0;
 }
