@@ -8,23 +8,6 @@
 #include <arch/isr.h>
 #include <stddef.h>
 
-/* ---------------------------------------------------------------
- * IA32_FS_BASE MSR helpers (for TLS / mlibc TCB)
- * --------------------------------------------------------------- */
-#define MSR_FS_BASE 0xC0000100U
-
-static inline uint64_t read_fs_base(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(MSR_FS_BASE));
-    return ((uint64_t)hi << 32) | lo;
-}
-
-static inline void write_fs_base(uint64_t base) {
-    __asm__ volatile("wrmsr" ::
-        "c"(MSR_FS_BASE),
-        "a"((uint32_t)base),
-        "d"((uint32_t)(base >> 32)));
-}
 
 /* ---------------------------------------------------------------
  * The raw current-process pointer.
@@ -174,24 +157,16 @@ void schedule(void) {
     next->state  = PROC_RUNNING;
     current_proc = next;
 
-    tss_set_rsp0(next->kernel_stack_top);
-    if (old->cr3 != next->cr3)
-        load_cr3(next->cr3);
-
-    old->fs_base = read_fs_base();
-    write_fs_base(next->fs_base);
+    proc_install(old, next);
 
     context_switch(&old->context, &next->context);
 }
+
 
 /* ---------------------------------------------------------------
  * sched_start — launch the very first user process
  *
  * Called once from kernel_stage2. Never returns.
- *
- * The process was prepared by create_init_proc(), which placed
- * a trap frame at the top of its kernel stack. We use
- * enter_userspace() to jump into ring 3.
  * --------------------------------------------------------------- */
 void sched_start(void) {
     irq_spin_lock(&run_queue_lock);
@@ -215,12 +190,7 @@ void sched_start(void) {
     p->state     = PROC_RUNNING;
     current_proc = p;
 
-    /* Set TSS RSP0 so hardware interrupts in ring 3
-       switch to this process's kernel stack */
-    tss_set_rsp0(p->kernel_stack_top);
-
-    /* Load user page tables */
-    load_cr3(p->cr3);
+    proc_install(NULL, p);
 
     kprintf("[SCHED] Launching PID %llu (entry=0x%llx, user_rsp=0x%llx)\n",
             p->pid, p->tf->rip, p->tf->rsp);
@@ -232,14 +202,15 @@ void sched_start(void) {
     /* Reset kernel_rsp to the clean stack top for future syscalls */
     p->kernel_rsp = p->kernel_stack_top;
 
-    write_fs_base(p->fs_base);
-
     /* Jump to ring 3 — never returns */
     enter_userspace(entry, user_rsp);
 }
 
 void proc_first_run(void) {
     struct proc *p = my_cpu();
-    write_fs_base(p->fs_base);
+    
+    /* Reset kernel_rsp to the clean stack top for future syscalls */
+    p->kernel_rsp = p->kernel_stack_top;
+    
     enter_userspace(p->tf->rip, p->tf->rsp);
 }

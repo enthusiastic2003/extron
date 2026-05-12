@@ -106,6 +106,24 @@ static const char *proc_state_str(enum proc_state s) {
     }
 }
 
+/* ---------------------------------------------------------------
+ * IA32_FS_BASE MSR helpers (for TLS / mlibc TCB)
+ * --------------------------------------------------------------- */
+#define MSR_FS_BASE 0xC0000100U
+
+static inline uint64_t read_fs_base(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(MSR_FS_BASE));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void write_fs_base(uint64_t base) {
+    __asm__ volatile("wrmsr" ::
+        "c"(MSR_FS_BASE),
+        "a"((uint32_t)base),
+        "d"((uint32_t)(base >> 32)));
+}
+
 /* -------------------------------------------------------------
  * Process management
  * ------------------------------------------------------------- */
@@ -131,5 +149,6 @@ void sleep(void *chan, spinlock_t *lk);
 void proc_table_init(void);
 void proc_dump_table(void);
 void proc_wakeup_expired(uint64_t now);
+void proc_install(struct proc *old, struct proc *next);
 
 #endif /* PROC_H */

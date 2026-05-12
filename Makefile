@@ -10,9 +10,7 @@ USER_CC = x86_64-extron-gcc
 
 # Userspace
 USER_CFLAGS = -Wall -Wextra -g \
-              -mno-red-zone \
               -mno-mmx -mno-sse -mno-sse2 \
-              -fno-stack-protector
 
 USER_LDFLAGS = -no-pie
 

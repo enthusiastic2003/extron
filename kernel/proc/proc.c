@@ -230,6 +230,21 @@ void proc_set_zombie(struct proc *p) {
     p->state = PROC_ZOMBIE;
 }
 
+/*
+proc install
+*/
+
+// In proc.c
+void proc_install(struct proc *old, struct proc *next) {
+    tss_set_rsp0(next->kernel_stack_top);
+
+    if (!old || old->cr3 != next->cr3)
+        load_cr3(next->cr3);
+
+    if (old)
+        old->fs_base = read_fs_base();
+    write_fs_base(next->fs_base);
+}
 
 /*
 * 

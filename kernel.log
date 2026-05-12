@@ -24,11 +24,9 @@ TSS: loaded (RSP0 = 0xffffd00000401000)
 TARFS: Found module 'initrd' at 0xffff80000013c000 - 0xffff800000396800
 [PROC] Process table initialized (capacity 256)
 [SCHED] Scheduler initialized
-[LOADER] PT_LOAD: vaddr=0x0000000000400000 offset=0x0000000000000000 filesz=616288 memsz=616288 flags=R-X
-[LOADER] PT_LOAD: vaddr=0x0000000000497760 offset=0x0000000000096760 filesz=4752 memsz=39032 flags=RW-
+[LOADER] PT_LOAD: vaddr=0x0000000000400000 offset=0x0000000000000000 filesz=616192 memsz=616192 flags=R-X
+[LOADER] PT_LOAD: vaddr=0x0000000000497700 offset=0x0000000000096700 filesz=4752 memsz=38360 flags=RW-
 [LOADER] Binary loaded, entry point: 0x0000000000400170
 [SCHED] Launching PID 0 (entry=0x0000000000400170, user_rsp=0x00007fffffffefc8)
-[mlibc] printf called
 Enter something: this is sirjanh
-[mlibc] printf called
 You entered: this is sirjanh
