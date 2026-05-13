@@ -20,12 +20,11 @@ int main(void) {
     }
 
     if(pid==0){
-        for(int s=1 ; s<=5; s++){
-            printf("Child sleeping %d seconds \n", s);
-            sleep(1);
-        }
-        printf("Child woke up\n");
+        printf("Child calling execve(\"./test2\")...\n");
         fflush(stdout);
+        char *args[] = {"test2", "hello", "world", "from", "execve", NULL};
+        execve("./test2", args, NULL);
+        printf("EXECVE FAILED!\n");
     }
 
     printf("Process with fork() ret = %d is exiting.\n", pid);

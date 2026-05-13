@@ -7,6 +7,8 @@
 #include <kernel/time.h>
 #include <kernel/mm/paging.h>
 #include <kernel/klibc/string.h>
+#include <kernel/proc/exec.h>
+#include <kernel/mm/kheap.h>
 
 // ----------------------------------------------------------------
 // Forward declarations
@@ -35,6 +37,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_ANON_FREE]  = sys_anon_free,
     [SYS_TCB_SET]    = sys_tcb_set,
     [SYS_EXIT]       = sys_exit,
+    [SYS_EXECVE]     = NULL, // special case, uses frame
 };
 
 static const char *syscall_names[] = {
@@ -47,6 +50,7 @@ static const char *syscall_names[] = {
     [SYS_TCB_SET]    = "tcb_set",
     [SYS_EXIT]       = "exit",
     [SYS_FORK]       = "fork",
+    [SYS_EXECVE]     = "execve",
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -266,6 +270,78 @@ static uint64_t sys_fork(struct syscall_frame *f)
     return child->pid;
 }
 
+static uint64_t sys_execve(struct syscall_frame *f)
+{
+    const char *path = (const char *)f->rdi;
+    char *const *argv = (char *const *)f->rsi;
+    char *const *envp = (char *const *)f->rdx;
+    
+    char kernel_path[256];
+    size_t i = 0;
+    while (i < 255) {
+        kernel_path[i] = path[i];
+        if (kernel_path[i] == '\0') break;
+        i++;
+    }
+    kernel_path[255] = '\0';
+
+    int argc = 0;
+    int envc = 0;
+    char *kargv[32] = {0};
+    char *kenvp[32] = {0};
+    
+    if (argv) {
+        while (argv[argc] && argc < 31) {
+            char *user_str = argv[argc];
+            int len = strlen(user_str);
+            kargv[argc] = kmalloc(len + 1);
+            memcpy(kargv[argc], user_str, len + 1);
+            argc++;
+        }
+    }
+    
+    if (envp) {
+        while (envp[envc] && envc < 31) {
+            char *user_str = envp[envc];
+            int len = strlen(user_str);
+            kenvp[envc] = kmalloc(len + 1);
+            memcpy(kenvp[envc], user_str, len + 1);
+            envc++;
+        }
+    }
+
+    phys_addr_t new_pml4;
+    virt_addr_t new_entry;
+    virt_addr_t new_rsp;
+
+    if (exec_load_binary(kernel_path, argc, kargv, envc, kenvp, &new_pml4, &new_entry, &new_rsp) < 0) {
+        kprintf("[EXECVE] Failed to load binary '%s'\n", kernel_path);
+        for (int j = 0; j < argc; j++) kfree(kargv[j]);
+        for (int j = 0; j < envc; j++) kfree(kenvp[j]);
+        return (uint64_t)-1;
+    }
+
+    for (int j = 0; j < argc; j++) kfree(kargv[j]);
+    for (int j = 0; j < envc; j++) kfree(kenvp[j]);
+
+    struct proc *p = my_cpu();
+    
+    load_cr3(new_pml4);
+    vm_space_destroy(p->mm);
+    
+    p->cr3 = new_pml4;
+    p->mm = vm_space_create(new_pml4);
+    
+    f->rdi = 0; // argc = 0
+    f->rsi = 0; // argv = NULL
+    f->rdx = 0; // envp = NULL
+    
+    f->user_rip = new_entry;
+    f->user_rsp = new_rsp;
+    
+    return 0;
+}
+
 // ----------------------------------------------------------------
 // Dispatcher
 // ----------------------------------------------------------------
@@ -287,7 +363,15 @@ uint64_t syscall_dispatch(struct syscall_frame *f)
     // kprintf("  arg3=0x%lx (%ld)\n", arg3, (int64_t)arg3);
 
     if (nr == SYS_FORK) {
-        return sys_fork(f);
+        uint64_t ret = sys_fork(f);
+        f->rax = ret;
+        return ret;
+    }
+
+    if (nr == SYS_EXECVE) {
+        uint64_t ret = sys_execve(f);
+        f->rax = ret;
+        return ret;
     }
 
     if (nr >= SYSCALL_COUNT || !syscall_table[nr]) {

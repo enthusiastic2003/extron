@@ -14,6 +14,7 @@
 #define SYS_TCB_SET     6   /* set FS base for TLS (mlibc sys_tcb_set) */
 #define SYS_EXIT        7   /* terminate current process */
 #define SYS_FORK        8
+#define SYS_EXECVE      9
 
 typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
 
