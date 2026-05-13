@@ -72,5 +72,8 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags);
  */
 void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size);
 
+struct vm_space *vm_space_clone(struct vm_space *src);
+phys_addr_t deep_copy_pml4(phys_addr_t src_pml4_phys);
+
 
 #endif // VMM_H

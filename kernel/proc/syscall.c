@@ -6,6 +6,7 @@
 #include <kernel/proc/proc.h>
 #include <kernel/time.h>
 #include <kernel/mm/paging.h>
+#include <kernel/klibc/string.h>
 
 // ----------------------------------------------------------------
 // Forward declarations
@@ -19,6 +20,7 @@ static uint64_t sys_anon_allocate(uint64_t size, uint64_t arg2, uint64_t arg3);
 static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3);
 static uint64_t sys_tcb_set(uint64_t addr, uint64_t arg2, uint64_t arg3);
 static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3);
+static uint64_t sys_fork(struct syscall_frame *f);
 
 // ----------------------------------------------------------------
 // Syscall table
@@ -44,6 +46,7 @@ static const char *syscall_names[] = {
     [SYS_ANON_FREE]  = "anon_free",
     [SYS_TCB_SET]    = "tcb_set",
     [SYS_EXIT]       = "exit",
+    [SYS_FORK]       = "fork",
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -223,6 +226,46 @@ static uint64_t sys_exit(uint64_t status,
     __builtin_unreachable();
 }
 
+extern void syscall_return(void);
+
+static uint64_t sys_fork(struct syscall_frame *f)
+{
+    struct proc *parent = my_cpu();
+    if (!parent) return (uint64_t)-1;
+
+    struct proc *child = proc_alloc(parent);
+    if (!child) return (uint64_t)-1;
+
+    // Clone memory space
+    child->mm = vm_space_clone(parent->mm);
+    if (!child->mm) {
+        proc_free(child);
+        return (uint64_t)-1;
+    }
+    child->cr3 = child->mm->cr3;
+    child->fs_base = parent->fs_base;
+
+    // Copy the exact syscall frame to the child's kernel stack
+    struct syscall_frame *child_f = (struct syscall_frame *)(child->kernel_stack_top - sizeof(struct syscall_frame));
+    memcpy(child_f, f, sizeof(struct syscall_frame));
+
+    // The child should return 0 from fork()
+    child_f->rax = 0;
+
+    // Set up child's context to return via syscall_return
+    extern void syscall_return(void);
+    child->context.rip = (uint64_t)syscall_return;
+    child->context.rsp = (uint64_t)child_f;
+
+    child->user_rsp = child_f->user_rsp;
+
+    child->state = PROC_RUNNABLE;
+    sched_add(child);
+
+    f->rax = child->pid;
+    return child->pid;
+}
+
 // ----------------------------------------------------------------
 // Dispatcher
 // ----------------------------------------------------------------
@@ -243,12 +286,18 @@ uint64_t syscall_dispatch(struct syscall_frame *f)
     // kprintf("  arg2=0x%lx (%ld)\n", arg2, (int64_t)arg2);
     // kprintf("  arg3=0x%lx (%ld)\n", arg3, (int64_t)arg3);
 
+    if (nr == SYS_FORK) {
+        return sys_fork(f);
+    }
+
     if (nr >= SYSCALL_COUNT || !syscall_table[nr]) {
         kprintf("  -> INVALID SYSCALL\n");
         return (uint64_t)-1;
     }
 
     uint64_t ret = syscall_table[nr](arg1, arg2, arg3);
+
+    f->rax = ret;
 
     // kprintf("  -> ret=0x%lx (%ld)\n", ret, (int64_t)ret);
     return ret;

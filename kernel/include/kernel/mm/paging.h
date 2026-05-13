@@ -40,6 +40,41 @@
 #define VM_EXEC  (1 << 2)
 #define VM_USER  (1 << 3)
 
+#include <stdint.h>
+
+typedef union PageEntry {
+    uint64_t value;
+
+    struct {
+        uint64_t present        : 1; // PAGE_PRESENT
+        uint64_t writable       : 1; // PAGE_WRITE
+        uint64_t user           : 1; // PAGE_USER
+        uint64_t write_through  : 1; // PAGE_WRITE_THROUGH
+        uint64_t cache_disable  : 1; // PAGE_CACHE_DISABLE
+        uint64_t accessed       : 1; // PAGE_ACCESSED
+        uint64_t dirty          : 1; // PAGE_DIRTY
+        uint64_t huge           : 1; // PAGE_HUGE
+        uint64_t global         : 1; // PAGE_GLOBAL
+
+        // Custom software bits
+        uint64_t cow            : 1; // PAGE_CUSTOM_COW
+        uint64_t shared         : 1; // PAGE_CUSTOM_SHARED
+        uint64_t swapped        : 1; // PAGE_CUSTOM_SWAP
+
+        // Physical address bits [51:12]
+        uint64_t addr           : 40;
+
+        // Available to software
+        uint64_t available      : 11;
+
+        uint64_t nx             : 1; // PAGE_NX
+    };
+} PageEntry;
+
+typedef struct PageTable {
+    PageEntry entries[512];
+} __attribute__((aligned(4096))) PageTable;
+
 void init_paging(uint64_t mb2_addr);
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags);
 int unmap_page(pml4_t pml4, virt_addr_t virt);

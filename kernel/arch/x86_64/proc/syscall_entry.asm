@@ -144,7 +144,6 @@ syscall_entry:
     push r13                           ; r13  @  16
     push r14                           ; r14  @   8
     push r15                           ; r15  @   0   (last push, top of stack)
-
     ; 4. Call C dispatcher: uint64_t syscall_dispatch(struct syscall_frame *tf)
     mov rdi, rsp                       ; arg1: struct syscall_frame *
     mov rbp, rsp
@@ -152,7 +151,9 @@ syscall_entry:
     call syscall_dispatch
     mov rsp, rbp
 
-    ; 5. Restore registers (rax slot is discarded — C return value already in rax)
+global syscall_return
+syscall_return:
+    ; 5. Restore registers
     pop r15
     pop r14
     pop r13
@@ -168,8 +169,7 @@ syscall_entry:
     pop rdx
     pop rcx                            ; user RIP
     pop rbx
-
-    add rsp, 8                         ; skip saved rax slot; keep C return value
+    pop rax                            ; Restore rax from the frame
 
     ; 6. Build the IRETQ frame from saved user_rip / user_rflags / user_rsp.
     ;

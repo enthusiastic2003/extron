@@ -113,7 +113,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     sched_init();
 
     struct proc *init  = create_init_proc("./test");
-    struct proc *sleep_proc = load_executable_from_binary("./sleep_test", init);
+    // struct proc *sleep_proc = load_executable_from_binary("./sleep_test", init);
 
     if (init) {
         sched_add(init);
@@ -121,11 +121,11 @@ void kernel_stage2(uint64_t mb2_addr) {
         kprintf("Failed to create init process!\n");
     }
 
-    if (sleep_proc) {
-        sched_add(sleep_proc);
-    } else {
-        kprintf("Failed to create sleep_test process!\n");
-    }
+    // if (sleep_proc) {
+    //     sched_add(sleep_proc);
+    // } else {
+    //     kprintf("Failed to create sleep_test process!\n");
+    // }
 
     sched_start();  /* never returns */
 
