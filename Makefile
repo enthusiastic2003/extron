@@ -1,3 +1,43 @@
+ARCH ?= x86_64
+
+BUILD   = build
+
+ifeq ($(ARCH),aarch64)
+
+CC      = aarch64-linux-gnu-gcc
+LD      = aarch64-linux-gnu-ld
+OBJCOPY = aarch64-linux-gnu-objcopy
+
+CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
+          -mcpu=cortex-a72 -Ikernel/include -g
+
+C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c")
+S_SRC   := $(shell find kernel/arch/aarch64 -name "*.S")
+ASM_SRC :=
+C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
+S_OBJ   := $(patsubst kernel/%.S,$(BUILD)/kernel/%.o,$(S_SRC))
+OBJ     := $(C_OBJ) $(S_OBJ)
+
+KERNEL_ELF := $(BUILD)/kernel8.elf
+KERNEL_IMG := $(BUILD)/kernel8.img
+
+all: $(KERNEL_IMG)
+
+$(BUILD)/kernel/%.o: kernel/%.S
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(KERNEL_ELF): $(OBJ) kernel/arch/aarch64/linker.ld
+	$(LD) -T kernel/arch/aarch64/linker.ld -o $@ $(OBJ)
+
+$(KERNEL_IMG): $(KERNEL_ELF)
+	$(OBJCOPY) -O binary $< $@
+
+run: $(KERNEL_IMG)
+	qemu-system-aarch64 -M raspi4b -serial stdio -display none -kernel $(KERNEL_IMG)
+
+else
+
 AS      = nasm
 CC      = x86_64-elf-gcc
 LD      = x86_64-elf-gcc
@@ -14,9 +54,7 @@ USER_CFLAGS = -Wall -Wextra -g \
 
 USER_LDFLAGS = -no-pie
 
-BUILD   = build
-
-C_SRC   := $(shell find kernel -name "*.c")
+C_SRC   := $(shell find kernel -name "*.c" -not -path "kernel/arch/aarch64/*")
 ASM_SRC := $(shell find kernel -name "*.asm")
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
 ASM_OBJ := $(patsubst kernel/%.asm,$(BUILD)/kernel/%.o,$(ASM_SRC))
@@ -26,10 +64,6 @@ USER_SRC   := $(wildcard usr/*.c)
 USER_PROGS := $(patsubst usr/%.c,initrd/%,$(USER_SRC))
 
 all: $(BUILD)/kernel.elf iso
-
-$(BUILD)/kernel/%.o: kernel/%.c
-	mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/kernel/%.o: kernel/%.asm
 	mkdir -p $(dir $@)
@@ -57,6 +91,13 @@ run: all
 
 debug: all
 	qemu-system-x86_64 -m 3G -cdrom myos.iso -s -S -serial file:kernel.log
+
+endif
+
+# Shared pattern rule: works for both arches since CC/CFLAGS switch above.
+$(BUILD)/kernel/%.o: kernel/%.c
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
 	rm -rf $(BUILD) iso myos.iso
