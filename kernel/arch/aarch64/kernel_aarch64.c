@@ -6,6 +6,8 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/paging.h>
 #include <arch/exceptions.h>
+#include <arch/gic.h>
+#include <arch/timer.h>
 #include "fdt.h"
 #include "mb2_shim.h"
 
@@ -106,10 +108,14 @@ void arch_kernel_mid_init(void) {
  * stack instead of boot.S's temporary one. The aarch64 counterpart to
  * kernel_stage2() in kernel/arch/x86_64/kernel_x86.c — reached the same
  * way, via a raw stack-pointer switch + branch, never returning to
- * kernel_stage1. There's nothing to actually do here yet (GDT/IDT/GIC/
- * scheduler don't exist — Milestone 4+), so it's just proof the switch
- * itself works. mb2_addr is unused for now (x86's kernel_stage2 needs
+ * kernel_stage1. mb2_addr is unused for now (x86's kernel_stage2 needs
  * it for tar_init(); aarch64 has no initrd yet).
+ *
+ * Exception vector table + GIC-400 + timer bring-up all happen here,
+ * in that order: VBAR_EL1 must be live before anything that could fault
+ * (including the GIC's own MMIO mapping), and the CPU-level IRQ mask
+ * shouldn't lift until the GIC and timer are fully configured, so
+ * nothing can be delivered before something exists to handle it.
  */
 static void kernel_aarch64_stage2(uint64_t mb2_addr) {
     (void)mb2_addr;
@@ -117,17 +123,17 @@ static void kernel_aarch64_stage2(uint64_t mb2_addr) {
     kprintf("Successfully running on the VMM-allocated kernel stack.\n");
 
     exceptions_init();
-    kprintf("aarch64: VBAR_EL1 set, IRQs unmasked.\n");
+    kprintf("aarch64: VBAR_EL1 set (synchronous exceptions verified separately).\n");
 
-    /* Milestone 4, first proof point: deliberately trigger a
-     * synchronous exception (SVC — clean and side-effect-free, unlike
-     * e.g. a null-pointer deref) and confirm the vector table actually
-     * catches it (via exception_dispatch's panic) instead of hanging
-     * silently, before building GIC/IRQ handling on top of this. */
-    kprintf("aarch64: triggering a test SVC to prove the vector table works...\n");
-    __asm__ volatile ("svc #0");
+    gic_init();
+    kprintf("aarch64: GIC-400 initialized (GICD 0xFF841000, GICC 0xFF842000).\n");
 
-    // Only reached if exception_dispatch somehow returned (it shouldn't — panic() halts).
+    timer_init(2);
+    kprintf("aarch64: generic timer armed at 2 Hz, IRQ %d enabled.\n", GIC_PPI_NS_PHYS_TIMER);
+
+    exceptions_enable_irqs();
+    kprintf("aarch64: IRQs unmasked at the CPU.\n");
+
     for (;;) {
         __asm__ volatile ("wfe");
     }

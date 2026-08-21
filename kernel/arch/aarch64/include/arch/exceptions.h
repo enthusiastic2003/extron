@@ -35,11 +35,19 @@ enum aarch64_exception_type {
 
 typedef void (*aarch64_irq_handler_fn)(struct aarch64_frame *f);
 
-/* Points VBAR_EL1 at the vector table in exceptions.S and unmasks IRQs
- * (DAIF.I) — call once, after the GIC (kernel/arch/aarch64/gic.c) is
- * initialized so unmasking doesn't immediately take an IRQ with nothing
- * configured to handle it. */
+/* Points VBAR_EL1 at the vector table in exceptions.S. Call first, before
+ * anything that could fault (including the GIC's own MMIO mapping) —
+ * without this, any exception has nowhere valid to land. */
 void exceptions_init(void);
+
+/* Unmasks IRQ and FIQ at the CPU level (DAIF.I/DAIF.F) — both, since
+ * GIC-400's Group 0 default routes to FIQ rather than IRQ, and
+ * exception_dispatch() handles either line through the same GIC ack/EOI
+ * path. Call last, only once the GIC and every interrupt source it's
+ * expected to deliver are fully configured — deliberately separate from
+ * exceptions_init() so nothing can be delivered before something exists
+ * to handle it. */
+void exceptions_enable_irqs(void);
 
 /* Registers a handler for one GIC interrupt ID, dispatched from the IRQ
  * path once gic_init() + an actual enabled interrupt source exist. */

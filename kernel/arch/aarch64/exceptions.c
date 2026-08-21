@@ -1,4 +1,5 @@
 #include <arch/exceptions.h>
+#include <arch/gic.h>
 #include <kernel/console.h>
 #include <kernel/panic.h>
 
@@ -12,10 +13,14 @@
  * AArch64 funnels every synchronous exception through one entry point
  * and expects software to read *why* out of a register instead.
  *
- * GIC bring-up (kernel/arch/aarch64/gic.c) hasn't landed yet, so IRQ/FIQ
- * have nothing legitimate to dispatch to — panic loudly rather than
- * silently drop them, same as x86's isr_handler falls back to panic for
- * anything without a registered handler.
+ * The IRQ path mirrors kernel/arch/x86_64/irq.c's shape (an
+ * irq_handlers[] table + register_irq_handler()) but acknowledges
+ * through the GIC-400 (gic_ack_irq()/gic_eoi_irq()) instead of PIC port
+ * writes — x86's irq.c sends EOI *before* dispatching (its comment
+ * explains why: a handler might reschedule away mid-stack, and an
+ * un-ACKed PIC would starve further IRQs on that line until whatever
+ * comes back around); GIC's EOI is independent of the ACK read (IAR) and
+ * is read here after the handler returns, since nothing reschedules yet.
  */
 
 #define IRQ_HANDLER_MAX 256
@@ -33,11 +38,17 @@ extern char vector_table[]; /* exceptions.S */
 void exceptions_init(void) {
     __asm__ volatile ("msr vbar_el1, %0" :: "r"(vector_table) : "memory");
     __asm__ volatile ("isb");
+}
 
-    /* Unmask IRQs only (DAIF.I) — FIQ/SError/Debug stay masked for this
-     * first pass, matching a conservative rollout (widen once there's
-     * something real to handle). */
-    __asm__ volatile ("msr daifclr, #2");
+void exceptions_enable_irqs(void) {
+    /* Unmask IRQ (DAIF.I) AND FIQ (DAIF.F) — SError/Debug stay masked.
+     * FIQ is unmasked defensively: GIC-400's Group 0 (the reset default
+     * for any interrupt our EL3 armstub hasn't explicitly reassigned)
+     * signals via FIQ rather than IRQ, and exception_dispatch() handles
+     * both lines through the same GIC ack/EOI path — so nothing currently
+     * routed through Group 0 gets silently dropped just because it didn't
+     * arrive on the line we happened to be listening to. */
+    __asm__ volatile ("msr daifclr, #3");
     __asm__ volatile ("isb");
 }
 
@@ -57,16 +68,34 @@ static const char *ec_name(uint32_t ec) {
 }
 
 void exception_dispatch(struct aarch64_frame *f, int type) {
-    if (type == AARCH64_EXC_IRQ) {
-        /* GIC not wired up yet — nothing should be generating IRQs at
-         * this point, but don't silently swallow one if it happens. */
-        panic("Unexpected IRQ (no GIC driver yet)\nELR=%p\n", (void *)f->elr_el1);
+    if (type == AARCH64_EXC_IRQ || type == AARCH64_EXC_FIQ) {
+        /* GICC_IAR/GICC_EOIR are the same registers regardless of which
+         * line (IRQ or FIQ) signaled the core — see
+         * exceptions_enable_irqs()'s comment on why real hardware
+         * delivers Group 0 interrupts (anything gic_init() failed to
+         * move to Group 1) via FIQ instead. */
+        unsigned id = gic_ack_irq();
+
+        if (id == 1023) {
+            /* Spurious — GIC's "no pending interrupt" sentinel. Not a
+             * real interrupt; must NOT be EOI'd (there's nothing to
+             * acknowledge completion of). */
+            return;
+        }
+
+        if (id < IRQ_HANDLER_MAX && irq_handlers[id]) {
+            irq_handlers[id](f);
+        } else {
+            panic("Unhandled %s %u (no registered handler)\nELR=%p\n",
+                  type == AARCH64_EXC_FIQ ? "FIQ" : "IRQ", id, (void *)f->elr_el1);
+        }
+
+        gic_eoi_irq(id);
         return;
     }
 
-    if (type == AARCH64_EXC_FIQ || type == AARCH64_EXC_SERROR) {
-        panic("Unexpected %s\nELR=%p\nESR=%p\nFAR=%p\n",
-              type == AARCH64_EXC_FIQ ? "FIQ" : "SError",
+    if (type == AARCH64_EXC_SERROR) {
+        panic("Unexpected SError\nELR=%p\nESR=%p\nFAR=%p\n",
               (void *)f->elr_el1, (void *)f->esr_el1, (void *)f->far_el1);
         return;
     }

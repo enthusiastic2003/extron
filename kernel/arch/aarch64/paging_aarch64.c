@@ -42,9 +42,6 @@
 #define MAIR_IDX_NORMAL     0
 #define MAIR_IDX_DEVICE     1
 
-#define PL011_UART0_PAGE    0xFE201000ULL
-#define BCM2711_GPIO_PAGE   0xFE200000ULL
-
 static uint64_t g_hhdm_offset = 0;
 static phys_addr_t kernel_l0; /* TTBR1_EL1: the kernel's own top-level table */
 
@@ -99,9 +96,18 @@ static phys_addr_t get_table_if_present(phys_addr_t table, uint64_t index) {
 }
 
 /* Translates paging.h's arch-neutral semantic flags into AArch64
- * descriptor attribute bits (AF/SH/AttrIndx/AP/UXN/PXN). */
+ * descriptor attribute bits (AF/SH/AttrIndx/AP/UXN/PXN). PAGE_CACHE_DISABLE
+ * (an existing x86 flag, same semantic meaning here) selects Device
+ * memory instead of Normal — required for any MMIO mapping (e.g.
+ * gic.c): caching device registers can silently drop or reorder the
+ * side effects that make them work at all. */
 static uint64_t hw_attrs_from_flags(uint64_t flags) {
-    uint64_t attrs = PTE_AF | PTE_SH_INNER | PTE_ATTR_IDX(MAIR_IDX_NORMAL);
+    uint64_t attrs = PTE_AF;
+    if (flags & PAGE_CACHE_DISABLE) {
+        attrs |= PTE_ATTR_IDX(MAIR_IDX_DEVICE);
+    } else {
+        attrs |= PTE_SH_INNER | PTE_ATTR_IDX(MAIR_IDX_NORMAL);
+    }
     if (!(flags & PAGE_WRITE)) attrs |= PTE_AP_RO;
     if (flags & PAGE_USER) attrs |= PTE_AP_EL0;
     if (flags & PAGE_NX) attrs |= PTE_UXN | PTE_PXN;
@@ -247,16 +253,28 @@ static void map_kernel_range(phys_addr_t l0) {
     }
 }
 
-static void map_uart_device(phys_addr_t l0) {
-    map_page(l0, PL011_UART0_PAGE, PL011_UART0_PAGE, PAGE_PRESENT | PAGE_WRITE | PAGE_NX);
-    map_page(l0, BCM2711_GPIO_PAGE, BCM2711_GPIO_PAGE, PAGE_PRESENT | PAGE_WRITE | PAGE_NX);
-}
-
 void init_paging(uint64_t mb2_addr) {
     kernel_l0 = alloc_table_zeroed();
 
     map_kernel_range(kernel_l0);
-    map_uart_device(kernel_l0);
+
+    /* No separate UART mapping here: PL011_UART0_PAGE/BCM2711_GPIO_PAGE
+     * are LOW physical addresses, but kernel_l0 only ever backs
+     * TTBR1_EL1, which the CPU consults exclusively for HIGH addresses
+     * (VA[63:48] all set) — a map_page() call here for a low address
+     * would build page-table structure nothing ever actually walks. The
+     * genuinely load-bearing mapping is boot.S's original TTBR0
+     * identity table, built before this function even runs and never
+     * touched again since; uart.c's serial_putc() keeps working through
+     * that, not through anything init_paging() does. (An earlier
+     * version of this function called map_uart_device(), which made
+     * exactly this mistake — silently inert, papered over by boot.S's
+     * mapping already covering the same need.)
+     *
+     * MMIO that DOES need a real TTBR1-side mapping (e.g. gic.c) should
+     * map at NEW_HDDM + physaddr — a genuinely high address the kernel's
+     * own table is actually consulted for — with PAGE_CACHE_DISABLE, not
+     * a bare physical-looking address like this. */
 
     /* HHDM: every discovered RAM region, mapped at NEW_HDDM + physaddr,
      * 2MB blocks — matches x86's own init_paging() exactly (just walking
