@@ -30,6 +30,7 @@ void scan_mb2_header(uint64_t );
 void init_pmm(uint64_t);
 void pmm_free_page(void*);
 void* pmm_alloc_page(void);
+void* pmm_alloc_page_nolock(void);
 void set_virtual_pmm_bitmap_location(uint64_t);
 uint64_t get_virtual_pmm_bitmap_location();
 uint64_t get_pmm_total_manage();

@@ -32,6 +32,15 @@ static void serial_puts(const char *s) {
 void kernel_aarch64_main(uint64_t dtb_phys) {
     init_serial();
 
+    {
+        uint64_t current_el;
+        __asm__ volatile ("mrs %0, CurrentEL" : "=r"(current_el));
+        unsigned el = (unsigned)((current_el >> 2) & 0x3);
+        serial_puts("Current EL: ");
+        serial_putc((char)('0' + el));
+        serial_puts("\n");
+    }
+
     serial_puts("\n");
     serial_puts("=======================================\n");
     serial_puts(" Extron OS: AArch64 boot skeleton OK\n");
@@ -79,8 +88,19 @@ void arch_kernel_early_init(void) {
 }
 
 void arch_kernel_late_init(uint64_t mb2_addr) {
-    pmm_print_stats();
+    /* Paging first: the MMU must be on before anything uses spin_lock
+     * (pmm_print_stats included) — see pmm_alloc_page_nolock's comment. */
     aarch64_paging_init(mb2_addr);
+
+    /* Prove the normal LOCKED allocator (what every future aarch64
+     * subsystem will actually use — scheduler, kheap, etc.) is safe now
+     * that the MMU, and with it real Normal memory, is up. Not just
+     * trusting the theory — this is pmm_alloc_page() taking pmm_lock for
+     * real, on the exact memory that just hung it before. */
+    void *test_page = pmm_alloc_page();
+    kprintf("aarch64: locked pmm_alloc_page() OK post-MMU, got %p\n", test_page);
+
+    pmm_print_stats();
 
     kprintf("aarch64: Stage 1 complete. No Stage 2 yet (GDT/IDT/scheduler not implemented).\n");
     for (;;) {

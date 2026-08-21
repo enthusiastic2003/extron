@@ -61,7 +61,10 @@ static uint64_t align_up_u64(uint64_t x, uint64_t a) {
 }
 
 static uint64_t alloc_table(void) {
-    void *p = pmm_alloc_page();
+    /* Nolock: the MMU isn't up yet, so spin_lock's exclusive-access
+     * atomics don't work on real hardware (see pmm_alloc_page_nolock's
+     * comment). Safe here — genuinely single-threaded, no interrupts. */
+    void *p = pmm_alloc_page_nolock();
     if (!p) panic("aarch64 paging: out of memory for a page table");
     uint64_t *v = (uint64_t *)p;
     for (int i = 0; i < 512; i++) v[i] = 0;
@@ -153,13 +156,20 @@ void aarch64_paging_init(uint64_t mb2_addr) {
 
     __asm__ volatile ("isb");
 
-    /* --- enable the MMU (SCTLR_EL1.M). Read-modify-write: SCTLR_EL1 has
-     * RES1 bits we must not clear. Caches stay off for this first pass. */
+    /* --- enable the MMU + caches (SCTLR_EL1.M/C/I). Read-modify-write:
+     * SCTLR_EL1 has RES1 bits we must not clear. C and I aren't optional
+     * here despite MAIR describing Normal memory as cacheable: leaving
+     * the actual cache administratively off while the page tables claim
+     * cacheable memory is a documented bad combination — the exclusive
+     * monitor ldxr/stxr (what spin_lock compiles to) relies on is often
+     * implemented via cache coherency logic, and doesn't work reliably
+     * in that mismatched state on real hardware (invisible under QEMU,
+     * which doesn't model cache state at all). */
     uint64_t sctlr;
     __asm__ volatile ("mrs %0, sctlr_el1" : "=r"(sctlr));
-    sctlr |= 1ULL; /* M */
+    sctlr |= 1ULL | (1ULL << 2) | (1ULL << 12); /* M | C | I */
     __asm__ volatile ("msr sctlr_el1, %0" :: "r"(sctlr));
     __asm__ volatile ("isb");
 
-    kprintf("aarch64: MMU enabled (identity map, TTBR0_EL1 only).\n");
+    kprintf("aarch64: MMU + caches enabled (identity map, TTBR0_EL1 only).\n");
 }

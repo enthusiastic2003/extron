@@ -301,7 +301,30 @@ void* pmm_alloc_page(void) {
 
     spin_unlock(&pmm_lock);
     panic("PMM: Out of memory!");
-    return NULL; 
+    return NULL;
+}
+
+// Same as pmm_alloc_page(), but without taking pmm_lock. For genuinely
+// single-threaded, pre-MMU bootstrap code only (e.g. aarch64's own page
+// table allocation before the MMU exists): AArch64 exclusive-access
+// atomics (ldxr/stxr, what spin_lock compiles to) require Normal memory,
+// which isn't available until paging is up — with the MMU off, memory
+// defaults to Device semantics on real hardware, and stxr never
+// succeeds, spinning forever. QEMU's TCG doesn't model this restriction,
+// so it's invisible there.
+void* pmm_alloc_page_nolock(void) {
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+
+    for (uint64_t i = 0; i < max_pages; i++) {
+        if ((bmp[i / 8] & (1 << (i % 8))) == 0) {
+            bitmap_set(i);
+            return (void*)idx_to_addr(i);
+        }
+    }
+
+    panic("PMM: Out of memory!");
+    return NULL;
 }
 
 void pmm_free_page(void* phys_addr) {
