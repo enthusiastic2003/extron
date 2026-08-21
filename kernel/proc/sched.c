@@ -3,6 +3,7 @@
 #include <kernel/proc/exec.h>
 #include <kernel/mm/paging.h>
 #include <kernel/sync/spinlock.h>   /* adjust path if spinlock.h lives elsewhere */
+#include <arch/irq_spinlock.h>
 #include <kernel/console.h>
 #include <arch/tss.h>
 #include <arch/isr.h>

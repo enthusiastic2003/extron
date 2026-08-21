@@ -3,7 +3,8 @@
 #include <kernel/drivers/keyboard.h>
 #include <kernel/klibc/string.h>
 #include <kernel/time.h>
-#include <kernel/sync/spinlock.h> 
+#include <kernel/sync/spinlock.h>
+#include <arch/irq_spinlock.h>
 
 // ----------------------------------------------------------------
 // OS Synchronization Primitives (Implemented in your proc/sched layer)

@@ -2,6 +2,7 @@
 #define SPINLOCK_H
 
 #include <stdint.h>
+#include <arch/cpu.h>
 
 /*
  * Single-core spinlock (no CLI).
@@ -12,6 +13,10 @@
  *
  * Rule: IRQ handlers must never acquire a lock that mainline
  * kernel code holds.  On a single core, that would deadlock.
+ *
+ * For an IRQ-safe variant that also masks interrupts, see
+ * kernel/arch/x86_64/include/arch/irq_spinlock.h (x86-only for now —
+ * aarch64 has nothing to mask until Milestone 4's GIC/exceptions land).
  */
 
 typedef struct spinlock {
@@ -19,21 +24,10 @@ typedef struct spinlock {
 } spinlock_t;
 
 #define SPINLOCK_INIT { .locked = 0 }
-#ifdef __x86_64__
-/* Single-core: depth and saved IF live in file statics.
-   Move to per-CPU state when SMP lands. */
-static int lock_depth = 0;
-static int saved_if   = 0;
-#endif
-
 
 static inline void spin_lock(spinlock_t *lock) {
     while (__sync_lock_test_and_set(&lock->locked, 1)) {
-#ifdef __x86_64__
-        __asm__ volatile ("pause");
-#else
-        __asm__ volatile ("yield");
-#endif
+        cpu_relax();
     }
 }
 
@@ -41,25 +35,4 @@ static inline void spin_unlock(spinlock_t *lock) {
     __sync_lock_release(&lock->locked);
 }
 
-#ifdef __x86_64__
-static inline int eflags_if(void) {
-    uint64_t r;
-    __asm__ volatile ("pushfq; pop %0" : "=r"(r));
-    return (r >> 9) & 1;
-}
-
-static inline void irq_spin_lock(spinlock_t *lk) {
-    int prev_if = eflags_if();
-    __asm__ volatile ("cli");
-    spin_lock(lk);
-    if (lock_depth++ == 0)
-        saved_if = prev_if;
-}
-
-static inline void irq_spin_unlock(spinlock_t *lk) {
-    spin_unlock(lk);
-    if (--lock_depth == 0 && saved_if)
-        __asm__ volatile ("sti");
-}
-#endif /* __x86_64__ — no IRQs to mask yet on aarch64 (Milestone 4: GIC/exceptions) */
 #endif /* SPINLOCK_H */

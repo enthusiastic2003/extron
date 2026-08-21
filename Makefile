@@ -15,7 +15,8 @@ OBJCOPY = aarch64-linux-gnu-objcopy
 #   wide stores that fault silently forever with no exception vector to catch
 #   them. Revisit once paging + exceptions land.
 CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
-          -mcpu=cortex-a72 -mno-outline-atomics -fno-store-merging -Ikernel/include -g
+          -mcpu=cortex-a72 -mno-outline-atomics -fno-store-merging \
+          -Ikernel/include -Ikernel/arch/aarch64/include -g
 
 C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c") \
            kernel/kernel.c \

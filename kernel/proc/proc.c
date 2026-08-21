@@ -1,6 +1,7 @@
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>          /* for sched_remove() */
 #include <kernel/sync/spinlock.h>
+#include <arch/irq_spinlock.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/paging.h>

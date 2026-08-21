@@ -5,15 +5,10 @@
 #include <stdint.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/sync/spinlock.h>
+#include <arch/vma.h>
 
 typedef uint64_t virt_addr_t;
 
-#ifdef __x86_64__
-#define KERNEL_VMA 0xFFFFFFFF80000000ULL
-#else
-/* aarch64 (Milestone 1/2) links flat/physical — no higher-half offset yet. */
-#define KERNEL_VMA 0ULL
-#endif
 #define NEW_HDDM 0xFFFF800000000000ULL
 
 // --- Kernel Virtual Memory Layout ---

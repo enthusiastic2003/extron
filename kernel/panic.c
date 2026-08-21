@@ -3,23 +3,10 @@
 
 #include <kernel/console.h>
 #include <kernel/panic.h>
-
-/* halt forever */
-static inline void halt(void) {
-    for (;;) {
-#ifdef __x86_64__
-        __asm__ volatile ("cli; hlt");
-#else
-        __asm__ volatile ("wfe");
-#endif
-    }
-}
+#include <kernel/arch.h>
 
 void panic(const char* fmt, ...) {
-    /* disable interrupts immediately */
-#ifdef __x86_64__
-    __asm__ volatile ("cli");
-#endif
+    arch_disable_interrupts();
 
     /* make panic visually obvious */
     // clear_screen(0x4F);  // white on red
@@ -37,5 +24,5 @@ void panic(const char* fmt, ...) {
 
     kcprintf("\n\nSystem halted.\n", 0x4F);
 
-    halt();
+    arch_halt_forever();
 }
