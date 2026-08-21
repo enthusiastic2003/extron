@@ -27,8 +27,11 @@
 /*
  * x86_64's implementation of the kernel/include/kernel/arch.h contract,
  * plus the rest of the x86-only boot sequence (kernel_stage2 and its
- * dependents) that only kernel_stage1 -> arch_kernel_late_init() ever
- * reaches. This is the x86 counterpart to kernel/arch/aarch64/kernel_aarch64.c.
+ * dependents) that only kernel_stage1 -> arch_kernel_jump_to_stage2()
+ * ever reaches. This is the x86 counterpart to
+ * kernel/arch/aarch64/kernel_aarch64.c. The shared, arch-neutral part of
+ * the boot sequence (init_pmm/init_paging/vmm_init/vmm_setup_stack)
+ * lives directly in kernel_stage1 (kernel/kernel.c), not here.
  */
 
 void arch_disable_interrupts(void) {
@@ -81,17 +84,11 @@ void arch_kernel_early_init(void) {
     pic_remap();
 }
 
-void arch_kernel_late_init(uint64_t mb2_addr) {
+void arch_kernel_mid_init(void) {
     gdt_reload();
-    init_paging(mb2_addr);
-    pmm_print_stats();
-    vmm_init();
+}
 
-    // Prepare the new stack for Stage 2
-    virt_addr_t new_stack_top = vmm_setup_stack();
-
-    kprintf("Transitioning to Stage 2...\n");
-
+void arch_kernel_jump_to_stage2(uint64_t mb2_addr, uint64_t new_stack_top) {
     // Perform the stack switch and jump to Stage 2
     // We pass mb2_addr in RDI as the first argument to kernel_stage2
     __asm__ volatile (

@@ -5,6 +5,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/paging.h>
+#include <arch/exceptions.h>
 #include "fdt.h"
 #include "mb2_shim.h"
 
@@ -96,44 +97,58 @@ void arch_kernel_early_init(void) {
     /* Nothing yet — no IDT/PIC equivalent until Milestone 4. */
 }
 
+void arch_kernel_mid_init(void) {
+    /* Nothing yet — no GDT equivalent on aarch64. */
+}
+
 /**
  * @brief aarch64 Stage 2: runs on the permanent VMM-allocated kernel
  * stack instead of boot.S's temporary one. The aarch64 counterpart to
  * kernel_stage2() in kernel/arch/x86_64/kernel_x86.c — reached the same
  * way, via a raw stack-pointer switch + branch, never returning to
- * arch_kernel_late_init. There's nothing to actually do here yet
- * (GDT/IDT/GIC/scheduler don't exist — Milestone 4+), so it's just proof
- * the switch itself works.
+ * kernel_stage1. There's nothing to actually do here yet (GDT/IDT/GIC/
+ * scheduler don't exist — Milestone 4+), so it's just proof the switch
+ * itself works. mb2_addr is unused for now (x86's kernel_stage2 needs
+ * it for tar_init(); aarch64 has no initrd yet).
  */
-static void kernel_aarch64_stage2(void) {
+static void kernel_aarch64_stage2(uint64_t mb2_addr) {
+    (void)mb2_addr;
     kprintf("--- AArch64 Kernel Stage 2 ---\n");
     kprintf("Successfully running on the VMM-allocated kernel stack.\n");
 
+    exceptions_init();
+    kprintf("aarch64: VBAR_EL1 set, IRQs unmasked.\n");
+
+    /* Milestone 4, first proof point: deliberately trigger a
+     * synchronous exception (SVC — clean and side-effect-free, unlike
+     * e.g. a null-pointer deref) and confirm the vector table actually
+     * catches it (via exception_dispatch's panic) instead of hanging
+     * silently, before building GIC/IRQ handling on top of this. */
+    kprintf("aarch64: triggering a test SVC to prove the vector table works...\n");
+    __asm__ volatile ("svc #0");
+
+    // Only reached if exception_dispatch somehow returned (it shouldn't — panic() halts).
     for (;;) {
         __asm__ volatile ("wfe");
     }
 }
 
-void arch_kernel_late_init(uint64_t mb2_addr) {
-    init_paging(mb2_addr);
-    pmm_print_stats();
-
-    vmm_init();
-
-    virt_addr_t stack_top = vmm_setup_stack();
-    kprintf("aarch64: kernel stack via vmm_setup_stack() at %p\n", (void *)stack_top);
-
-    kprintf("aarch64: switching to the new kernel stack, jumping to Stage 2...\n");
-
+void arch_kernel_jump_to_stage2(uint64_t mb2_addr, uint64_t new_stack_top) {
     /* Perform the stack switch and jump to Stage 2 — same trick x86's
-     * kernel_stage1 uses (kernel/arch/x86_64/kernel_x86.c): move sp to
-     * the new stack, then branch (not call — we never return here, so
-     * there's nothing to return to and no reason to link). */
+     * kernel_x86.c uses: move sp to the new stack, then branch (not
+     * call — we never return here, so there's nothing to return to and
+     * no reason to link). mb2_addr needs to land in x0 per AAPCS64
+     * (matching how x86 passes it in rdi via the "D" constraint) — a
+     * local register variable pins it there directly, rather than an
+     * extra `mov x0, ...` inside the asm that could collide with
+     * whatever register the branch-target operand happens to get
+     * allocated (x86's "D" constraint sidesteps the same hazard). */
+    register uint64_t arg0 __asm__("x0") = mb2_addr;
     __asm__ volatile (
-        "mov sp, %0\n\t"
-        "br  %1"
+        "mov sp, %1\n\t"
+        "br  %2"
         :
-        : "r"(stack_top), "r"(kernel_aarch64_stage2)
+        : "r"(arg0), "r"(new_stack_top), "r"(kernel_aarch64_stage2)
         : "memory"
     );
 
