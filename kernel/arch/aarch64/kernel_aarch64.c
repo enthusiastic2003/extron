@@ -3,9 +3,10 @@
 #include <kernel/panic.h>
 #include <kernel/arch.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/vmm.h>
+#include <kernel/mm/paging.h>
 #include "fdt.h"
 #include "mb2_shim.h"
-#include "paging_aarch64.h"
 
 /*
  * Milestone 1/2/3 aarch64 entry point, called directly from boot.S with
@@ -96,16 +97,18 @@ void arch_kernel_early_init(void) {
 }
 
 void arch_kernel_late_init(uint64_t mb2_addr) {
-    /* TEMPORARY: aarch64_paging_init() is still the Milestone-3-minimal-
-     * pass version (identity map, TTBR0 only, EPD1=1 disabling TTBR1) —
-     * calling it now would rip out the TTBR1 mapping boot.S's new
-     * higher-half bridge just established, out from under the very
-     * high-VMA code executing it. Stubbed until it's rewritten for the
-     * full pass (HHDM + kernel high mapping + real paging.h API, for
-     * vmm.c reuse). See kernel_aarch64_main's checkpoint print above.
-     */
-    (void)mb2_addr;
-    kprintf("aarch64: reached arch_kernel_late_init at the high half.\n");
+    init_paging(mb2_addr);
+    pmm_print_stats();
+
+    vmm_init();
+
+    /* Proves vmm_alloc_pages/kmap work for real (not just init_paging's
+     * own internal calls) — the same kind of concrete checkpoint used
+     * for pmm_alloc_page() earlier, not just trusting the theory. */
+    virt_addr_t stack_top = vmm_setup_stack();
+    kprintf("aarch64: kernel stack via vmm_setup_stack() at %p\n", (void *)stack_top);
+
+    kprintf("aarch64: Stage 1 complete. No Stage 2 yet (GDT/IDT/scheduler not implemented).\n");
     for (;;) {
         __asm__ volatile ("wfe");
     }

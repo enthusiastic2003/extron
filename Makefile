@@ -21,6 +21,7 @@ CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
 C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c") \
            kernel/kernel.c \
            kernel/mm/pmm.c \
+           kernel/mm/vmm.c \
            kernel/console/console.c \
            kernel/panic.c \
            kernel/klibc/builtins.c
