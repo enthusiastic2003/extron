@@ -49,8 +49,16 @@ void kernel_aarch64_main(uint64_t dtb_phys) {
     struct fdt_mem_region regions[8];
     size_t n = fdt_get_memory_regions((const void *)dtb_phys, regions, 8);
 
-    static uint8_t mb2_shim_buf[512] __attribute__((aligned(8)));
-    uint64_t mb2_addr = mb2_shim_build(regions, n, mb2_shim_buf, sizeof(mb2_shim_buf));
+    /* A `static` buffer would land in .bss, which is now high-VMA linked
+     * like everything else in the higher-half build — but init_pmm()'s
+     * ONE_GIB sanity check assumes mb2_addr is a genuinely low,
+     * GRUB-style physical pointer (true on x86; not true of our own
+     * high-VMA .bss). Rather than touch that shared x86-oriented check,
+     * keep the shim buffer at a fixed low physical scratch address —
+     * well below our kernel's tiny footprint's ceiling, comfortably
+     * inside the 1GB identity map boot.S's early bootstrap sets up. */
+    void *mb2_shim_buf = (void *)0x100000;
+    uint64_t mb2_addr = mb2_shim_build(regions, n, mb2_shim_buf, 512);
     if (mb2_addr == 0) {
         panic("mb2_shim_build failed (buffer too small for %u regions)", (unsigned)n);
     }
@@ -88,21 +96,16 @@ void arch_kernel_early_init(void) {
 }
 
 void arch_kernel_late_init(uint64_t mb2_addr) {
-    /* Paging first: the MMU must be on before anything uses spin_lock
-     * (pmm_print_stats included) — see pmm_alloc_page_nolock's comment. */
-    aarch64_paging_init(mb2_addr);
-
-    /* Prove the normal LOCKED allocator (what every future aarch64
-     * subsystem will actually use — scheduler, kheap, etc.) is safe now
-     * that the MMU, and with it real Normal memory, is up. Not just
-     * trusting the theory — this is pmm_alloc_page() taking pmm_lock for
-     * real, on the exact memory that just hung it before. */
-    void *test_page = pmm_alloc_page();
-    kprintf("aarch64: locked pmm_alloc_page() OK post-MMU, got %p\n", test_page);
-
-    pmm_print_stats();
-
-    kprintf("aarch64: Stage 1 complete. No Stage 2 yet (GDT/IDT/scheduler not implemented).\n");
+    /* TEMPORARY: aarch64_paging_init() is still the Milestone-3-minimal-
+     * pass version (identity map, TTBR0 only, EPD1=1 disabling TTBR1) —
+     * calling it now would rip out the TTBR1 mapping boot.S's new
+     * higher-half bridge just established, out from under the very
+     * high-VMA code executing it. Stubbed until it's rewritten for the
+     * full pass (HHDM + kernel high mapping + real paging.h API, for
+     * vmm.c reuse). See kernel_aarch64_main's checkpoint print above.
+     */
+    (void)mb2_addr;
+    kprintf("aarch64: reached arch_kernel_late_init at the high half.\n");
     for (;;) {
         __asm__ volatile ("wfe");
     }

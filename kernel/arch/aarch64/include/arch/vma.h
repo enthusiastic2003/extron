@@ -1,8 +1,9 @@
 #ifndef ARCH_VMA_H
 #define ARCH_VMA_H
 
-/* No higher-half yet — flat/physical-linked until paging brings up a real
- * kernel virtual base (see kernel/arch/aarch64/paging_aarch64.c). */
-#define KERNEL_VMA 0ULL
+/* Matches x86's higher-half offset — see kernel/arch/aarch64/boot.S for
+ * the early bootstrap page tables that bridge from the low physical load
+ * address RPi4 firmware always uses (0x80000) to this virtual base. */
+#define KERNEL_VMA 0xFFFFFFFF80000000ULL
 
 #endif

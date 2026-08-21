@@ -1,33 +1,38 @@
 /*
- * Milestone 1: physical, non-higher-half link at the RPi4 kernel8.img
- * load address. Revisit once Milestone 3 (MMU/paging) brings back the
- * higher-half layout from memory_map_decisions.md.
+ * Milestone 3, full pass: higher-half link matching x86's layout
+ * (memory_map_decisions.md), bridged by an early physical-addressed
+ * bootstrap in boot.S. RPi4 firmware always loads and jumps to physical
+ * 0x80000 regardless of what VMA the linker assigns here — same trick
+ * x86's linker.ld plays against GRUB's own fixed physical load address.
  */
 OUTPUT_FORMAT(elf64-littleaarch64)
 ENTRY(_start)
 
+KERNEL_VMA = 0xFFFFFFFF80000000;
+KERNEL_LMA = 0x80000;
+
 SECTIONS
 {
-    . = 0x80000;
+    . = KERNEL_VMA + KERNEL_LMA;
 
     _kernel_start = .;
 
-    .text : {
+    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA) {
         KEEP(*(.text.boot))
         *(.text .text.*)
     }
 
-    .rodata : {
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VMA) {
         *(.rodata .rodata.*)
     }
 
-    .data : {
+    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VMA) {
         *(.data .data.*)
     }
 
     . = ALIGN(16);
     __bss_start = .;
-    .bss : {
+    .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VMA) {
         *(.bss .bss.*)
         *(COMMON)
     }
