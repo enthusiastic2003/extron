@@ -96,19 +96,48 @@ void arch_kernel_early_init(void) {
     /* Nothing yet — no IDT/PIC equivalent until Milestone 4. */
 }
 
+/**
+ * @brief aarch64 Stage 2: runs on the permanent VMM-allocated kernel
+ * stack instead of boot.S's temporary one. The aarch64 counterpart to
+ * kernel_stage2() in kernel/arch/x86_64/kernel_x86.c — reached the same
+ * way, via a raw stack-pointer switch + branch, never returning to
+ * arch_kernel_late_init. There's nothing to actually do here yet
+ * (GDT/IDT/GIC/scheduler don't exist — Milestone 4+), so it's just proof
+ * the switch itself works.
+ */
+static void kernel_aarch64_stage2(void) {
+    kprintf("--- AArch64 Kernel Stage 2 ---\n");
+    kprintf("Successfully running on the VMM-allocated kernel stack.\n");
+
+    for (;;) {
+        __asm__ volatile ("wfe");
+    }
+}
+
 void arch_kernel_late_init(uint64_t mb2_addr) {
     init_paging(mb2_addr);
     pmm_print_stats();
 
     vmm_init();
 
-    /* Proves vmm_alloc_pages/kmap work for real (not just init_paging's
-     * own internal calls) — the same kind of concrete checkpoint used
-     * for pmm_alloc_page() earlier, not just trusting the theory. */
     virt_addr_t stack_top = vmm_setup_stack();
     kprintf("aarch64: kernel stack via vmm_setup_stack() at %p\n", (void *)stack_top);
 
-    kprintf("aarch64: Stage 1 complete. No Stage 2 yet (GDT/IDT/scheduler not implemented).\n");
+    kprintf("aarch64: switching to the new kernel stack, jumping to Stage 2...\n");
+
+    /* Perform the stack switch and jump to Stage 2 — same trick x86's
+     * kernel_stage1 uses (kernel/arch/x86_64/kernel_x86.c): move sp to
+     * the new stack, then branch (not call — we never return here, so
+     * there's nothing to return to and no reason to link). */
+    __asm__ volatile (
+        "mov sp, %0\n\t"
+        "br  %1"
+        :
+        : "r"(stack_top), "r"(kernel_aarch64_stage2)
+        : "memory"
+    );
+
+    // We should never reach here
     for (;;) {
         __asm__ volatile ("wfe");
     }
