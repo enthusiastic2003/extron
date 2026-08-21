@@ -9,6 +9,11 @@
 
 .global _start
 _start:
+    // Firmware passes the physical address of the device tree blob in x0
+    // (standard arm64 boot protocol). Stash it in a callee-saved register
+    // before anything else touches x0.
+    mov     x19, x0
+
     mrs     x0, mpidr_el1
     and     x0, x0, #0xFF
     cbz     x0, primary_core
@@ -25,6 +30,7 @@ primary_core:
     sub     x1, x1, x0
     bl      clear_bss
 
+    mov     x0, x19
     bl      kernel_aarch64_main
     b       hang
 

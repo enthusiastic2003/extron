@@ -7,13 +7,19 @@
 /* halt forever */
 static inline void halt(void) {
     for (;;) {
+#ifdef __x86_64__
         __asm__ volatile ("cli; hlt");
+#else
+        __asm__ volatile ("wfe");
+#endif
     }
 }
 
 void panic(const char* fmt, ...) {
     /* disable interrupts immediately */
+#ifdef __x86_64__
     __asm__ volatile ("cli");
+#endif
 
     /* make panic visually obvious */
     // clear_screen(0x4F);  // white on red

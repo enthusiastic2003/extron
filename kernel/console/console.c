@@ -15,6 +15,7 @@ void set_console_write_loc(uint64_t vga_offset) {
 }
 
 /* --- hardware cursor --- */
+#ifdef __x86_64__
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -26,6 +27,11 @@ static void update_hw_cursor(void) {
     outb(0x3D4, 0x0E);
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
+#else
+/* No VGA text-mode hardware cursor outside x86; kprintf's real output on
+ * aarch64 is the serial_putc() call in putc() below. */
+static void update_hw_cursor(void) {}
+#endif
 
 /* --- low-level --- */
 static inline void putc_at(int x, int y, char c, char color) {
@@ -71,6 +77,9 @@ static void scroll(void) {
 
 /* --- core output --- */
 static void putc(char c, char color) {
+    if (c == '\n') {
+        serial_putc('\r'); // raw-mode serial terminals need CR before LF
+    }
     serial_putc(c);
 
     if (c == '\n') {

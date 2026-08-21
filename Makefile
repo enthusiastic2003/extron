@@ -8,10 +8,21 @@ CC      = aarch64-linux-gnu-gcc
 LD      = aarch64-linux-gnu-ld
 OBJCOPY = aarch64-linux-gnu-objcopy
 
+# -mno-outline-atomics: cortex-a72 predates LSE, and outline atomics call into
+#   a libatomic helper we don't have in this freestanding build.
+# -fno-store-merging: with no MMU/VBAR_EL1 yet (Milestone 1/2), all memory is
+#   strict Device semantics and GCC's store-merging can synthesize unaligned
+#   wide stores that fault silently forever with no exception vector to catch
+#   them. Revisit once paging + exceptions land.
 CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
-          -mcpu=cortex-a72 -Ikernel/include -g
+          -mcpu=cortex-a72 -mno-outline-atomics -fno-store-merging -Ikernel/include -g
 
-C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c")
+C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c") \
+           kernel/kernel.c \
+           kernel/mm/pmm.c \
+           kernel/console/console.c \
+           kernel/panic.c \
+           kernel/klibc/builtins.c
 S_SRC   := $(shell find kernel/arch/aarch64 -name "*.S")
 ASM_SRC :=
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
@@ -34,7 +45,7 @@ $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
 run: $(KERNEL_IMG)
-	qemu-system-aarch64 -M raspi4b -serial stdio -display none -kernel $(KERNEL_IMG)
+	qemu-system-aarch64 -M raspi4b -serial stdio -display none -kernel $(KERNEL_IMG) -dtb boot/aarch64/bcm2711-rpi-4-b.dtb
 
 else
 
