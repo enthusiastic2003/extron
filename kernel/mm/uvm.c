@@ -55,6 +55,13 @@ void vm_space_destroy(struct vm_space *mm) {
 virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags) {
     if (!mm || size == 0)
         return 0;
+    /* align_up() would wrap a near-SIZE_MAX request to 0, and a 0-sized
+     * region then "succeeds": the mapping loop body never runs, the
+     * failure check `mapped < size` is 0 < 0, and the caller gets a VMA
+     * of length zero back as if it were a real allocation. Reject before
+     * the arithmetic can wrap rather than after. */
+    if (size > (size_t)-1 - (PAGE_SIZE - 1))
+        return 0;
 
     size = align_up(size, PAGE_SIZE);
     irq_spin_lock(&mm->lock);
@@ -193,6 +200,10 @@ virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, in
 
     size_t      page_off  = (size_t)(phys & (PAGE_SIZE - 1));
     phys_addr_t phys_base = phys - page_off;
+    /* Same wrap guard as vm_allocate_region(), with page_off folded in
+     * since it is added before the rounding. */
+    if (size > (size_t)-1 - page_off - (PAGE_SIZE - 1))
+        return 0;
     size_t      span      = align_up(page_off + size, PAGE_SIZE);
 
     irq_spin_lock(&mm->lock);

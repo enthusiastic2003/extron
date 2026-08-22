@@ -86,10 +86,19 @@ struct proc {
     struct vm_space     *mm;                 /* user address-space allocator (kernel/mm/uvm.c) */
 };
 
-/* Size of the per-process kernel stack (interrupts land here). Smaller
- * than x86's PROC_KERNEL_STACK_PAGES (8 / 32KB) — no syscalls/deep
- * kernel call chains yet, just the exception-vector path. */
-#define PROC_KERNEL_STACK_PAGES 4
+/* Size of the per-process kernel stack (interrupts land here). Was 4
+ * pages on the reasoning that there were "no syscalls/deep kernel call
+ * chains yet, just the exception-vector path" — that stopped being true
+ * some time ago. Syscalls run on this stack, kbd_getc() sleeps partway
+ * down one, and install_and_switch() now puts a 640-byte struct
+ * cpu_context scratch on it. Matches x86's 8 pages again.
+ *
+ * Allocated with one extra page below it, left unmapped as a guard —
+ * see proc_init(). Overflow then takes a clean Data Abort naming the
+ * faulting address instead of silently corrupting whatever the
+ * allocator happened to place underneath, which is the failure mode
+ * that cost real debugging time on the stale-object-file bug. */
+#define PROC_KERNEL_STACK_PAGES 8
 
 /* Initializes a caller-allocated struct proc in place (no kmalloc/heap
  * dependency yet — this milestone's two test processes are static

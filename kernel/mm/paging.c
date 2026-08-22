@@ -70,20 +70,32 @@ static uint64_t *table_ptr(phys_addr_t table_phys) {
     return phys_to_virt_hhdm(table_phys);
 }
 
+/* 0 on failure, not a panic. map_page() is reachable from user-driven
+ * paths (SYS_ANON_ALLOC via kernel/mm/uvm.c, and exec), so a process
+ * that exhausts physical memory must get a failed mapping rather than
+ * halt the machine. Physical address 0 is never a valid table here — it
+ * sits inside the first 1MB, which init_pmm() reserves unconditionally
+ * — so it is safe to use as the sentinel. */
 static phys_addr_t alloc_table_zeroed(void) {
     phys_addr_t p = (phys_addr_t)pmm_alloc_page();
-    if (!p) panic("aarch64 paging: page table alloc failed");
+    if (!p) return 0;
     uint64_t *v = table_ptr(p);
     for (int i = 0; i < 512; i++) v[i] = 0;
     return p;
 }
 
+/* Propagates alloc_table_zeroed()'s 0-on-failure. Crucially, the parent
+ * entry is only written once the child table actually exists — writing
+ * `0 | PTE_VALID` would install a table descriptor pointing at physical
+ * 0, and the next walk would happily follow it. */
 static phys_addr_t get_next_table(phys_addr_t table, uint64_t index) {
     uint64_t *t = table_ptr(table);
     if (t[index] & PTE_VALID) {
         return t[index] & PAGE_ADDR_MASK;
     }
     phys_addr_t new_table = alloc_table_zeroed();
+    if (!new_table)
+        return 0;
     t[index] = new_table | PTE_TABLE_OR_PAGE | PTE_VALID;
     return new_table;
 }
@@ -145,9 +157,17 @@ static void sync_icache_dcache(uint64_t va, uint64_t size) {
 }
 
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
+    /* -1 when an intermediate table can't be allocated. Any tables that
+     * did get created on the way down stay: they're empty, correctly
+     * linked, and the next mapping through this range will reuse them.
+     * Unwinding them would mean tracking which levels this call created
+     * versus found, for no benefit. */
     phys_addr_t l1 = get_next_table(pml4, PML4_IDX(virt));
+    if (!l1) return -1;
     phys_addr_t l2 = get_next_table(l1, PDPT_IDX(virt));
+    if (!l2) return -1;
     phys_addr_t l3 = get_next_table(l2, PD_IDX(virt));
+    if (!l3) return -1;
 
     uint64_t *vl3 = table_ptr(l3);
     uint64_t current = vl3[PT_IDX(virt)];

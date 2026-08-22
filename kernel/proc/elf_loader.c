@@ -153,6 +153,16 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
             phys_addr_t phys =
                 (phys_addr_t)pmm_alloc_page();
 
+            /* pmm_alloc_page() returns NULL on exhaustion now instead of
+             * panicking. Unchecked, phys_to_virt_hhdm(0) below would
+             * memset the base of the HHDM — i.e. corrupt low physical
+             * memory — which is a far worse failure than refusing to
+             * load the binary. */
+            if (!phys) {
+                kprintf("[LOADER] out of physical memory loading segment\n");
+                return -1;
+            }
+
             uint8_t *dst =
                 (uint8_t *)phys_to_virt_hhdm(phys);
 

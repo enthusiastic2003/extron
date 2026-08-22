@@ -2,6 +2,8 @@
 #include <kernel/proc/sched.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/kheap.h>
+#include <kernel/mm/paging.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/panic.h>
 #include <kernel/console.h>
 #include <arch/irq_spinlock.h>
@@ -30,21 +32,30 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->sleep_until = 0;
     p->mm    = NULL;
 
-    /* Through kmalloc (kernel/mm/kheap.c), not vmm_alloc_pages() directly
-     * — kheap.c is itself just a byte-granularity layer on top of the
-     * same vmm_alloc_pages()/vmm_free_pages() bitmap allocator, so this
-     * is still page-backed underneath, just going through the proper
-     * kernel allocator instead of reaching past it. liballoc has no
-     * separate init step to report (it lazily bootstraps its first
-     * block on this very call), so this print is the only direct
-     * confirmation kmalloc actually ran and returned real memory,
-     * rather than just inferring it from "nothing panicked". */
-    p->kernel_stack_base = (virt_addr_t)kmalloc(PROC_KERNEL_STACK_PAGES * PAGE_SIZE);
-    if (!p->kernel_stack_base)
+    /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
+     * have a guard page. kmalloc hands back byte-granularity memory from
+     * inside a shared heap block — there is no page boundary to unmap
+     * and no way to make an overflow fault, so a deep call chain would
+     * quietly chew through whatever liballoc placed below it.
+     *
+     * One extra page is allocated and immediately unmapped. Its bitmap
+     * bit stays set, so nothing else claims that VA, and the stack now
+     * has an unmapped page directly beneath it: overflow takes a Data
+     * Abort naming the address instead of corrupting a neighbour. */
+    virt_addr_t region = vmm_alloc_pages(PROC_KERNEL_STACK_PAGES + 1);
+    if (!region)
         panic("aarch64 proc_init: kernel stack allocation failed");
-    p->kernel_stack_top = p->kernel_stack_base + PROC_KERNEL_STACK_PAGES * PAGE_SIZE;
-    kprintf("[PROC] PID %lu kernel stack: kmalloc'd %p - %p\n",
-            (unsigned long)pid, (void *)p->kernel_stack_base, (void *)p->kernel_stack_top);
+
+    phys_addr_t guard_phys = kvirt_to_phys(region);
+    kunmap(region);
+    if (guard_phys)
+        pmm_free_page((void *)guard_phys);
+
+    p->kernel_stack_base = region + PAGE_SIZE;
+    p->kernel_stack_top  = region + (PROC_KERNEL_STACK_PAGES + 1) * PAGE_SIZE;
+    kprintf("[PROC] PID %lu kernel stack: %p - %p (guard page at %p)\n",
+            (unsigned long)pid, (void *)p->kernel_stack_base,
+            (void *)p->kernel_stack_top, (void *)region);
 
     /* forkret-style bootstrap: pre-populate the saved context as if this
      * proc had already been switched out once, with lr pointing at the

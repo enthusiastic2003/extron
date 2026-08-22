@@ -235,7 +235,12 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* First C payload: crt0 -> main -> libc -> syscalls -> exit, plus
      * the shared liballoc running on user pages via SYS_ANON_ALLOC. */
     struct proc *libc = proc_create_from_binary("libc_test.elf");
-    if (!reader || !heartbeat || !badptr || !fp_a || !fp_b || !uptime || !libc) {
+    /* Puts 8192 page allocations through the PMM and exercises the
+     * out-of-memory paths that were dead code while pmm_alloc_page()
+     * panicked instead of returning NULL. */
+    struct proc *memstress = proc_create_from_binary("mem_stress.elf");
+    if (!reader || !heartbeat || !badptr || !fp_a || !fp_b || !uptime ||
+        !libc || !memstress) {
         panic("kernel_stage2: failed to create SYS_READ test procs");
     }
     sched_policy_add(reader);
@@ -245,8 +250,9 @@ void kernel_stage2(uint64_t mb2_addr) {
     sched_policy_add(fp_b);
     sched_policy_add(uptime);
     sched_policy_add(libc);
+    sched_policy_add(memstress);
 
-    kprintf("Starting scheduler with 7 procs (SYS_READ + badptr + FP + uptime + libc tests) — type on the console.\n");
+    kprintf("Starting scheduler with 8 procs (SYS_READ + badptr + FP + uptime + libc + memstress) — type on the console.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

@@ -11,6 +11,11 @@
 #include <kernel/klibc/builtins.h>
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
+/* Rolling next-fit hint, a page index. Purely an optimisation — every
+ * scan wraps, so a stale value costs a few extra words, never
+ * correctness. */
+static uint64_t pmm_cursor = 0;
+
 
 
 /* --- Limit to where grub can place structures ---*/
@@ -283,25 +288,76 @@ void set_virtual_pmm_bitmap_location(uint64_t new_bitmap_virt_loc){
     global_phys_mem_info.bmp_phys = (virt_addr_t) new_bitmap_virt_loc;
 }
 
-// Returns the physical address of a free 4KB page, or NULL if out of memory.
-void* pmm_alloc_page(void) {
-    spin_lock(&pmm_lock);
-
+/*
+ * Find and claim one free page. Caller holds pmm_lock (or is genuinely
+ * single-threaded pre-MMU — see pmm_alloc_page_nolock).
+ *
+ * Scans 64 bits at a time from a rolling cursor, rather than bit by bit
+ * from index 0. The old version restarted at zero on every call, so with
+ * ~19,700 pages already used at boot each allocation burned at least
+ * that many iterations before reaching free space, degrading further as
+ * memory filled. A DOOM-sized 8MB zone is ~2048 allocations, which made
+ * that roughly 40 million iterations of pure scan.
+ *
+ * The cursor makes the common case (allocating into fresh space) hit on
+ * the first word, and ctzll finds the free bit within a word in one
+ * instruction. The wrap-around second pass is what keeps freed pages
+ * reachable — without it the cursor would strand everything behind it.
+ */
+static void* pmm_take_free_page_locked(void) {
     uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
-    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+    if (max_pages == 0)
+        return NULL;
 
-    for (uint64_t i = 0; i < max_pages; i++) {
-        // Check if the bit is 0 (Free)
-        if ((bmp[i / 8] & (1 << (i % 8))) == 0) {
-            bitmap_set(i);
-            spin_unlock(&pmm_lock);
-            return (void*)idx_to_addr(i);
-        }
+    uint64_t  words = (max_pages + 63) / 64;
+    uint64_t* bmp64 = (uint64_t*)global_phys_mem_info.bmp_phys;
+
+    uint64_t start_word = pmm_cursor / 64;
+    if (start_word >= words)
+        start_word = 0;
+
+    for (uint64_t n = 0; n < words; n++) {
+        uint64_t w = start_word + n;
+        if (w >= words) w -= words;          /* wrap */
+
+        uint64_t word = bmp64[w];
+        if (word == ~0ULL)
+            continue;                        /* all 64 pages taken */
+
+        uint64_t bit = (uint64_t)__builtin_ctzll(~word);
+        uint64_t idx = w * 64 + bit;
+        /* Only reachable in the final partial word: bits past max_pages
+         * are initialised used and never freed, but check anyway rather
+         * than hand out a page that doesn't exist. */
+        if (idx >= max_pages)
+            continue;
+
+        bitmap_set(idx);
+        pmm_cursor = idx + 1;
+        return (void*)idx_to_addr(idx);
     }
 
-    spin_unlock(&pmm_lock);
-    panic("PMM: Out of memory!");
     return NULL;
+}
+
+/*
+ * Returns the physical address of a free 4KB page, or NULL if out of
+ * memory.
+ *
+ * NULL, not panic. This used to panic, which made every OOM path in
+ * every caller dead code — kernel/mm/uvm.c's careful unwind-and-free on
+ * partial allocation had never once executed — and, worse, handed
+ * userspace a way to halt the machine: SYS_ANON_ALLOC in a loop until
+ * physical memory ran out. A process asking for too much must get a
+ * failed allocation, not take the kernel down with it. Boot-critical
+ * callers that genuinely cannot continue panic at their own call site,
+ * where they can say something useful about what failed.
+ */
+void* pmm_alloc_page(void) {
+    spin_lock(&pmm_lock);
+    void* page = pmm_take_free_page_locked();
+    spin_unlock(&pmm_lock);
+    return page;
 }
 
 // Same as pmm_alloc_page(), but without taking pmm_lock. For genuinely
@@ -313,32 +369,35 @@ void* pmm_alloc_page(void) {
 // succeeds, spinning forever. QEMU's TCG doesn't model this restriction,
 // so it's invisible there.
 void* pmm_alloc_page_nolock(void) {
-    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
-    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
-
-    for (uint64_t i = 0; i < max_pages; i++) {
-        if ((bmp[i / 8] & (1 << (i % 8))) == 0) {
-            bitmap_set(i);
-            return (void*)idx_to_addr(i);
-        }
-    }
-
-    panic("PMM: Out of memory!");
-    return NULL;
+    return pmm_take_free_page_locked();
 }
 
+/* Takes pmm_lock, which it previously did not while pmm_alloc_page()
+ * did — an asymmetry that would corrupt the bitmap (one physical page
+ * handed out twice) the moment anything freed from an IRQ handler or
+ * syscalls became preemptible. Not reachable today on a single core
+ * with the callers all running DAIF-masked, which is exactly why it
+ * would have gone unnoticed until it wasn't. */
 void pmm_free_page(void* phys_addr) {
     uint64_t addr = (uint64_t)phys_addr;
-    
+
     // Sanity check: ensure the address is exactly on a 4KB boundary
     if (addr % PAGE_SIZE != 0) {
         panic("PMM: Tried to free an unaligned address: 0x%lx", addr);
     }
 
     uint64_t idx = addr_to_idx(addr);
+
+    spin_lock(&pmm_lock);
     if (!bitmap_test(idx)) {
+        spin_unlock(&pmm_lock);
         panic("PMM: Double free or freeing unallocated page at 0x%lx", addr);
     }
-
     bitmap_clear(idx);
+    /* Reuse freed space promptly rather than letting the cursor run
+     * ahead of it: without this a free-heavy workload would keep pushing
+     * the cursor forward and only revisit this page on the wrap pass. */
+    if (idx < pmm_cursor)
+        pmm_cursor = idx;
+    spin_unlock(&pmm_lock);
 }
