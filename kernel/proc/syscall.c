@@ -6,12 +6,76 @@
 #include <kernel/mm/paging.h>
 #include <kernel/drivers/timer.h>
 #include <kernel/drivers/keyboard.h>
+#include <stdbool.h>
 
 typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
 
+/* boot.S sets TCR_EL1.T0SZ=16, so TTBR0 — the calling process's own
+ * table — translates VA[0, 2^48). At or above this is either the
+ * kernel's TTBR1 half or the non-canonical hole between them. */
+#define USER_VA_LIMIT (1ULL << 48)
+
+/*
+ * Validate a user-supplied buffer before the kernel dereferences it.
+ *
+ * Syscalls run at EL1 with TTBR1 live, so a raw user pointer is not
+ * merely untrusted, it is *powerful*: without this check a process
+ * could pass a kernel address to SYS_WRITE and dump kernel memory to
+ * the console, or pass one to SYS_READ and have the kernel write
+ * attacker-chosen bytes into its own data structures. Neither is
+ * exotic — they're a one-instruction change to any test payload.
+ *
+ * Two separate things are checked:
+ *
+ *  - the range lies entirely below USER_VA_LIMIT, and doesn't wrap.
+ *    This is what keeps the kernel half unreachable.
+ *  - every page is actually mapped in *this* process's table. Without
+ *    it, a bad-but-user-range pointer faults at EL1, and a Data Abort
+ *    there is a panic (kernel/arch/aarch64/exceptions.c) — i.e. any
+ *    process could halt the machine with one bad pointer.
+ *
+ * Validate-then-use is race-free here only because the whole syscall
+ * runs DAIF-masked: nothing can unmap these pages between the check
+ * and the access, since nothing else runs at all. That is the same
+ * invariant sys_write()'s atomicity rests on — see its comment. If
+ * syscalls are ever made preemptible, this becomes a TOCTOU window
+ * and has to move to a real copy_from_user()/copy_to_user() that
+ * faults safely instead of checking up front.
+ */
+static bool user_buffer_ok(struct proc *p, uint64_t addr, uint64_t len) {
+    if (len == 0)
+        return true;
+    if (!p || addr >= USER_VA_LIMIT || len > USER_VA_LIMIT - addr)
+        return false;
+
+    uint64_t start = addr & ~((uint64_t)PAGE_SIZE - 1);
+    uint64_t end   = (addr + len + PAGE_SIZE - 1) & ~((uint64_t)PAGE_SIZE - 1);
+    for (uint64_t v = start; v < end; v += PAGE_SIZE) {
+        if (!virt_to_phys(p->ttbr0, v))
+            return false;
+    }
+    return true;
+}
+
+/* Runs start-to-finish with DAIF masked — the SVC handler masks on
+ * entry and nothing in this path unmasks, so the byte loop below cannot
+ * be preempted and no second writer can interleave with it. That makes
+ * sys_write atomic per call without a lock. The property is incidental
+ * rather than designed, and load-bearing: unmask during syscalls (which
+ * is worth doing eventually, since a long write currently blocks every
+ * interrupt for its duration — at 115200 baud the PL011's 16-byte RX
+ * FIFO overruns after ~1.4ms of unserviced input) and this needs a real
+ * console lock, and user_buffer_ok() above needs to become a faulting
+ * copy_to_user(). Both change together or neither does. */
 static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count) {
     if (fd != 1 && fd != 2) {
         kprintf("[SYSCALL write] unsupported fd=%lu\n", (unsigned long)fd);
+        return (uint64_t)-1;
+    }
+    if (!user_buffer_ok(my_proc(), buf_addr, count)) {
+        kprintf("[SYSCALL write] rejected buffer %p (+%lu) from pid %lu\n",
+                (void *)buf_addr, (unsigned long)count,
+                my_proc() ? (unsigned long)my_proc()->pid : 0);
         return (uint64_t)-1;
     }
     const char *buf = (const char *)buf_addr;
@@ -81,6 +145,15 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3) {
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count) {
     if (fd != 0) {
         kprintf("[SYSCALL read] unsupported fd=%lu\n", (unsigned long)fd);
+        return (uint64_t)-1;
+    }
+    /* Checked before blocking, not after: kbd_getc() sleeps, and coming
+     * back from that only to discover the destination was never valid
+     * would mean a keystroke consumed and thrown away. */
+    if (!user_buffer_ok(my_proc(), buf_addr, count)) {
+        kprintf("[SYSCALL read] rejected buffer %p (+%lu) from pid %lu\n",
+                (void *)buf_addr, (unsigned long)count,
+                my_proc() ? (unsigned long)my_proc()->pid : 0);
         return (uint64_t)-1;
     }
     char *buf = (char *)buf_addr;

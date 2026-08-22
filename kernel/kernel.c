@@ -214,13 +214,20 @@ void kernel_stage2(uint64_t mb2_addr) {
      * trip proven live, not just inferred. */
     struct proc *reader = proc_create_from_binary("read_echo_test.elf");
     struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf");
-    if (!reader || !heartbeat) {
+    /* Runs alongside them and exits: proves SYS_READ/SYS_WRITE reject
+     * pointers into the kernel half or into unmapped pages, rather than
+     * dereferencing them at EL1 (kernel/proc/syscall.c's
+     * user_buffer_ok()). Prints three PASS/FAIL lines, then exits, so
+     * the interactive test carries on afterwards uninterrupted. */
+    struct proc *badptr = proc_create_from_binary("badptr_test.elf");
+    if (!reader || !heartbeat || !badptr) {
         panic("kernel_stage2: failed to create SYS_READ test procs");
     }
     sched_policy_add(reader);
     sched_policy_add(heartbeat);
+    sched_policy_add(badptr);
 
-    kprintf("Starting scheduler with 2 procs (SYS_READ test) — type on the console.\n");
+    kprintf("Starting scheduler with 3 procs (SYS_READ + badptr tests) — type on the console.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");
