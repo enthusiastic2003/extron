@@ -84,6 +84,19 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
             return;
         }
 
+        /* EOI BEFORE dispatch, not after: a handler that reschedules
+         * (kernel/arch/aarch64/sched.c's schedule() -> context_switch())
+         * can permanently divert into another proc's trampoline instead
+         * of ever returning back up through this function — so anything
+         * placed after the handler call is not guaranteed to run. GICv2
+         * allows EOI independent of whether processing is actually
+         * finished (it just tells the distributor this priority level
+         * is done, unrelated to our own bookkeeping), so this is safe:
+         * re-arming already happens at the very start of
+         * timer_irq_handler() regardless. (Previously EOI'd after —
+         * fine when nothing ever rescheduled; now something does.) */
+        gic_eoi_irq(id);
+
         if (id < IRQ_HANDLER_MAX && irq_handlers[id]) {
             irq_handlers[id](f);
         } else {
@@ -91,7 +104,6 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
                   type == AARCH64_EXC_FIQ ? "FIQ" : "IRQ", id, (void *)f->elr_el1);
         }
 
-        gic_eoi_irq(id);
         return;
     }
 
