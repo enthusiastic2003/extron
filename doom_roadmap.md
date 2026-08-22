@@ -110,11 +110,23 @@ Two consequences:
   debugging writes that silently went nowhere. `vm_map_region()`
   (kernel/mm/uvm.c) covers the user side; the kernel side wants the Device-memory
   `kmap()` pattern from `gic.c`'s `mmio_map_device()`.
-- **That deny-by-default is accidental, not designed.** It holds only because
-  `total_mem` is computed as a high-water mark and the bitmap starts fully set.
-  Nothing parses `/memreserve/` or `/reserved-memory`, and `mb2_shim_build()`
-  marks every region AVAILABLE unconditionally (mb2_shim.c). Correct today;
-  silently wrong if either of those details changes.
+- **This is by design, not luck.** `init_pmm()` says so in as many words —
+  "Deny by Default: Mark everything as USED (1)" — and the two high-water marks
+  it keeps are deliberate and distinct: `highest_reserved_addr` places the bitmap
+  past `_kernel_end`, the mb2 struct and every module, so it lands in available
+  low RAM after everything the bootloader put down (with an explicit panic if it
+  crosses 1GB, boot.S's identity-map limit), while `total_mem` sizes the bitmap
+  to the top of RAM so holes are *covered* by it. Bits for a hole are set at init
+  and never cleared, because only AVAILABLE regions get freed. Anything the
+  memory map doesn't positively declare usable is therefore unreachable to the
+  allocator.
+
+  The one narrow gap is a region declared reserved *inside* an available range —
+  `/memreserve/` or a `/reserved-memory` node — since `mb2_shim_build()` flattens
+  every FDT region to MULTIBOOT_MEMORY_AVAILABLE (mb2_shim.c) and nothing parses
+  those. That is a different question from the carve-out, which is a hole and is
+  handled correctly. Whether this board's firmware DTB declares any such region
+  is unverified.
 
 Two known gotchas for the driver itself, worth not rediscovering: the mailbox
 returns a **bus** address (typically `0xC0000000 | phys`) that must be masked
