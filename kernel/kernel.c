@@ -86,7 +86,7 @@ static phys_addr_t map_test_counter_page(struct proc *p) {
  * miscalculation would show up as one allocation stomping another's
  * bytes. Frees the middle one specifically and allocates again to
  * prove the freed space is actually reusable, not just leaked. */
-static void kheap_test(void) {
+__attribute__((unused)) static void kheap_test(void) {
     kprintf("--- kheap test ---\n");
 
     char *a = kmalloc(16);
@@ -183,7 +183,9 @@ void kernel_stage2(uint64_t mb2_addr) {
     proc_table_init();
     sched_init();
 
-    kheap_test();
+    /* Proven; parked with the rest of the test payloads to keep the
+     * console clear. Uncomment to re-run. */
+    /* kheap_test(); */
 
     /* Keyboard-echo test — parked for the syscall test below, same
      * "one test at a time" pattern as the 2-proc scheduler test above.
@@ -219,62 +221,58 @@ void kernel_stage2(uint64_t mb2_addr) {
         fb_test_pattern();
     }
 
-    /* Phase 2 verification, sleep/wake + VMA allocator (already proven
-     * on both QEMU and real hardware — see git history for that run):
-     * struct proc *sleeper = proc_create_from_binary("sleep_test.elf");
-     * struct proc *spinner = proc_create_from_binary("spin_write_test.elf");
-     * struct proc *allocator = proc_create_from_binary("anon_alloc_test.elf");
-     * sched_policy_add(sleeper); sched_policy_add(spinner); sched_policy_add(allocator);
+    /* Verification payloads, all proven on QEMU and real hardware and
+     * parked to keep the console readable while the framebuffer is the
+     * thing under test. Same "one test at a time" pattern as the earlier
+     * scheduler and keyboard-echo tests above; uncomment a block to
+     * bring it back.
      *
-     * Now proving the last item from that same plan's verification
-     * list: SYS_READ genuinely wakes a blocked reader on a real
-     * keystroke rather than busy-spinning. read_echo_test.elf blocks
-     * on SYS_READ and echoes each byte typed; heartbeat_test.elf
-     * prints "." every ~200ms via SYS_SLEEP the whole time — if the
-     * dots keep coming while nothing's been typed, and each keystroke
-     * gets echoed promptly, that's kbd_getc()'s sleep()/wakeup() round
-     * trip proven live, not just inferred. */
+     * Phase 2 — sleep/wake + VMA allocator:
+     *   sleep_test.elf, spin_write_test.elf, anon_alloc_test.elf
+     * Syscall pointer validation (user_buffer_ok):
+     *   badptr_test.elf — 3 checks
+     * Per-process CPU state across context switches. A PAIR, because one
+     * proc passes even with no save at all:
+     *   fp_test_a.elf + fp_test_b.elf — v0-v31, FPCR/FPSR, TPIDR_EL0
+     * The two independent clocks cross-checking each other (SYS_SLEEP
+     * counts 20Hz ticks, SYS_UPTIME_MS reads CNTPCT_EL0):
+     *   uptime_test.elf
+     * Userspace C: crt0 -> main -> libc -> syscalls -> exit, plus the
+     * shared liballoc on user pages, and SYS_MAP_INITRD:
+     *   libc_test.elf — 21 checks
+     * 8192 page allocations plus the out-of-memory refusal paths:
+     *   mem_stress.elf — 8 checks
+     *
+     * struct proc *badptr    = proc_create_from_binary("badptr_test.elf");
+     * struct proc *fp_a      = proc_create_from_binary("fp_test_a.elf");
+     * struct proc *fp_b      = proc_create_from_binary("fp_test_b.elf");
+     * struct proc *uptime    = proc_create_from_binary("uptime_test.elf");
+     * struct proc *libc      = proc_create_from_binary("libc_test.elf");
+     * struct proc *memstress = proc_create_from_binary("mem_stress.elf");
+     * sched_policy_add(badptr);  sched_policy_add(fp_a);
+     * sched_policy_add(fp_b);    sched_policy_add(uptime);
+     * sched_policy_add(libc);    sched_policy_add(memstress);
+     *
+     * heartbeat_test.elf stays parked too — its ~5 dots/second is exactly
+     * the clutter this is about, and its job (proving a blocked reader
+     * really yields the CPU) is done.
+     *
+     * struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf");
+     * sched_policy_add(heartbeat);
+     */
+
+    /* One proc left running: it blocks in SYS_READ and echoes what you
+     * type. Silent until then, so it costs nothing on the console while
+     * still showing the system is alive and responsive — and with
+     * nothing else runnable it parks the CPU in schedule()'s wfi idle
+     * path (e6acf26) rather than spinning. */
     struct proc *reader = proc_create_from_binary("read_echo_test.elf");
-    struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf");
-    /* Runs alongside them and exits: proves SYS_READ/SYS_WRITE reject
-     * pointers into the kernel half or into unmapped pages, rather than
-     * dereferencing them at EL1 (kernel/proc/syscall.c's
-     * user_buffer_ok()). Prints three PASS/FAIL lines, then exits, so
-     * the interactive test carries on afterwards uninterrupted. */
-    struct proc *badptr = proc_create_from_binary("badptr_test.elf");
-    /* Pair, not a single proc: each loads a different pattern into the
-     * same FP registers and yields repeatedly, so a context_switch that
-     * dropped FP state leaves each holding the other's values. One proc
-     * alone would pass even with no FP save at all, since the kernel is
-     * built -mgeneral-regs-only and never touches those registers. */
-    struct proc *fp_a = proc_create_from_binary("fp_test_a.elf");
-    struct proc *fp_b = proc_create_from_binary("fp_test_b.elf");
-    /* Cross-checks the two independent clocks against each other:
-     * SYS_SLEEP counts 20Hz timer interrupts, SYS_UPTIME_MS reads
-     * CNTPCT_EL0. Sleeping a known interval and measuring it with the
-     * other source validates both. */
-    struct proc *uptime = proc_create_from_binary("uptime_test.elf");
-    /* First C payload: crt0 -> main -> libc -> syscalls -> exit, plus
-     * the shared liballoc running on user pages via SYS_ANON_ALLOC. */
-    struct proc *libc = proc_create_from_binary("libc_test.elf");
-    /* Puts 8192 page allocations through the PMM and exercises the
-     * out-of-memory paths that were dead code while pmm_alloc_page()
-     * panicked instead of returning NULL. */
-    struct proc *memstress = proc_create_from_binary("mem_stress.elf");
-    if (!reader || !heartbeat || !badptr || !fp_a || !fp_b || !uptime ||
-        !libc || !memstress) {
-        panic("kernel_stage2: failed to create SYS_READ test procs");
+    if (!reader) {
+        panic("kernel_stage2: failed to create the console reader proc");
     }
     sched_policy_add(reader);
-    sched_policy_add(heartbeat);
-    sched_policy_add(badptr);
-    sched_policy_add(fp_a);
-    sched_policy_add(fp_b);
-    sched_policy_add(uptime);
-    sched_policy_add(libc);
-    sched_policy_add(memstress);
 
-    kprintf("Starting scheduler with 8 procs (SYS_READ + badptr + FP + uptime + libc + memstress) — type on the console.\n");
+    kprintf("Starting scheduler — type on the console to echo.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");
