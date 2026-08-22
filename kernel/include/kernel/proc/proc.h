@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/sync/spinlock.h>
+
+struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular include */
 
 /*
  * aarch64 process control block. Deliberately no thread split (yet) —
@@ -24,7 +27,9 @@
 enum proc_state {
     PROC_UNUSED = 0,
     PROC_RUNNABLE,
-    PROC_RUNNING
+    PROC_RUNNING,
+    PROC_SLEEPING,
+    PROC_ZOMBIE
 };
 
 /*
@@ -51,6 +56,10 @@ struct proc {
     virt_addr_t         entry;               /* EL0 entry point, used once on first launch */
     virt_addr_t         user_sp;             /* EL0 initial SP_EL0, used once on first launch */
     struct proc         *next;               /* run-queue link */
+
+    void                *chan;               /* wait channel, valid while PROC_SLEEPING */
+    uint64_t            sleep_until;         /* wake when timer_ticks() >= this; 0 = not timed */
+    struct vm_space     *mm;                 /* user address-space allocator (kernel/mm/uvm.c) */
 };
 
 /* Size of the per-process kernel stack (interrupts land here). Smaller
@@ -67,5 +76,40 @@ struct proc {
  * of needing a special case for "never run before". */
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
                 virt_addr_t user_sp, phys_addr_t ttbr0);
+
+/* ---------------------------------------------------------------
+ * Process table — every proc from proc_table_add() until
+ * proc_table_remove(). Ported from x86's kernel/proc/proc.c
+ * (~/extron-x86-backup/): a fixed slot array + a lock + a monotonic
+ * PID counter, nothing here touches a register or instruction. Distinct
+ * from the scheduler's run queue (kernel/proc/sched_policy_rr.c), which
+ * only holds RUNNABLE, off-CPU procs — this table holds everything
+ * alive regardless of state.
+ * --------------------------------------------------------------- */
+void          proc_table_init(void);
+uint64_t      proc_table_add(struct proc *p);    /* assigns and returns p->pid */
+void          proc_table_remove(struct proc *p);
+struct proc  *proc_lookup(uint64_t pid);
+void          proc_for_each(void (*fn)(struct proc *, void *), void *arg);
+void          proc_dump_table(void);
+
+/* ---------------------------------------------------------------
+ * State helpers
+ * --------------------------------------------------------------- */
+void proc_set_runnable(struct proc *p);
+void proc_set_running(struct proc *p);
+void proc_set_sleeping(struct proc *p);
+void proc_set_zombie(struct proc *p);
+
+/* ---------------------------------------------------------------
+ * Sleep / wake — also ported from x86's proc.c, same algorithm
+ * (including the lost-wakeup guard: proc_table_lock is held across
+ * releasing `lk` and marking the caller PROC_SLEEPING, which is what
+ * stops a wakeup() racing in via an IRQ during that exact window from
+ * finding "not asleep yet" and silently doing nothing).
+ * --------------------------------------------------------------- */
+void sleep(void *chan, spinlock_t *lk);   /* caller holds lk; returns with lk re-held */
+void wakeup(void *chan);                   /* wakes every sleeper on chan; IRQ-safe */
+void proc_wakeup_expired(uint64_t now);    /* wakes timed sleepers whose deadline passed */
 
 #endif

@@ -82,6 +82,7 @@ int unmap_page(pml4_t pml4, virt_addr_t virt);
 int kmap(virt_addr_t v, phys_addr_t p, uint64_t flags);
 int kunmap(virt_addr_t v);
 phys_addr_t kvirt_to_phys(virt_addr_t v);
+phys_addr_t virt_to_phys(pml4_t pml4, virt_addr_t virt); /* walks an arbitrary process's own table, unlike kvirt_to_phys() (hardcoded to kernel_l0) */
 uint64_t* phys_to_virt_hhdm(phys_addr_t p);
 uint64_t* virt_to_phys_hhdm(virt_addr_t v);
 phys_addr_t create_user_pml4(void);

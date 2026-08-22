@@ -4,6 +4,7 @@
 #include <kernel/mm/paging.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/kheap.h>
+#include <kernel/mm/uvm.h>
 #include <kernel/console.h>
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
@@ -18,8 +19,6 @@
  * schedule()), every kprintf() while that proc is current goes
  * silently into the void unless its own table maps this page too. */
 #define UART_PHYS_PAGE (0xFE201000ULL)
-
-static uint64_t next_pid = 0;
 
 struct proc *proc_create_from_binary(const char *binary_path) {
     struct tar_file f;
@@ -51,6 +50,20 @@ struct proc *proc_create_from_binary(const char *binary_path) {
         return NULL;
     }
 
-    proc_init(p, next_pid++, entry, USER_STACK_VA + PAGE_SIZE, pml4);
+    /* proc_table_add() needs `p` to already exist (it stores the
+     * pointer) but assigns the pid before proc_init() fills the struct
+     * in — proc_init() is what actually writes p->pid, so it must run
+     * with the pid proc_table_add() hands back, not before. */
+    uint64_t pid = proc_table_add(p);
+    proc_init(p, pid, entry, USER_STACK_VA + PAGE_SIZE, pml4);
+
+    p->mm = vm_space_create(pml4);
+    if (!p->mm) {
+        kprintf("[EXEC] out of memory allocating vm_space for %s\n", binary_path);
+        proc_table_remove(p);
+        kfree(p);
+        return NULL;
+    }
+
     return p;
 }

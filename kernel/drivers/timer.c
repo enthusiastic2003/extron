@@ -2,6 +2,7 @@
 #include <arch/gic.h>
 #include <arch/exceptions.h>
 #include <kernel/proc/sched.h>
+#include <kernel/proc/proc.h>
 #include <kernel/console.h>
 #include <kernel/mm/paging.h>
 
@@ -17,6 +18,15 @@
 
 static uint64_t ticks_per_period;
 static volatile uint64_t tick_count = 0;
+static unsigned configured_hz;
+
+uint64_t timer_ticks(void) {
+    return tick_count;
+}
+
+unsigned timer_ticks_per_second(void) {
+    return configured_hz;
+}
 
 /* Debug-only: physical addresses of the two test procs' shared counter
  * pages (kernel_aarch64.c's 2-process scheduler test), watched here so
@@ -48,6 +58,7 @@ static void timer_irq_handler(struct aarch64_frame *f) {
     (void)f;
     write_tval(ticks_per_period); /* re-arm for the next period */
     tick_count++;
+    proc_wakeup_expired(tick_count);
 
     if (watch_counter_a && watch_counter_b && (tick_count % 20) == 0) {
         uint64_t a = *(volatile uint64_t *)phys_to_virt_hhdm(watch_counter_a);
@@ -62,6 +73,7 @@ static void timer_irq_handler(struct aarch64_frame *f) {
 void timer_init(unsigned hz) {
     uint64_t freq = read_cntfrq();
     ticks_per_period = freq / hz;
+    configured_hz = hz;
 
     register_irq_handler(GIC_PPI_NS_PHYS_TIMER, timer_irq_handler);
     gic_enable_irq(GIC_PPI_NS_PHYS_TIMER);

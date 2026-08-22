@@ -1,9 +1,11 @@
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/serial.h>
+#include <kernel/proc/proc.h>
 #include <arch/gic.h>
 #include <arch/exceptions.h>
 #include <arch/irq_spinlock.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /*
  * There's no physical keyboard on this setup — a headless RPi4 talked
@@ -53,13 +55,17 @@ static void kbd_irq_handler(struct aarch64_frame *f) {
     /* Drain the ENTIRE hardware FIFO in one go — the whole point is to
      * empty it before more bytes can possibly overflow it, not just
      * take one byte per interrupt. */
+    bool got_any = false;
     while ((c = serial_try_getc()) != -1) {
         uint32_t next_head = (kbuf.head + 1) % KBD_BUFFER_SIZE;
         if (next_head != kbuf.tail) { /* drop the byte if the software buffer is full too */
             kbuf.buf[kbuf.head] = (char)c;
             kbuf.head = next_head;
+            got_any = true;
         }
     }
+    if (got_any)
+        wakeup(&kbuf);
 }
 
 void init_kbd(void) {
@@ -69,21 +75,17 @@ void init_kbd(void) {
 }
 
 char kbd_getc(void) {
-    for (;;) {
-        irq_spin_lock(&kbuf.lock);
-        if (kbuf.head != kbuf.tail) {
-            char c = kbuf.buf[kbuf.tail];
-            kbuf.tail = (kbuf.tail + 1) % KBD_BUFFER_SIZE;
-            irq_spin_unlock(&kbuf.lock);
-            return c;
-        }
-        irq_spin_unlock(&kbuf.lock);
-
-        /* Idle instead of hot-spinning: DAIF is unmasked here (set once
-         * in kernel_aarch64_stage2()), so the next UART IRQ — the exact
-         * event this loop is waiting for — is taken normally and wakes
-         * this wfe on its way to running kbd_irq_handler(); no
-         * explicit sev needed. */
-        __asm__ volatile ("wfe");
+    irq_spin_lock(&kbuf.lock);
+    while (kbuf.head == kbuf.tail) {
+        /* sleep() releases kbuf.lock, marks this proc PROC_SLEEPING on
+         * channel &kbuf, and schedule()s away — a real context switch
+         * to whatever else is runnable, not a busy wfe. It reacquires
+         * kbuf.lock itself once kbd_irq_handler()'s wakeup(&kbuf) (above)
+         * resumes this proc, so the loop's re-check below is safe. */
+        sleep(&kbuf, &kbuf.lock);
     }
+    char c = kbuf.buf[kbuf.tail];
+    kbuf.tail = (kbuf.tail + 1) % KBD_BUFFER_SIZE;
+    irq_spin_unlock(&kbuf.lock);
+    return c;
 }

@@ -2,6 +2,10 @@
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/console.h>
+#include <kernel/mm/uvm.h>
+#include <kernel/mm/paging.h>
+#include <kernel/drivers/timer.h>
+#include <kernel/drivers/keyboard.h>
 
 typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
 
@@ -31,15 +35,16 @@ static uint64_t sys_tcb_set(uint64_t addr, uint64_t arg2, uint64_t arg3) {
     return 0;
 }
 
-/* Minimal: no process table yet (nothing to report exit status to), no
- * zombie state, nothing ever frees this proc's resources — matches
- * "buildable now" scope, not full x86 parity (proc_destroy/proc_free,
- * parent wait, are explicitly deferred future work). Setting state away
- * from PROC_RUNNING is what actually matters here: schedule() only
- * re-enqueues `old` if it's still PROC_RUNNING when called, so this is
- * enough to keep the exiting proc out of the rotation permanently
- * without needing a separate sched_policy_remove() — it was never in
- * the run queue while running in the first place. */
+/* Matches x86 now: exited-but-unreaped processes stay visible in the
+ * table as PROC_ZOMBIE rather than vanishing to PROC_UNUSED — no
+ * proc_destroy/reaping exists on either tree yet, so nothing currently
+ * removes them, but a future wait()/reaper has something real to find.
+ * Setting state away from PROC_RUNNING is what actually matters for
+ * scheduling: schedule() only re-enqueues `old` if it's still
+ * PROC_RUNNING when called, so this is enough to keep the exiting proc
+ * out of the rotation permanently without needing a separate
+ * sched_policy_remove() — it was never in the run queue while running
+ * in the first place. */
 static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3) {
     (void)arg2;
     (void)arg3;
@@ -47,14 +52,85 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3) {
     kprintf("[SYSCALL exit] pid=%lu status=%lu\n",
             p ? (unsigned long)p->pid : 0, (unsigned long)status);
     if (p) {
-        p->state = PROC_UNUSED;
+        proc_set_zombie(p);
     }
     schedule();
-    /* Only reachable if schedule() found nothing else runnable — this
-     * milestone's tests always keep >=1 other proc alive, matching
-     * schedule()'s own existing assumption (see its comment on why
-     * there's no idle loop yet). A real idle path is future work. */
-    __builtin_unreachable();
+    /* schedule() (kernel/proc/sched.c) only returns here if nothing
+     * else was runnable at this exact instant — its own documented
+     * "no idle loop yet" case. That's a real, reachable outcome (e.g.
+     * the last other proc exits while a third is legitimately
+     * PROC_SLEEPING, not yet due to wake) — treating it as
+     * __builtin_unreachable() was UB waiting to happen, not actually
+     * unreachable. When it happens, this now-ZOMBIE proc's own EL0
+     * code (every test payload ends in an infinite `b .`) just spins
+     * harmlessly in place until the NEXT timer tick's own, separate
+     * schedule() call (timer_irq_handler, kernel/drivers/timer.c) sees
+     * this proc is ZOMBIE (not RUNNING) and sweeps it away once
+     * something else — e.g. a sleeper waking via
+     * proc_wakeup_expired() — becomes runnable. No new mechanism
+     * needed: that preemption path already runs on every tick
+     * regardless. */
+    return status;
+}
+
+/* fd 0 only — one byte at a time via the real blocking kbd_getc()
+ * (kernel/drivers/keyboard.c), which now sleep()s the calling proc
+ * until a byte arrives instead of busy-spinning. A multi-byte-at-once
+ * kbd_read() is a straightforward later refinement, not needed for
+ * this milestone's scope. */
+static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count) {
+    if (fd != 0) {
+        kprintf("[SYSCALL read] unsupported fd=%lu\n", (unsigned long)fd);
+        return (uint64_t)-1;
+    }
+    char *buf = (char *)buf_addr;
+    for (uint64_t i = 0; i < count; i++) {
+        buf[i] = kbd_getc();
+    }
+    return count;
+}
+
+/* Ticks-from-time using the actually configured Hz (timer_ticks_per_
+ * second()), not a hardcoded frequency baked in twice like x86's own
+ * version. Runs fully DAIF-masked (this whole handler is inside the
+ * SVC exception path, which masks DAIF on entry same as any other
+ * exception) so setting sleep_until/chan/state here needs no lock —
+ * proc_wakeup_expired() (kernel/drivers/timer.c's IRQ handler) simply
+ * can't run concurrently with this. */
+static uint64_t sys_sleep(uint64_t seconds, uint64_t nanos, uint64_t arg3) {
+    (void)arg3;
+    struct proc *p = my_proc();
+    unsigned hz = timer_ticks_per_second();
+    uint64_t ticks = seconds * hz + (nanos * hz) / 1000000000ULL;
+    if (ticks == 0)
+        ticks = 1;
+    p->chan = NULL;
+    p->sleep_until = timer_ticks() + ticks;
+    proc_set_sleeping(p);
+    schedule();
+    return 0;
+}
+
+static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c) {
+    (void)a;
+    (void)b;
+    (void)c;
+    proc_dump_table();
+    return 0;
+}
+
+static uint64_t sys_anon_alloc(uint64_t size, uint64_t arg2, uint64_t arg3) {
+    (void)arg2;
+    (void)arg3;
+    struct proc *p = my_proc();
+    return (uint64_t)vm_allocate_region(p->mm, size, VM_READ | VM_WRITE | VM_USER);
+}
+
+static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3) {
+    (void)arg3;
+    struct proc *p = my_proc();
+    vm_free_region(p->mm, addr, size);
+    return 0;
 }
 
 static uint64_t sys_not_implemented(uint64_t a, uint64_t b, uint64_t c) {
@@ -66,12 +142,12 @@ static uint64_t sys_not_implemented(uint64_t a, uint64_t b, uint64_t c) {
 }
 
 static const syscall_fn syscall_table[] = {
-    [SYS_READ]       = sys_not_implemented, /* needs sleep/wake */
+    [SYS_READ]       = sys_read,
     [SYS_WRITE]      = sys_write,
-    [SYS_SLEEP]      = sys_not_implemented, /* needs sleep/wake */
-    [SYS_PROC_DUMP]  = sys_not_implemented, /* needs a process table */
-    [SYS_ANON_ALLOC] = sys_not_implemented, /* needs a bump allocator */
-    [SYS_ANON_FREE]  = sys_not_implemented, /* needs a bump allocator */
+    [SYS_SLEEP]      = sys_sleep,
+    [SYS_PROC_DUMP]  = sys_proc_dump,
+    [SYS_ANON_ALLOC] = sys_anon_alloc,
+    [SYS_ANON_FREE]  = sys_anon_free,
     [SYS_TCB_SET]    = sys_tcb_set,
     [SYS_EXIT]       = sys_exit,
     [SYS_FORK]       = sys_not_implemented, /* needs VMA + process table */

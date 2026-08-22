@@ -14,4 +14,11 @@ void timer_init(unsigned hz);
  * ~20 ticks. Pass 0, 0 to disable. */
 void timer_set_counter_watch(phys_addr_t a, phys_addr_t b);
 
+/* Monotonic tick counter and configured rate — used by SYS_SLEEP
+ * (kernel/proc/syscall.c) to convert a requested duration into a
+ * deadline in ticks, and by proc_wakeup_expired() callers to compare
+ * against it. */
+uint64_t timer_ticks(void);
+unsigned timer_ticks_per_second(void);
+
 #endif
