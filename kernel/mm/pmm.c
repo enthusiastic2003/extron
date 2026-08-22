@@ -32,6 +32,21 @@ struct phys_mem_info
 } global_phys_mem_info;
 
 
+/* Regions registered before init_pmm() by arch boot code — memory that
+ * IS inside an available range but is occupied. See
+ * pmm_reserve_boot_region(). */
+static struct { uint64_t start, size; } boot_reservations[PMM_MAX_BOOT_RESERVATIONS];
+static size_t boot_reservation_count = 0;
+
+void pmm_reserve_boot_region(uint64_t start, uint64_t size) {
+    if (size == 0 || boot_reservation_count >= PMM_MAX_BOOT_RESERVATIONS) {
+        return;
+    }
+    boot_reservations[boot_reservation_count].start = start;
+    boot_reservations[boot_reservation_count].size  = size;
+    boot_reservation_count++;
+}
+
 static inline uint64_t addr_to_idx(uint64_t a) { return a / PAGE_SIZE; }
 static inline uint64_t idx_to_addr(uint64_t i) { return i * PAGE_SIZE; }
 
@@ -149,6 +164,18 @@ void get_bitmap_location(uint64_t mb2_addr){
 
         // Advance to the next tag using your 8-byte aligned helper function
         tag = mb2_next(tag);
+    }
+
+    /* Keep the bitmap clear of anything registered via
+     * pmm_reserve_boot_region(). Reserving a region and then writing the
+     * bitmap over it would be self-defeating — and the DTB in particular
+     * can sit above the kernel and initrd, exactly where the bitmap
+     * would otherwise land. */
+    for (size_t i = 0; i < boot_reservation_count; i++) {
+        uint64_t end = boot_reservations[i].start + boot_reservations[i].size;
+        if (end > highest_reserved_addr) {
+            highest_reserved_addr = end;
+        }
     }
 
     global_phys_mem_info.bmp_phys = (virt_addr_t) highest_reserved_addr;
@@ -270,6 +297,14 @@ void init_pmm(uint64_t mb2_addr) {
 
     // Reserve the memory holding the Bitmap itself
     pmm_mark_used_region((uint64_t)global_phys_mem_info.bmp_phys, bitmap_size_bytes);
+
+    // Anything arch boot code registered before we got here (the DTB).
+    for (size_t i = 0; i < boot_reservation_count; i++) {
+        pmm_mark_used_region(boot_reservations[i].start, boot_reservations[i].size);
+        kprintf("PMM: reserved boot region 0x%lx - 0x%lx\n",
+                boot_reservations[i].start,
+                boot_reservations[i].start + boot_reservations[i].size);
+    }
 
 
     kprintf("PMM Initialized! Bitmap at 0x%lx, Size: %u bytes\n", 

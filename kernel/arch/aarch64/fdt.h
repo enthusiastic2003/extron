@@ -28,4 +28,11 @@ size_t fdt_get_memory_regions(const void *dtb_phys, struct fdt_mem_region *out, 
  */
 int fdt_get_initrd_region(const void *dtb_phys, uint64_t *out_start, uint64_t *out_end);
 
+/*
+ * The FDT header's own totalsize field — how many bytes of RAM the
+ * device tree blob occupies, so it can be reserved from the physical
+ * allocator. Returns 0 if dtb_phys isn't a valid FDT.
+ */
+uint32_t fdt_get_total_size(const void *dtb_phys);
+
 #endif

@@ -65,6 +65,14 @@ static int name_is_chosen_node(const char *name) {
     return name[6] == '\0';
 }
 
+uint32_t fdt_get_total_size(const void *dtb_phys) {
+    if (read_be32(dtb_phys) != FDT_MAGIC) {
+        return 0;
+    }
+    /* totalsize is the second u32 of the header, right after magic. */
+    return read_be32((const uint8_t *)dtb_phys + 4);
+}
+
 size_t fdt_get_memory_regions(const void *dtb_phys, struct fdt_mem_region *out, size_t max_regions) {
     if (read_be32(dtb_phys) != FDT_MAGIC) {
         return 0;

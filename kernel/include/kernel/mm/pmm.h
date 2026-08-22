@@ -25,6 +25,16 @@ static inline uint64_t align_down(uint64_t x, uint64_t a) {
     return x & ~(a - 1);
 }
 
+/* Reserve a physical region that the memory map itself doesn't describe
+ * as unusable — for things that live IN available RAM but must not be
+ * handed out (the DTB today). Must be called BEFORE init_pmm(), which is
+ * where the bitmap is created and these are applied; init_pmm() also
+ * keeps the bitmap itself clear of them. Silently ignored past
+ * PMM_MAX_BOOT_RESERVATIONS, which is sized for the handful of
+ * boot-time structures this can ever mean. */
+#define PMM_MAX_BOOT_RESERVATIONS 4
+void pmm_reserve_boot_region(uint64_t start, uint64_t size);
+
 void pmm_print_stats(void);
 void scan_mb2_header(uint64_t );
 void init_pmm(uint64_t);

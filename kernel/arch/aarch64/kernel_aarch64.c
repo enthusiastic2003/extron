@@ -70,6 +70,24 @@ void kernel_aarch64_main(uint64_t dtb_phys) {
     uint64_t initrd_start = 0, initrd_end = 0;
     fdt_get_initrd_region((const void *)dtb_phys, &initrd_start, &initrd_end);
 
+    /* Keep the DTB out of the physical allocator.
+     *
+     * Nothing reads it after this function — the memory regions and
+     * initrd bounds above are copied into locals, and dtb_phys is never
+     * touched again — so today the pages would be safe to recycle. This
+     * reserves them anyway, because that safety is a property of what
+     * the kernel currently happens to do rather than anything enforced,
+     * and the first feature that wants to re-walk the device tree
+     * (probing the VideoCore mailbox from /soc rather than hardcoding
+     * its address, say) would silently be parsing recycled memory. A
+     * DTB is tens of KB; the reservation costs nothing worth counting.
+     *
+     * This is what /memreserve/ exists to express: RAM that is inside a
+     * usable range but occupied, as opposed to a hole in /memory, which
+     * says the range is not usable RAM at all. */
+    uint32_t dtb_size = fdt_get_total_size((const void *)dtb_phys);
+    pmm_reserve_boot_region(dtb_phys, dtb_size);
+
     /* A `static` buffer would land in .bss, which is now high-VMA linked
      * like everything else in the higher-half build — but init_pmm()'s
      * ONE_GIB sanity check assumes mb2_addr is a genuinely low,
