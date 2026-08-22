@@ -6,12 +6,31 @@ OBJCOPY = aarch64-linux-gnu-objcopy
 
 # -mno-outline-atomics: cortex-a72 predates LSE, and outline atomics call into
 #   a libatomic helper we don't have in this freestanding build.
+# -mgeneral-regs-only: the kernel must never touch FP/SIMD. Exception entry
+#   (SAVE_CONTEXT, exception_vectors.S) deliberately does NOT save v0-v31, so a
+#   user process's FP state stays live in the hardware registers across syscalls
+#   and IRQs and comes back for free on eret. That is only sound if kernel code
+#   provably never clobbers those registers, which is what this flag guarantees
+#   — GCC will otherwise use FP/SIMD for things unrelated to floating point
+#   (AAPCS64 variadic prologues, __builtin_popcount). It also makes
+#   context_switch the one correct place to save/restore FP state: at that
+#   point the registers still hold the outgoing process's own values.
 # -fno-store-merging: with no MMU/VBAR_EL1 yet (Milestone 1/2), all memory is
 #   strict Device semantics and GCC's store-merging can synthesize unaligned
 #   wide stores that fault silently forever with no exception vector to catch
 #   them. Revisit once paging + exceptions land.
+# -MMD -MP: emit a .d file per object listing the headers it included, so
+#   editing a header actually rebuilds everything that depends on it.
+#   Without this the build silently produces MISMATCHED objects: changing
+#   struct cpu_context (kernel/include/kernel/proc/proc.h) once left a
+#   stale sched.o allocating a 104-byte scratch context while a freshly
+#   built switch.S wrote 640 bytes into it, and a stale struct proc
+#   layout that read p->entry from the wrong offset. It presented as a
+#   Data Abort inside context_switch — i.e. as a bug in the code that was
+#   correct, which is the worst possible place for it to surface.
 CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
-          -mcpu=cortex-a72 -mno-outline-atomics -fno-store-merging \
+          -mcpu=cortex-a72 -mno-outline-atomics -mgeneral-regs-only -fno-store-merging \
+          -MMD -MP \
           -Ikernel/include -Ikernel/arch/aarch64/include -g
 
 C_SRC   := $(shell find kernel -name "*.c")
@@ -19,6 +38,7 @@ S_SRC   := $(shell find kernel -name "*.S")
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
 S_OBJ   := $(patsubst kernel/%.S,$(BUILD)/kernel/%.o,$(S_SRC))
 OBJ     := $(C_OBJ) $(S_OBJ)
+DEPS    := $(C_OBJ:.o=.d) $(S_OBJ:.o=.d)
 
 KERNEL_ELF := $(BUILD)/kernel8.elf
 KERNEL_IMG := $(BUILD)/kernel8.img
@@ -80,3 +100,7 @@ clean:
 	rm -rf $(BUILD) $(INITRD)
 
 .PHONY: all run clean
+
+# Header dependencies emitted by -MMD. Leading '-' so a clean tree (no .d
+# files yet) isn't an error.
+-include $(DEPS)
