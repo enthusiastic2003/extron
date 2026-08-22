@@ -9,10 +9,6 @@
 #include <arch/gic.h>
 #include <kernel/drivers/timer.h>
 #include <arch/vma.h>
-#include <kernel/fs/tar.h>
-#include <kernel/proc/proc.h>
-#include <kernel/proc/sched.h>
-#include <kernel/proc/exec.h>
 #include "fdt.h"
 #include "mb2_shim.h"
 
@@ -28,6 +24,12 @@
  * too), so it's declared locally here the same way.
  */
 extern void kernel_stage1(uint64_t mb2_addr);
+
+/* kernel/kernel.c — arch-neutral continuation, called once this file's
+ * own Stage 2 finishes genuinely arch-specific hardware bring-up
+ * (interrupt controller, timer, exceptions unmasked). Same "no header,
+ * bare extern" convention as kernel_stage1 above. */
+extern void kernel_stage2(uint64_t mb2_addr) __attribute__((noreturn));
 
 static void serial_puts(const char *s) {
     while (*s) {
@@ -127,37 +129,18 @@ void arch_kernel_mid_init(void) {
     /* Nothing yet — no GDT equivalent on aarch64. */
 }
 
-/* Test-only: maps a fresh physical page into `p`'s own address space at
- * a fixed VA, purely so its EL0 code (user_test.elf's counter-increment
- * loop) can write progress somewhere the kernel can independently read
- * back via phys_to_virt_hhdm() — the same access pattern already used
- * for the PMM bitmap and the initrd — without either proc making a
- * syscall. Not part of proc_create_from_binary() (kernel/proc/exec.c):
- * no future real process needs a kernel-observable scratch page, this
- * is specific to proving the scheduler round-robins correctly. Returns
- * the page's physical address for timer_set_counter_watch().
- */
-static phys_addr_t map_test_counter_page(struct proc *p) {
-    phys_addr_t counter_phys = (phys_addr_t)pmm_alloc_page();
-    *(volatile uint64_t *)phys_to_virt_hhdm(counter_phys) = 0;
-    map_page(p->ttbr0, 0x600000, counter_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
-    return counter_phys;
-}
-
 /**
  * @brief aarch64 Stage 2: runs on the permanent VMM-allocated kernel
- * stack instead of boot.S's temporary one. The aarch64 counterpart to
- * kernel_stage2() in kernel/arch/x86_64/kernel_x86.c — reached the same
- * way, via a raw stack-pointer switch + branch, never returning to
- * kernel_stage1. mb2_addr now feeds tar_init() (kernel/fs/tar.c),
- * completely unmodified from the x86 side — see kernel_aarch64_main()'s
- * comment on how the initrd's bounds get into the mb2 shim in the first
- * place.
+ * stack instead of boot.S's temporary one, reached via a raw stack-
+ * pointer switch + branch, never returning to kernel_stage1. Does
+ * ONLY genuinely arch-specific hardware bring-up — exception vector
+ * table, GIC-400, generic timer — then hands off to the shared
+ * kernel_stage2() (kernel/kernel.c) for everything else (initrd, the
+ * scheduler bring-up test), which never returns either.
  *
- * Exception vector table + GIC-400 + timer bring-up all happen here,
- * in that order: VBAR_EL1 must be live before anything that could fault
- * (including the GIC's own MMIO mapping), and the CPU-level IRQ mask
- * shouldn't lift until the GIC and timer are fully configured, so
+ * Order matters here: VBAR_EL1 must be live before anything that could
+ * fault (including the GIC's own MMIO mapping), and the CPU-level IRQ
+ * mask shouldn't lift until the GIC and timer are fully configured, so
  * nothing can be delivered before something exists to handle it.
  */
 static void kernel_aarch64_stage2(uint64_t mb2_addr) {
@@ -176,48 +159,7 @@ static void kernel_aarch64_stage2(uint64_t mb2_addr) {
     exceptions_enable_irqs();
     kprintf("aarch64: IRQs unmasked at the CPU.\n");
 
-    /* Proves the initrd delivery pipeline end-to-end: DTB /chosen ->
-     * fdt_get_initrd_region() -> mb2 MODULE tag -> tar_init() (unmodified
-     * from kernel/fs/tar.c, the exact same function x86 calls). */
-    tar_init(mb2_addr);
-    tar_list();
-    struct tar_file f;
-    if (tar_open("hello.txt", &f)) {
-        kprintf("aarch64: hello.txt (%u bytes): \"", (unsigned)f.size);
-        const char *bytes = (const char *)f.data;
-        for (size_t i = 0; i < f.size; i++) {
-            kprintf("%c", bytes[i]);
-        }
-        kprintf("\"\n");
-    } else {
-        kprintf("aarch64: hello.txt not found in initrd.\n");
-    }
-
-    /* Scheduler bring-up: two procs, same ELF (user_test.elf — a tight
-     * counter-increment loop, no syscalls involved) loaded into two
-     * separate address spaces via the generic proc_create_from_binary()
-     * (kernel/proc/exec.c — mirrors x86's own function of the same
-     * name/role in kernel/proc/exec.c), round-robin preempted by the
-     * timer IRQ. See kernel/proc/sched.c for the actual switch
-     * mechanism (schedule(), the forkret-style bootstrap trampoline). */
-    struct proc *proc_a = proc_create_from_binary("user_test.elf");
-    struct proc *proc_b = proc_create_from_binary("user_test.elf");
-    if (!proc_a || !proc_b) {
-        panic("aarch64: failed to create scheduler test procs");
-    }
-
-    phys_addr_t counter_phys_a = map_test_counter_page(proc_a);
-    phys_addr_t counter_phys_b = map_test_counter_page(proc_b);
-
-    sched_init();
-    sched_policy_add(proc_a);
-    sched_policy_add(proc_b);
-    timer_set_counter_watch(counter_phys_a, counter_phys_b);
-
-    kprintf("aarch64: starting scheduler with 2 procs.\n");
-    sched_start();
-
-    panic("aarch64: sched_start() returned");
+    kernel_stage2(mb2_addr);
 }
 
 void arch_kernel_jump_to_stage2(uint64_t mb2_addr, uint64_t new_stack_top) {
