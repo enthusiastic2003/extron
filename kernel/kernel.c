@@ -13,6 +13,7 @@
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
 #include <kernel/drivers/keyboard.h>
+#include <kernel/drivers/mailbox.h>
 
 /**
  * @brief Stage 1: Initialization Phase.
@@ -196,6 +197,15 @@ void kernel_stage2(uint64_t mb2_addr) {
     }
     */
     init_kbd();
+
+    /* VideoCore mailbox bring-up. Deliberately before any framebuffer
+     * code: it proves the transport (Device mapping, cache maintenance,
+     * bus-address translation, tag walk) on its own, so a later
+     * framebuffer failure can't be confused with a broken channel. The
+     * VC memory answer should match the hole the memory map leaves
+     * between its two available regions. */
+    mailbox_init();
+    mailbox_report();
 
     /* Phase 2 verification, sleep/wake + VMA allocator (already proven
      * on both QEMU and real hardware — see git history for that run):
