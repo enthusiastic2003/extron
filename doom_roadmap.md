@@ -73,14 +73,54 @@ instrument rather than assuming it:
 - **The firmware has already allocated and is driving a framebuffer** (that's
   what the splash is). This work is about taking over an existing display, not
   bringing one up cold.
-- **The splash persists indefinitely** while our kernel runs, since nothing
-  touches it. So the first successful DG_DrawFrame REPLACES the rainbow — an
-  unmistakable transition, not a subtle one.
+- **The splash persists while our kernel runs**, since nothing touches it. So the
+  first successful DG_DrawFrame REPLACES the rainbow — an unmistakable
+  transition, not a subtle one. (A black frame captured earlier was simply the
+  Pi unbooted with its SD card still in the reader — not the kernel blanking
+  anything. Worth stating because "black" and "no signal" are the same picture.)
 - **The active area is 4:3** (`cropdetect` -> `crop=960:720:160:0`), not the
   16:9 the capture command asks v4l2 for — the dongle scales. The Pi likely fell
   back to a default mode because a capture dongle's EDID is minimal. Concrete
   reason to use the width/height/pitch the mailbox REPORTS BACK rather than the
   values requested: they are not the same thing here.
+
+### Where the framebuffer lives, and why that bites
+
+The firmware's `/memory` node on this board (2GB Pi4) declares RAM with a hole:
+
+```
+Region 1:  0x00000000 - 0x3B400000     948 MiB
+   HOLE:   0x3B400000 - 0x40000000      76 MiB   <- VideoCore carve-out
+Region 2:  0x40000000 - 0x80000000    1024 MiB
+```
+
+The PMM's own stats confirm the hole is untouched, exactly: 524288 managed minus
+504547 free = 19741 used pages; the 76MB hole alone is 19456 pages, leaving 285
+(~1.1MB) for the kernel, bitmap, initrd and the reserved first 1MB. It stays
+reserved *by construction* — `init_pmm()` sets the whole bitmap to 0xFF and only
+clears regions the map calls AVAILABLE, so any hole is denied by default.
+
+Two consequences:
+
+- **The framebuffer is NOT in the HHDM.** `init_paging()` maps only
+  MULTIBOOT_MEMORY_AVAILABLE regions, and the framebuffer will be in that hole,
+  so `phys_to_virt_hhdm()` on the mailbox's returned address yields a pointer to
+  nothing. It needs its own explicit mapping — the same lesson the UART taught
+  in `268c962`, known this time BEFORE writing the driver rather than after
+  debugging writes that silently went nowhere. `vm_map_region()`
+  (kernel/mm/uvm.c) covers the user side; the kernel side wants the Device-memory
+  `kmap()` pattern from `gic.c`'s `mmio_map_device()`.
+- **That deny-by-default is accidental, not designed.** It holds only because
+  `total_mem` is computed as a high-water mark and the bitmap starts fully set.
+  Nothing parses `/memreserve/` or `/reserved-memory`, and `mb2_shim_build()`
+  marks every region AVAILABLE unconditionally (mb2_shim.c). Correct today;
+  silently wrong if either of those details changes.
+
+Two known gotchas for the driver itself, worth not rediscovering: the mailbox
+returns a **bus** address (typically `0xC0000000 | phys`) that must be masked
+down to an ARM physical address, and the mailbox registers are MMIO at
+`0xFE00B880` — same peripheral block as the UART, so same Device-memory
+treatment.
 
 - **VideoCore mailbox interface** — property-channel messages to allocate a
   framebuffer: set physical/virtual size, set depth, get the buffer's address and
