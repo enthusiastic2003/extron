@@ -52,10 +52,33 @@ registers still hold the outgoing process's values by the time `context_switch`
 runs. Proven by a PAIR of test procs (`usr/fp_test_a.S`/`_b.S`); a single
 FP-using proc passes even with no save at all.
 
-## 3. Blocker: Framebuffer (the real work)
+## 3. Framebuffer — DONE (`da8cdf1`, `b37ec6b`)
 
-The only item with genuine unknowns. Everything else on this list is either done
-or an afternoon.
+Working on real hardware: eight colour bars, correct geometry, no shear, correct
+byte order (`captures/fb_hardware.png`). Built in two commits deliberately —
+mailbox transport first, framebuffer on top — so a failure would name its own
+layer.
+
+Hardware results: VC memory `0x3b400000` + 76MiB (exactly the memory-map hole,
+independently confirmed), framebuffer allocated at `0x3eace000` inside it,
+640x480 32bpp RGB, `pitch == width*4` on this display though the code never
+assumes that.
+
+Three things it needed, all identified before writing the code rather than by
+debugging:
+
+- **Explicit `kmap()`** — the framebuffer is in the VC hole, and `init_paging()`
+  HHDMs only AVAILABLE regions, so `phys_to_virt_hhdm()` would return a pointer
+  to nothing. Same lesson as the UART in `268c962`.
+- **`PAGE_NORMAL_NC`** — a new MAIR entry (index 2, `0x44`). The GPU scans the
+  framebuffer out continuously so it must not sit dirty in our caches, but
+  `PAGE_CACHE_DISABLE` (Device-nGnRnE) would be the wrong fix: Device memory
+  forbids unaligned access unconditionally, so a `memcpy` into it can fault —
+  and `DG_DrawFrame` is exactly a memcpy.
+- **`BUS_TO_PHYS`** — `FB_ALLOCATE` returns a bus address in the GPU's
+  0xC0000000 window.
+
+Original notes on what made this the hard part are kept below.
 
 **Verification rig (working, `83b4821`).** The Pi's HDMI goes to a MACROSILICON
 MS2130 USB dongle; `tools/capture.sh` grabs stills or video from it. Serial can
