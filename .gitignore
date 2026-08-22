@@ -1,2 +1,8 @@
 build/
 initrd.tar
+
+# HDMI capture frames (tools/capture.sh). Debugging artefacts, and PNGs
+# of a 1280x720 screen add up fast — keep them out of history. Commit an
+# individual frame deliberately if one ever documents something worth
+# keeping, e.g. a reference shot of a framebuffer bug.
+captures/
