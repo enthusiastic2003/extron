@@ -42,10 +42,18 @@ const struct framebuffer *fb_init(uint32_t want_width, uint32_t want_height) {
     int depth = i;
     fb_msg[i++] = 32;
 
+    /* Ask for BGR *byte* order, which on a little-endian machine is what
+     * puts a pixel in memory as 0xAARRGGBB — red in bits 16-23. That is
+     * the layout essentially all software composes into, DOOM included
+     * (its I_InitGraphics reports red_off:16). Requesting "RGB" here
+     * gives byte 0 = red, i.e. 0xAABBGGRR, and every image comes out
+     * with red and blue swapped — which looks like a broken display
+     * rather than a naming convention. The value read back is what
+     * fb_rgb() actually uses either way. */
     fb_msg[i++] = TAG_FB_SET_PIXEL_ORDER;
     fb_msg[i++] = 4; fb_msg[i++] = 4;
     int order = i;
-    fb_msg[i++] = 1;                            /* prefer RGB */
+    fb_msg[i++] = 0;                            /* 0 = BGR bytes = 0xAARRGGBB */
 
     /* Request 4096-byte alignment so the base lands on a page boundary —
      * it has to be mapped, and an unaligned base would mean mapping a

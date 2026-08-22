@@ -164,8 +164,8 @@ void kernel_stage2(uint64_t mb2_addr) {
      * no processes created this time. See git history / uncomment to
      * bring back the 2-proc round-robin proof.
      *
-    struct proc *proc_a = proc_create_from_binary("user_test.elf");
-    struct proc *proc_b = proc_create_from_binary("user_test.elf");
+    struct proc *proc_a = proc_create_from_binary("user_test.elf", 0);
+    struct proc *proc_b = proc_create_from_binary("user_test.elf", 0);
     if (!proc_a || !proc_b) {
         panic("kernel_stage2: failed to create scheduler test procs");
     }
@@ -243,12 +243,12 @@ void kernel_stage2(uint64_t mb2_addr) {
      * 8192 page allocations plus the out-of-memory refusal paths:
      *   mem_stress.elf — 8 checks
      *
-     * struct proc *badptr    = proc_create_from_binary("badptr_test.elf");
-     * struct proc *fp_a      = proc_create_from_binary("fp_test_a.elf");
-     * struct proc *fp_b      = proc_create_from_binary("fp_test_b.elf");
-     * struct proc *uptime    = proc_create_from_binary("uptime_test.elf");
-     * struct proc *libc      = proc_create_from_binary("libc_test.elf");
-     * struct proc *memstress = proc_create_from_binary("mem_stress.elf");
+     * struct proc *badptr    = proc_create_from_binary("badptr_test.elf", 0);
+     * struct proc *fp_a      = proc_create_from_binary("fp_test_a.elf", 0);
+     * struct proc *fp_b      = proc_create_from_binary("fp_test_b.elf", 0);
+     * struct proc *uptime    = proc_create_from_binary("uptime_test.elf", 0);
+     * struct proc *libc      = proc_create_from_binary("libc_test.elf", 0);
+     * struct proc *memstress = proc_create_from_binary("mem_stress.elf", 0);
      * sched_policy_add(badptr);  sched_policy_add(fp_a);
      * sched_policy_add(fp_b);    sched_policy_add(uptime);
      * sched_policy_add(libc);    sched_policy_add(memstress);
@@ -257,7 +257,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * the clutter this is about, and its job (proving a blocked reader
      * really yields the CPU) is done.
      *
-     * struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf");
+     * struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf", 0);
      * sched_policy_add(heartbeat);
      */
 
@@ -266,11 +266,31 @@ void kernel_stage2(uint64_t mb2_addr) {
      * still showing the system is alive and responsive — and with
      * nothing else runnable it parks the CPU in schedule()'s wfi idle
      * path (e6acf26) rather than spinning. */
-    struct proc *reader = proc_create_from_binary("read_echo_test.elf");
+    struct proc *reader = proc_create_from_binary("read_echo_test.elf", 0);
     if (!reader) {
         panic("kernel_stage2: failed to create the console reader proc");
     }
     sched_policy_add(reader);
+
+    /* Userspace framebuffer smoke test — proven, parked alongside the
+     * rest now that DOOM exercises the same path for real.
+     *
+     * struct proc *fbuser = proc_create_from_binary("fb_user_test.elf",
+     *                                               PROC_MAP_FRAMEBUFFER);
+     * sched_policy_add(fbuser);
+     */
+
+    /* DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
+     * ring at creation, so its frame loop makes no syscall to draw and
+     * none to poll input — only SYS_SLEEP to pace itself and
+     * SYS_UPTIME_MS for its clock. The WAD comes out of the initrd via
+     * SYS_MAP_INITRD, mapped rather than copied. */
+    struct proc *doom = proc_create_from_binary("doom.elf",
+                                                PROC_MAP_FRAMEBUFFER);
+    if (!doom) {
+        panic("kernel_stage2: failed to create the DOOM proc");
+    }
+    sched_policy_add(doom);
 
     kprintf("Starting scheduler — type on the console to echo.\n");
     sched_start();

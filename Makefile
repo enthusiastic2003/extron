@@ -57,7 +57,7 @@ USER_LDFLAGS = -ffreestanding -nostdlib -static -no-pie \
 
 USER_ASM_SRC := $(wildcard usr/*.S)
 USER_C_SRC   := $(wildcard usr/*.c)
-USER_DATA    := $(wildcard usr/*.txt)
+USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad)
 
 # The userspace C library. Payloads written in C (usr/*.c) link crt0 plus
 # these; payloads written in assembly (usr/*.S) are freestanding and link
@@ -77,7 +77,32 @@ USER_CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
                -MMD -MP -Iusr/include -g
 
 INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC)) \
-                $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC))
+                $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
+                $(BUILD)/initrd/doom.elf
+
+# --- DOOM ---
+# doomgeneric's own sources, compiled against our libc rather than a
+# host one. Only w_file_stdc.c's stdio backend is unusual: our fopen()
+# maps a file out of the initrd (SYS_MAP_INITRD) instead of opening a
+# descriptor, so DOOM's WAD loading works unmodified.
+#
+# doomgeneric_*.c for the other platforms are excluded — ours is
+# usr/doom/doomgeneric_extron.c, per the port's own instructions
+# ("create a file named doomgeneric_yourplatform.c").
+DOOM_DIR  := third_party/doomgeneric/doomgeneric
+DOOM_SRC  := dummy am_map doomdef doomstat dstrings d_event d_items d_iwad \
+             d_loop d_main d_mode d_net f_finale f_wipe g_game hu_lib hu_stuff \
+             info i_cdmus i_endoom i_joystick i_scale i_sound i_system i_timer \
+             memio m_argv m_bbox m_cheat m_config m_controls m_fixed m_menu \
+             m_misc m_random p_ceilng p_doors p_enemy p_floor p_inter p_lights \
+             p_map p_maputl p_mobj p_plats p_pspr p_saveg p_setup p_sight \
+             p_spec p_switch p_telept p_tick p_user r_bsp r_data r_draw r_main \
+             r_plane r_segs r_sky r_things sha1 sounds statdump st_lib st_stuff \
+             s_sound tables v_video wi_stuff w_checksum w_file w_main w_wad \
+             z_zone w_file_stdc i_input i_video doomgeneric
+DOOM_OBJ  := $(patsubst %,$(BUILD)/doom/%.o,$(DOOM_SRC)) \
+             $(BUILD)/doom/doomgeneric_extron.o
+DOOM_CFLAGS := $(USER_CFLAGS) -I$(DOOM_DIR) -DNORMALUNIX -DLINUX -Wno-unused-but-set-variable
 INITRD_DATA  := $(patsubst usr/%,$(BUILD)/initrd/%,$(USER_DATA))
 INITRD       := initrd.tar
 
@@ -116,6 +141,18 @@ $(BUILD)/initrd/%.elf: usr/%.c $(USER_LIB_OBJ)
 $(BUILD)/initrd/%: usr/%
 	mkdir -p $(dir $@)
 	cp $< $@
+
+$(BUILD)/doom/%.o: $(DOOM_DIR)/%.c
+	mkdir -p $(dir $@)
+	$(USER_CC) $(DOOM_CFLAGS) -c $< -o $@
+
+$(BUILD)/doom/doomgeneric_extron.o: usr/doom/doomgeneric_extron.c
+	mkdir -p $(dir $@)
+	$(USER_CC) $(DOOM_CFLAGS) -c $< -o $@
+
+$(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(USER_LIB_OBJ)
+	mkdir -p $(dir $@)
+	$(USER_CC) $(USER_CFLAGS) $(USER_LDFLAGS) $(DOOM_OBJ) $(USER_LIB_OBJ) -o $@
 
 $(INITRD): $(INITRD_ELF) $(INITRD_DATA)
 	# Explicit filenames, not "-C dir ." — the latter adds a "./" prefix

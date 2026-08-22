@@ -52,7 +52,21 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             else if (*fmt == '0') zero = 1;
             else break;
         }
-        for (; *fmt >= '0' && *fmt <= '9'; fmt++) width = width * 10 + (*fmt - '0');
+        if (*fmt == '*') { width = va_arg(ap, int); fmt++; }
+        else for (; *fmt >= '0' && *fmt <= '9'; fmt++) width = width * 10 + (*fmt - '0');
+
+        /* Precision. For integers this is a MINIMUM digit count,
+         * zero-filled — DOOM builds its HUD font lump names with
+         * "STCFN%.3d", so without this it looks up a lump literally
+         * called STCFN%.3d and dies. For strings it is a maximum. */
+        int prec = -1;
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            if (*fmt == '*') { prec = va_arg(ap, int); fmt++; }
+            else for (; *fmt >= '0' && *fmt <= '9'; fmt++) prec = prec * 10 + (*fmt - '0');
+        }
+
         for (; *fmt == 'l'; fmt++) longs++;
         if (*fmt == 'z') { longs = 1; fmt++; }
 
@@ -91,6 +105,8 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             str = va_arg(ap, const char *);
             if (!str) str = "(null)";
             n = (int)strlen(str);
+            /* Precision truncates a string rather than padding it. */
+            if (prec >= 0 && prec < n) n = prec;
             goto padded_str;
         }
         case '%':
@@ -109,9 +125,13 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
          * the running total for the whole format string, so using it
          * here made left-justified numerics pad by a wildly wrong amount
          * as soon as anything preceded them. */
-        int emitted = n + (sign ? 1 : 0);
-        if (!left) emit_pad(&s, zero ? '0' : ' ', width - emitted);
+        int zeros   = (prec > n) ? prec - n : 0;
+        int emitted = n + zeros + (sign ? 1 : 0);
+        /* A precision suppresses the '0' flag, per C: "%.3d" pads with
+         * zeros to 3 digits, then any remaining width with spaces. */
+        if (!left) emit_pad(&s, (zero && prec < 0) ? '0' : ' ', width - emitted);
         if (sign) emit(&s, sign);
+        emit_pad(&s, '0', zeros);
         while (n--) emit(&s, scratch[n]);
         if (left) emit_pad(&s, ' ', width - emitted);
         continue;

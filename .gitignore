@@ -6,3 +6,12 @@ initrd.tar
 # individual frame deliberately if one ever documents something worth
 # keeping, e.g. a reference shot of a framebuffer bug.
 captures/
+
+# doomgeneric upstream, cloned by hand (see doom_roadmap.md). Not
+# vendored into history: it's a large third-party tree we don't modify —
+# our port is usr/doom/doomgeneric_extron.c, which IS tracked.
+third_party/
+
+# The shareware WAD. Freely redistributable but 4MB of binary that would
+# sit in every clone forever; fetch it into usr/ instead.
+usr/*.wad

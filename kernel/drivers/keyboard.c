@@ -6,6 +6,9 @@
 #include <arch/irq_spinlock.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <kernel/mm/paging.h>
+#include <kernel/klibc/string.h>
+#include <kernel/console.h>
 
 /*
  * There's no physical keyboard on this setup — a headless RPi4 talked
@@ -37,6 +40,35 @@ struct kbd_buffer {
 
 static struct kbd_buffer kbuf = { .lock = SPINLOCK_INIT };
 
+/* The shared ring (kernel/include/kernel/drivers/keyboard.h). Kernel
+ * accesses it through the HHDM; a process gets the same page mapped
+ * into its own address space by exec. */
+static struct kbd_ring *ring;
+static phys_addr_t      ring_phys;
+
+phys_addr_t kbd_ring_phys(void) {
+    return ring_phys;
+}
+
+/* Push one byte to whatever process has the ring mapped. Separate from
+ * kbuf above, not a replacement for it: kbuf still backs the blocking
+ * SYS_READ path, and a byte goes to both so a console reader and a
+ * polling game can coexist. Drops the byte if the consumer has fallen a
+ * whole ring behind, which for keystrokes is the right failure. */
+static void ring_push(uint8_t c) {
+    if (!ring)
+        return;
+    uint32_t head = ring->head;
+    uint32_t next = (head + 1) % KBD_RING_SIZE;
+    if (next == (ring->tail % KBD_RING_SIZE))
+        return;
+    ring->buf[head] = c;
+    /* Publish the byte before the index that advertises it, or the
+     * consumer can read the new head and find a stale byte under it. */
+    __asm__ volatile ("dmb ishst" ::: "memory");
+    ring->head = next;
+}
+
 static void kbd_irq_handler(struct aarch64_frame *f) {
     (void)f;
     /* No irq_spin_lock needed here: this ISR runs with DAIF fully
@@ -63,12 +95,24 @@ static void kbd_irq_handler(struct aarch64_frame *f) {
             kbuf.head = next_head;
             got_any = true;
         }
+        /* Outside the kbuf-full check on purpose: a process polling the
+         * ring shouldn't lose keystrokes just because nothing is
+         * draining the blocking console path. */
+        ring_push((uint8_t)c);
     }
     if (got_any)
         wakeup(&kbuf);
 }
 
 void init_kbd(void) {
+    ring_phys = (phys_addr_t)pmm_alloc_page();
+    if (ring_phys) {
+        ring = (struct kbd_ring *)phys_to_virt_hhdm(ring_phys);
+        memset(ring, 0, PAGE_SIZE);
+    } else {
+        kprintf("[KBD] no memory for the shared input ring\n");
+    }
+
     register_irq_handler(GIC_SPI_UART0, kbd_irq_handler);
     gic_enable_irq(GIC_SPI_UART0);
     serial_enable_rx_irq();

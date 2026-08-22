@@ -6,6 +6,9 @@
 #include <kernel/mm/kheap.h>
 #include <kernel/mm/uvm.h>
 #include <kernel/console.h>
+#include <kernel/drivers/fb.h>
+#include <kernel/drivers/keyboard.h>
+#include <kernel/klibc/string.h>
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
  * has its own independent TTBR0 (see kernel/arch/aarch64/proc.c's
@@ -20,7 +23,100 @@
  * the DOOM port's call depth. */
 #define USER_STACK_PAGES 32
 
-struct proc *proc_create_from_binary(const char *binary_path) {
+/* Where a PROC_MAP_FRAMEBUFFER process finds the display.
+ *
+ * A fixed VA plus a descriptor page, rather than a syscall that returns
+ * them. The process needs six numbers it cannot compute — base, width,
+ * height, pitch, depth and byte order — and every one is the firmware's
+ * answer, not something userspace may assume. In particular pitch is not
+ * width*4 in general, so hardcoding the geometry would reintroduce the
+ * exact bug fb.c reads it back to avoid.
+ *
+ * The descriptor is mapped read-only: it describes the process's own
+ * address space, and nothing good comes of the process editing it. */
+#define USER_FB_INFO_VA 0x50000000UL
+#define USER_FB_VA      0x50001000UL
+
+/* The shared keystroke ring (kernel/drivers/keyboard.c), mapped
+ * alongside the framebuffer for the same reason: a game loop has to
+ * poll input without blocking, and SYS_READ blocks by design. Writable
+ * because the consumer owns the tail index — see struct kbd_ring on why
+ * that needs no lock and why a process can only hurt itself with it. */
+#define USER_INPUT_VA   0x4FFFF000UL
+
+/* Must match struct extron_fb_info in usr/include/extron/fb.h. Written
+ * out twice deliberately — this is the ABI boundary, the same reason the
+ * syscall numbers are duplicated rather than shared through a header. */
+struct user_fb_info {
+    uint64_t base;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t depth;
+    uint32_t rgb_order;
+    uint32_t size;
+};
+
+/* Maps the framebuffer and its descriptor into `pml4`. Returns 0 on
+ * success, -1 if there is no framebuffer or a mapping fails. */
+static int map_framebuffer_into(phys_addr_t pml4, const char *binary_path) {
+    const struct framebuffer *fb = fb_get();
+    if (!fb) {
+        kprintf("[EXEC] %s wants the framebuffer but none is initialised\n",
+                binary_path);
+        return -1;
+    }
+
+    /* The descriptor is a fresh page the kernel fills in; the framebuffer
+     * itself is VideoCore memory that already exists, so it is mapped,
+     * never allocated. */
+    phys_addr_t info_phys = (phys_addr_t)pmm_alloc_page();
+    if (!info_phys) {
+        kprintf("[EXEC] out of memory allocating fb descriptor for %s\n",
+                binary_path);
+        return -1;
+    }
+    struct user_fb_info *info =
+        (struct user_fb_info *)phys_to_virt_hhdm(info_phys);
+    memset(info, 0, PAGE_SIZE);
+    info->base      = USER_FB_VA;
+    info->width     = fb->width;
+    info->height    = fb->height;
+    info->pitch     = fb->pitch;
+    info->depth     = fb->depth;
+    info->rgb_order = fb->rgb_order;
+    info->size      = fb->size;
+
+    if (map_page(pml4, USER_FB_INFO_VA, info_phys,
+                 PAGE_PRESENT | PAGE_USER | PAGE_NX) != 0) {
+        pmm_free_page((void *)info_phys);
+        return -1;
+    }
+
+    /* PAGE_NORMAL_NC for the same reason the kernel's own mapping uses
+     * it (kernel/drivers/fb.c): the GPU scans this memory out
+     * continuously so it must not sit dirty in a cache, but Device
+     * memory would forbid the unaligned accesses a memcpy emits — and
+     * DG_DrawFrame is precisely a memcpy. */
+    phys_addr_t ring = kbd_ring_phys();
+    if (ring && map_page(pml4, USER_INPUT_VA, ring,
+                         PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
+        kprintf("[EXEC] failed mapping the input ring for %s\n", binary_path);
+        return -1;
+    }
+
+    for (uint32_t off = 0; off < fb->size; off += PAGE_SIZE) {
+        if (map_page(pml4, USER_FB_VA + off, fb->phys + off,
+                     PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX
+                     | PAGE_NORMAL_NC) != 0) {
+            kprintf("[EXEC] failed mapping framebuffer for %s\n", binary_path);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
     struct tar_file f;
     if (!tar_open(binary_path, &f)) {
         kprintf("[EXEC] %s not found in initrd\n", binary_path);
@@ -42,6 +138,12 @@ struct proc *proc_create_from_binary(const char *binary_path) {
         }
         map_page(pml4, USER_STACK_VA + i * PAGE_SIZE, stack_phys,
                  PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
+    }
+
+    if (flags & PROC_MAP_FRAMEBUFFER) {
+        if (map_framebuffer_into(pml4, binary_path) != 0) {
+            return NULL;
+        }
     }
 
     /* No MMIO mapping here any more. The UART used to be identity-mapped
