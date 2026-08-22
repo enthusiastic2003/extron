@@ -1,6 +1,0 @@
-build/
-iso/boot/kernel.elf
-myos.isokernel.log
-external/mlibc/mlibc-build
-usr/lib/
-usr/include/

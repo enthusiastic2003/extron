@@ -1,6 +1,0 @@
-#ifndef ARCH_VMA_H
-#define ARCH_VMA_H
-
-#define KERNEL_VMA 0xFFFFFFFF80000000ULL
-
-#endif

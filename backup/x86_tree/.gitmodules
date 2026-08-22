@@ -1,3 +1,0 @@
-[submodule "external/mlibc"]
-	path = backup/x86_tree/external/mlibc
-	url = https://github.com/managarm/mlibc.git
