@@ -19,6 +19,7 @@
 #define UART0_ICR       (UART0_BASE + 0x44)
 
 #define UART0_IMSC_RXIM (1u << 4)
+#define UART0_IMSC_RTIM (1u << 6)
 
 static inline void mmio_write(unsigned long addr, unsigned int val) {
     *(volatile unsigned int *)addr = val;
@@ -88,5 +89,14 @@ int serial_try_getc(void) {
 }
 
 void serial_enable_rx_irq(void) {
-    mmio_write(UART0_IMSC, mmio_read(UART0_IMSC) | UART0_IMSC_RXIM);
+    /* RXIM alone only fires once the FIFO reaches UARTIFLS's RX trigger
+     * level — reset default is half-full (8 of 16 bytes), so single
+     * keystrokes just sit there, unread, until enough accumulate. RTIM
+     * (receive timeout) is PL011's fix for exactly this: fires after a
+     * short quiet period even if the FIFO never reaches that threshold,
+     * so interactive typing still gets delivered promptly while fast
+     * bulk input still benefits from the FIFO-threshold interrupt. The
+     * ISR (kernel/drivers/keyboard.c) doesn't need to know which of the
+     * two fired — it already drains whatever's actually present. */
+    mmio_write(UART0_IMSC, mmio_read(UART0_IMSC) | UART0_IMSC_RXIM | UART0_IMSC_RTIM);
 }
