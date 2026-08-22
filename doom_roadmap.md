@@ -27,7 +27,7 @@ Worth stating explicitly, because these look like prerequisites and aren't:
   DOOM as the only process. Phase 3 stays deferred.
 - **mlibc.** DOOM needs *a* libc, not *that* libc. See section 4.
 
-## 2. Blocker: FP/SIMD Context Switching
+## 2. FP/SIMD Context Switching — DONE (b4245ac)
 
 `struct cpu_context` (kernel/include/kernel/proc/proc.h) saves `x19`-`x28`, `fp`,
 `lr`, `sp` — and no FP/SIMD state at all. Meanwhile `boot.S` sets
@@ -43,9 +43,14 @@ Two consequences:
   single-process DOOM would get away with it, which is exactly the kind of thing
   that works until it silently doesn't.
 
-Fix: extend `struct cpu_context` with `q8`-`q15` plus `FPCR`/`FPSR`, add the
-`stp`/`ldp` pairs to `kernel/arch/aarch64/proc/switch.S`. Small, and a correctness
-fix independent of DOOM — do it first.
+Done, and larger than the sketch above: it saves **all of `v0`-`v31`** plus
+`FPCR`/`FPSR`, not just `d8`-`d15`. The callee-saved subset is a *calling
+convention*, and preemption doesn't land on call boundaries — every register is
+potentially live. Sound only because the kernel is now built
+`-mgeneral-regs-only`, so exception entry can skip FP entirely and those
+registers still hold the outgoing process's values by the time `context_switch`
+runs. Proven by a PAIR of test procs (`usr/fp_test_a.S`/`_b.S`); a single
+FP-using proc passes even with no save at all.
 
 ## 3. Blocker: Framebuffer (the real work)
 
@@ -61,7 +66,7 @@ or an afternoon.
   with no syscall per frame. This is what keeps preemption off the critical path.
   The VMA allocator (`kernel/mm/uvm.c`) already handles the process side.
 
-## 4. libc: Minimal, Not mlibc (for now)
+## 4. libc: Minimal, Not mlibc — DONE (3ea4891, fb7bb15)
 
 Three of the hard pieces already exist and are already exercised every boot:
 
@@ -83,6 +88,20 @@ for the WAD — but the WAD ships in the initrd and is *already in RAM*.
 the WAD loader to take a memory pointer instead of a file handle. Standard
 practice for embedded DOOM ports, and it deletes the whole layer.
 
+Built in `usr/lib/` + `usr/include/`, with `usr/libc_test.c` as the first C
+program to run on this kernel (27 checks). The allocator is **shared, not
+copied**: `kheap.c` split into `kernel/mm/liballoc.c` (algorithm) and its hooks,
+with `<liballoc_config.h>` supplied separately by each side — kernel gets
+`kmalloc` over `vmm_alloc_pages`, userspace gets `malloc` over `SYS_ANON_ALLOC`.
+
+The stdio skip landed as `SYS_MAP_INITRD` + `vm_map_region()`: a read-only,
+NX view of an initrd file mapped straight into the process, no copy. The
+framebuffer will reuse `vm_map_region()` directly.
+
+Two bugs fell out: the user stack was ONE 4KB page (fine for assembly, hopeless
+for C, no guard page — now 128KB), and `vsnprintf` padded left-justified
+numerics against the running total instead of the conversion's own length.
+
 Port mlibc **after** DOOM, validated against a real application instead of a
 hypothetical one. `sys_tcb_set` already exists for its TLS, so the intent stands —
 just not on the critical path. Nothing here is wasted: a real libc port reuses the
@@ -94,19 +113,26 @@ same syscall layer underneath.
 |---|---|---|
 | `DG_SleepMs` | done | `SYS_SLEEP` |
 | `DG_GetKey` | done | `SYS_READ` |
-| `DG_GetTicksMs` | trivial | syscall over the existing `timer_ticks()` |
-| `DG_DrawFrame` | blocked | section 3 |
+| `DG_GetTicksMs` | done | `SYS_UPTIME_MS` (6d8a159) |
+| `DG_DrawFrame` | blocked | section 3 — the only remaining work |
 | `DG_Init` | blocked | section 3 |
 
-## 6. Suggested Order
+`DG_GetTicksMs` could NOT be built on `timer_ticks()`: the timer runs at 20Hz,
+so it resolves only 50ms, and DOOM's tic rate is ~28.6ms. `SYS_UPTIME_MS` reads
+`CNTPCT_EL0` (~54MHz) instead. Hardware cross-check against `SYS_SLEEP`: slept
+500ms, measured 501ms.
 
-1. **FP/SIMD context switch** (section 2) — small, correctness fix regardless.
-2. **`DG_GetTicksMs` syscall** — `timer_ticks()` / `timer_ticks_per_second()`
-   already exist; this is plumbing.
-3. **Mailbox + framebuffer driver** (section 3) — the actual project.
-4. **Map framebuffer + WAD into the process** — VMA allocator handles it.
-5. **Minimal libc** (section 4) — grind, but no unknowns.
-6. **doomgeneric platform layer** — the five hooks.
+## 6. Order — everything but the framebuffer is done
+
+1. ~~FP/SIMD context switch~~ — done, `b4245ac`
+2. ~~`DG_GetTicksMs` syscall~~ — done, `6d8a159`
+3. **Mailbox + framebuffer driver** (section 3) — REMAINING, and deliberately
+   taken slowly.
+4. ~~Map the WAD into the process~~ — done, `fb7bb15`. The framebuffer half
+   reuses the same `vm_map_region()`.
+5. ~~Minimal libc~~ — done, `3ea4891`
+6. **doomgeneric platform layer** — three of five hooks already work; the other
+   two are section 3.
 
 Memory budget is a non-issue: classic DOOM wants ~8MB of zone, `USER_HEAP_SIZE`
 is 256MB, and a 320x200x8bpp framebuffer is 64KB.
