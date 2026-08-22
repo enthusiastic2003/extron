@@ -1,0 +1,344 @@
+// kernel/mm/pmm.c
+#include <stdint.h>
+#include <stddef.h>
+#include <kernel/mm/pmm.h>
+#include <kernel/mm/vmm.h>
+#include <boot/multiboot2.h>
+#include <kernel/panic.h>
+#include <kernel/console.h>
+#include <kernel/sync/spinlock.h>
+#include <stdint.h>
+#include <kernel/klibc/builtins.h>
+static spinlock_t pmm_lock = SPINLOCK_INIT;
+
+
+
+/* --- Limit to where grub can place structures ---*/
+
+/* --- linker --- */
+extern char _kernel_start;
+extern char _kernel_end;
+
+struct phys_mem_info
+{
+    virt_addr_t bmp_phys;
+    uint64_t total_mem;
+    
+} global_phys_mem_info;
+
+
+static inline uint64_t addr_to_idx(uint64_t a) { return a / PAGE_SIZE; }
+static inline uint64_t idx_to_addr(uint64_t i) { return i * PAGE_SIZE; }
+
+// Add this near the top of pmm.c, below your other helpers
+static inline void bitmap_set(uint64_t bit_idx) {
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+    bmp[bit_idx / 8] |= (1 << (bit_idx % 8));
+}
+
+static inline void bitmap_clear(uint64_t bit_idx) {
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+    bmp[bit_idx / 8] &= ~(1 << (bit_idx % 8));
+}
+
+static inline int bitmap_test(uint64_t bit_idx) {
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+    return bmp[bit_idx / 8] & (1 << (bit_idx % 8));
+}
+
+
+// Mark a region as used (Aligns outward to safely cover partial pages)
+static void pmm_mark_used_region(uint64_t start, uint64_t length) {
+    uint64_t start_idx = addr_to_idx(align_down(start, PAGE_SIZE));
+    uint64_t end_idx = addr_to_idx(align_up(start + length, PAGE_SIZE));
+    for (uint64_t i = start_idx; i < end_idx; i++) {
+        bitmap_set(i);
+    }
+}
+
+// Mark a region as free (Aligns inward to ensure we don't accidentally free reserved data)
+static void pmm_mark_free_region(uint64_t start, uint64_t length) {
+    uint64_t start_idx = addr_to_idx(align_up(start, PAGE_SIZE)); 
+    uint64_t end_idx = addr_to_idx(align_down(start + length, PAGE_SIZE));
+    for (uint64_t i = start_idx; i < end_idx; i++) {
+        bitmap_clear(i);
+    }
+}
+
+static inline struct multiboot_tag* mb2_next(struct multiboot_tag* tag) {
+    struct multiboot_tag* tag2 = (struct multiboot_tag*)((uint64_t)tag + (uint64_t)((tag->size + 7) & ~7));
+    return tag2;
+}
+
+
+void get_bitmap_location(uint64_t mb2_addr){
+    uint64_t highest_reserved_addr = (uint64_t)&_kernel_end - KERNEL_VMA;
+
+    if(mb2_addr >= ONE_GIB){
+        panic("GRUB Loaded its data at : %lx > %lx", mb2_addr, ONE_GIB);
+    }
+
+    /* We check if the mb2 structure is after the kernel*/
+    uint32_t mb2_size = *(uint32_t*)mb2_addr; 
+    uint64_t mb2_end = mb2_addr + mb2_size;
+    if(mb2_end > highest_reserved_addr){
+        highest_reserved_addr = mb2_end;
+    }
+
+    // The first 8 bytes are the total size and reserved field, tags start after that.
+    struct multiboot_tag* tag = (struct multiboot_tag*)(mb2_addr + 8);
+
+    while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+        
+        switch (tag->type) {
+            
+            // --- 1. MODULE INFO ---
+            case MULTIBOOT_TAG_TYPE_MODULE: {
+                struct multiboot_tag_module* mod = (struct multiboot_tag_module*)tag;
+                
+                // cmdline is a null-terminated string included at the end of the struct
+                kprintf("Module Found: Start=0x%x, End=0x%x, Cmdline=\"%s\"\n", 
+                       mod->mod_start, mod->mod_end, mod->cmdline);
+                
+                highest_reserved_addr = (mod->mod_end > highest_reserved_addr)? mod->mod_end: highest_reserved_addr;
+                
+                break;
+            }
+
+            // --- 2. BASIC MEMORY INFO ---
+            case MULTIBOOT_TAG_TYPE_BASIC_MEMINFO: {
+                struct multiboot_tag_basic_meminfo* mem = (struct multiboot_tag_basic_meminfo*)tag;
+                
+                kprintf("Basic Meminfo: Lower Memory = %u KB, Upper Memory = %u KB\n", 
+                       mem->mem_lower, mem->mem_upper);
+                break;
+            }
+
+            // --- 3. MEMORY MAP (Essential for Physical Memory Management) ---
+            case MULTIBOOT_TAG_TYPE_MMAP: {
+                struct multiboot_tag_mmap* mmap = (struct multiboot_tag_mmap*)tag;
+                kprintf("Memory Map:\n");
+                
+                // Iterate through the array of memory map entries
+                // We use mmap->entry_size to step forward because the spec allows 
+                // the entry size to change in future Multiboot versions.
+                struct multiboot_mmap_entry* entry;
+                for (entry = mmap->entries; 
+                     (uint8_t*)entry < (uint8_t*)tag + tag->size; 
+
+                     entry = (struct multiboot_mmap_entry*)((uint64_t)entry + mmap->entry_size)) {
+
+                        // Inside get_bitmap_location's MMAP loop:
+                        uint64_t region_end = entry->addr + entry->len;
+                        if (region_end > global_phys_mem_info.total_mem && entry->type == MULTIBOOT_MEMORY_AVAILABLE) {
+                            global_phys_mem_info.total_mem = region_end; // Tracks highest available address space needed
+                        }
+                        
+                    // Type 1 is available RAM. Other types are reserved/ACPI/etc.
+                    kprintf("  Region: Addr=0x%lx, Length=0x%lx bytes, Type=%d\n", 
+                           entry->addr, entry->len, entry->type);
+                }
+                break;
+            }
+        }
+
+        // Advance to the next tag using your 8-byte aligned helper function
+        tag = mb2_next(tag);
+    }
+
+    global_phys_mem_info.bmp_phys = (virt_addr_t) highest_reserved_addr;
+
+}
+
+void pmm_print_stats(void) {
+    spin_lock(&pmm_lock);
+
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint64_t* bmp64 = (uint64_t*)global_phys_mem_info.bmp_phys;
+
+    uint64_t used_pages = 0;
+    uint64_t full_words = max_pages / 64;
+    uint64_t leftover_bits = max_pages % 64;
+
+    // Fast path: count set bits 64 at a time with popcount.
+    for (uint64_t i = 0; i < full_words; i++) {
+        used_pages += __builtin_popcountll(bmp64[i]);
+    }
+
+    // Handle the trailing partial word (mask off bits beyond max_pages,
+    // since the bitmap is rounded up to PAGE_SIZE and those padding bits
+    // were initialized to 1 / "used" but don't represent real pages).
+    if (leftover_bits) {
+        uint64_t mask = (1ULL << leftover_bits) - 1;
+        used_pages += __builtin_popcountll(bmp64[full_words] & mask);
+    }
+
+    uint64_t free_pages = max_pages - used_pages;
+
+    spin_unlock(&pmm_lock);
+
+    uint64_t total_bytes = max_pages * PAGE_SIZE;
+    uint64_t free_bytes  = free_pages * PAGE_SIZE;
+    uint64_t used_bytes  = used_pages * PAGE_SIZE;
+
+    kprintf("PMM Stats:\n");
+    kprintf("  Total managed:    %lu pages  (%lu MiB,  %lu GiB)\n",
+            max_pages, total_bytes >> 20, total_bytes >> 30);
+    kprintf("  Free (handout):   %lu pages  (%lu MiB)\n",
+            free_pages, free_bytes >> 20);
+    kprintf("  Used / reserved:  %lu pages  (%lu MiB)\n",
+            used_pages, used_bytes >> 20);
+}
+
+void init_pmm(uint64_t mb2_addr) {
+    
+    // 1. Locate highest reserved boot address and total physical address space
+    get_bitmap_location(mb2_addr);
+
+    // Page-align the start of our bitmap
+    global_phys_mem_info.bmp_phys = (virt_addr_t)align_up((uint64_t)global_phys_mem_info.bmp_phys, PAGE_SIZE);
+
+    // Calculate how big the bitmap needs to be (1 bit per page)
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint64_t bitmap_size_bytes = align_up(max_pages / 8, PAGE_SIZE);
+
+    uint64_t bitmap_end_address = (uint64_t)global_phys_mem_info.bmp_phys + bitmap_size_bytes;
+
+    if(bitmap_end_address > ONE_GIB){
+        panic("Bitmap Allocation Exceeds 1GB initially mapped memory");
+    }
+
+    // 2. Deny by Default: Mark everything as USED (1)
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+    for (uint64_t i = 0; i < bitmap_size_bytes; i++) {
+        bmp[i] = 0xFF; 
+    }
+
+
+    // 3. Second Pass: Loop through MMAP and free AVAILABLE regions
+    struct multiboot_tag* tag = (struct multiboot_tag*)(mb2_addr + 8);
+    while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+        if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) { 
+            struct multiboot_tag_mmap* mmap = (struct multiboot_tag_mmap*)tag;
+            struct multiboot_mmap_entry* entry;
+            
+            for (entry = mmap->entries; 
+                 (uint8_t*)entry < (uint8_t*)tag + tag->size; 
+                 entry = (struct multiboot_mmap_entry*)((uint64_t)entry + mmap->entry_size)) {
+                
+                if (entry->type == MULTIBOOT_MEMORY_AVAILABLE) {
+                    pmm_mark_free_region(entry->addr, entry->len);
+                }
+            }
+        }
+        tag = mb2_next(tag);
+    }
+
+
+    // 4. Re-reserve Critical Boot Structures
+    
+    // Reserve the first 1MB (BIOS data, VGA buffer, IVT, etc.)
+    pmm_mark_used_region(0, 0x100000);
+
+
+    // Reserve the Kernel
+    uint64_t kernel_start = (uint64_t)&_kernel_start;
+    uint64_t kernel_len = (uint64_t)&_kernel_end - kernel_start;
+    kernel_start -= KERNEL_VMA;
+    pmm_mark_used_region(kernel_start, kernel_len);
+
+
+    // Reserve the Multiboot2 Data Structure itself
+    uint32_t mb2_size = *(uint32_t*)mb2_addr;
+    pmm_mark_used_region(mb2_addr, mb2_size);
+
+
+    // Reserve all loaded modules (Initrd, etc.)
+    tag = (struct multiboot_tag*)(mb2_addr + 8);
+    while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+        if (tag->type == MULTIBOOT_TAG_TYPE_MODULE) {
+            struct multiboot_tag_module* mod = (struct multiboot_tag_module*)tag;
+            pmm_mark_used_region(mod->mod_start, mod->mod_end - mod->mod_start);
+        }
+        tag = mb2_next(tag);
+    }
+
+    // Reserve the memory holding the Bitmap itself
+    pmm_mark_used_region((uint64_t)global_phys_mem_info.bmp_phys, bitmap_size_bytes);
+
+
+    kprintf("PMM Initialized! Bitmap at 0x%lx, Size: %u bytes\n", 
+            (uint64_t)global_phys_mem_info.bmp_phys, bitmap_size_bytes);
+}
+
+uint64_t get_virtual_pmm_bitmap_location(){
+    return (uint64_t)global_phys_mem_info.bmp_phys;
+}
+
+uint64_t get_pmm_total_manage(){
+    return global_phys_mem_info.total_mem;
+}
+
+void set_virtual_pmm_bitmap_location(uint64_t new_bitmap_virt_loc){
+    global_phys_mem_info.bmp_phys = (virt_addr_t) new_bitmap_virt_loc;
+}
+
+// Returns the physical address of a free 4KB page, or NULL if out of memory.
+void* pmm_alloc_page(void) {
+    spin_lock(&pmm_lock);
+
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+
+    for (uint64_t i = 0; i < max_pages; i++) {
+        // Check if the bit is 0 (Free)
+        if ((bmp[i / 8] & (1 << (i % 8))) == 0) {
+            bitmap_set(i);
+            spin_unlock(&pmm_lock);
+            return (void*)idx_to_addr(i);
+        }
+    }
+
+    spin_unlock(&pmm_lock);
+    panic("PMM: Out of memory!");
+    return NULL;
+}
+
+// Same as pmm_alloc_page(), but without taking pmm_lock. For genuinely
+// single-threaded, pre-MMU bootstrap code only (e.g. aarch64's own page
+// table allocation before the MMU exists): AArch64 exclusive-access
+// atomics (ldxr/stxr, what spin_lock compiles to) require Normal memory,
+// which isn't available until paging is up — with the MMU off, memory
+// defaults to Device semantics on real hardware, and stxr never
+// succeeds, spinning forever. QEMU's TCG doesn't model this restriction,
+// so it's invisible there.
+void* pmm_alloc_page_nolock(void) {
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint8_t* bmp = (uint8_t*)global_phys_mem_info.bmp_phys;
+
+    for (uint64_t i = 0; i < max_pages; i++) {
+        if ((bmp[i / 8] & (1 << (i % 8))) == 0) {
+            bitmap_set(i);
+            return (void*)idx_to_addr(i);
+        }
+    }
+
+    panic("PMM: Out of memory!");
+    return NULL;
+}
+
+void pmm_free_page(void* phys_addr) {
+    uint64_t addr = (uint64_t)phys_addr;
+    
+    // Sanity check: ensure the address is exactly on a 4KB boundary
+    if (addr % PAGE_SIZE != 0) {
+        panic("PMM: Tried to free an unaligned address: 0x%lx", addr);
+    }
+
+    uint64_t idx = addr_to_idx(addr);
+    if (!bitmap_test(idx)) {
+        panic("PMM: Double free or freeing unallocated page at 0x%lx", addr);
+    }
+
+    bitmap_clear(idx);
+}
