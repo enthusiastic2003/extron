@@ -57,6 +57,31 @@ FP-using proc passes even with no save at all.
 The only item with genuine unknowns. Everything else on this list is either done
 or an afternoon.
 
+**Verification rig (working, `83b4821`).** The Pi's HDMI goes to a MACROSILICON
+MS2130 USB dongle; `tools/capture.sh` grabs stills or video from it. Serial can
+only report what the kernel *thinks* it did — a wrong pitch, stride or pixel
+order produces a picture that is visibly and diagnosably wrong while the mailbox
+call still reports success.
+
+Baseline captured before any framebuffer code exists, and it validates the
+instrument rather than assuming it:
+
+- A black frame is ~4KB; the firmware rainbow splash is ~151KB, and
+  `ffmpeg -vf blackdetect` separates them cleanly. So "black" is a measurable
+  result, not an ambiguous one — which matters, because a dead capture link and
+  correct-but-hasn't-drawn-yet look identical otherwise.
+- **The firmware has already allocated and is driving a framebuffer** (that's
+  what the splash is). This work is about taking over an existing display, not
+  bringing one up cold.
+- **The splash persists indefinitely** while our kernel runs, since nothing
+  touches it. So the first successful DG_DrawFrame REPLACES the rainbow — an
+  unmistakable transition, not a subtle one.
+- **The active area is 4:3** (`cropdetect` -> `crop=960:720:160:0`), not the
+  16:9 the capture command asks v4l2 for — the dongle scales. The Pi likely fell
+  back to a default mode because a capture dongle's EDID is minimal. Concrete
+  reason to use the width/height/pitch the mailbox REPORTS BACK rather than the
+  values requested: they are not the same thing here.
+
 - **VideoCore mailbox interface** — property-channel messages to allocate a
   framebuffer: set physical/virtual size, set depth, get the buffer's address and
   pitch. New driver, but the MMIO mapping pattern is already established twice
