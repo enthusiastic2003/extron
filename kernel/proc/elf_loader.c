@@ -32,8 +32,8 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
     if (ehdr->e_ident[EI_DATA] != ELFDATA2LSB)
         return ELF_ERR_ENDIAN;
 
-    /* 5. Must be x86_64 */
-    if (ehdr->e_machine != EM_X86_64)
+    /* 5. Must match this build's target architecture */
+    if (ehdr->e_machine != ELF_EXPECTED_MACHINE)
         return ELF_ERR_MACHINE;
 
     /* 6. Must be executable or shared object (for dynamic linking later) */

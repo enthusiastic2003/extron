@@ -15,11 +15,25 @@ void set_console_write_loc(uint64_t vga_offset) {
     vga = (volatile char*)vga_offset + 0xB8000;
 }
 
-/* --- low-level --- */
+/* --- low-level ---
+ * The VGA text buffer at physical 0xB8000 is x86-only hardware — on
+ * aarch64 it's just an arbitrary physical address that happens to be
+ * real DRAM under whatever's currently mapped there. It "worked"
+ * silently (wasted writes into real RAM, no visible effect) as long as
+ * TTBR0_EL1 stayed pointed at boot.S's original blanket low-memory
+ * identity map; the instant something replaces TTBR0 with a real,
+ * deliberately scoped user table (see kernel_aarch64.c's EL0 test),
+ * every non-control character faults. Guarded here, at the single
+ * choke point every VGA touch goes through, rather than in every
+ * caller. */
 static inline void putc_at(int x, int y, char c, char color) {
+#if !defined(__aarch64__)
     int i = (y * VGA_WIDTH + x) * 2;
     vga[i]     = c;
     vga[i + 1] = color;
+#else
+    (void)x; (void)y; (void)c; (void)color;
+#endif
 }
 
 /* --- clear screen --- */
@@ -37,6 +51,7 @@ void clear_screen(char color) {
 
 /* --- scrolling --- */
 static void scroll(void) {
+#if !defined(__aarch64__)
     for (int y = 1; y < VGA_HEIGHT; y++) {
         for (int x = 0; x < VGA_WIDTH; x++) {
             int from = (y * VGA_WIDTH + x) * 2;
@@ -45,6 +60,7 @@ static void scroll(void) {
             vga[to + 1] = vga[from + 1];
         }
     }
+#endif
 
     for (int x = 0; x < VGA_WIDTH; x++) {
         putc_at(x, VGA_HEIGHT - 1, ' ', 0x0F);

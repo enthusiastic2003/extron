@@ -18,4 +18,14 @@ struct fdt_mem_region {
  */
 size_t fdt_get_memory_regions(const void *dtb_phys, struct fdt_mem_region *out, size_t max_regions);
 
+/*
+ * Reads the /chosen node's "linux,initrd-start"/"linux,initrd-end"
+ * properties (the standard ARM/Linux boot-protocol convention a
+ * bootloader uses to hand off an initrd's physical bounds) — the same
+ * mechanism RPi4 firmware's config.txt "initramfs" directive uses.
+ * Returns 1 and fills out_start/out_end if both properties were found,
+ * 0 otherwise (no initrd was loaded, or dtb_phys isn't a valid FDT).
+ */
+int fdt_get_initrd_region(const void *dtb_phys, uint64_t *out_start, uint64_t *out_end);
+
 #endif

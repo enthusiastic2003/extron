@@ -9,14 +9,16 @@
 // exceptions.h) is saved here explicitly, by us.
 //
 // Our kernel always runs at EL1h (SP_EL1) — set that way back in
-// boot.S's EL2->EL1 drop — and has no userspace yet, so only the
-// "Current EL, SP_ELx" group (offset 0x200-0x380) is ever legitimately
-// reached. The other 12 slots are defensive: if they ever fire, SP_EL1
-// isn't necessarily even valid to push onto (e.g. the SP_EL0 group means
-// we were somehow using SP_EL0, which nothing has ever initialized), so
-// they use a stack-free raw UART writer — same technique boot.S's
-// (since-removed) temporary debug helper used — rather than attempting
-// a normal register save.
+// boot.S's EL2->EL1 drop — so the "Current EL, SP_ELx" group (offset
+// 0x200-0x380) handles every kernel-on-itself exception. The "Lower EL,
+// AArch64" group (0x400-0x780) is now reachable too, since
+// kernel_aarch64.c can eret into a TTBR0-mapped EL0 payload (see
+// el0_test_stub.S) — Sync/IRQ/FIQ there use the same VECTOR_STUB. The
+// remaining slots stay defensive: SP_EL0 (we never select it) and Lower
+// EL AArch32 (we never run 32-bit code) fire in contexts where SP_EL1
+// isn't necessarily even valid to push onto, so they use a stack-free
+// raw UART writer — same technique boot.S's (since-removed) temporary
+// debug helper used — rather than attempting a normal register save.
 //
 // 32-instruction budget per slot means the full save+dispatch+restore
 // sequence can't fit inline: each real slot does the save (fits in ~26
@@ -126,13 +128,19 @@ vector_table:
 .balign 0x80
     VECTOR_STUB 3 // SError
 
-// --- Lower EL, AArch64 (unreachable: no userspace yet) ---
+// --- Lower EL, AArch64 (EL0 exists now — see el0_test_stub.S. Sync/IRQ/
+// FIQ wired identically to the Current-EL group above: SAVE_CONTEXT
+// always targets SP_EL1, which the architecture unconditionally selects
+// on any exception taken to EL1 regardless of which EL it came from, so
+// the same stub is valid here. SError stays spurious: DAIF.A is never
+// unmasked (exceptions_enable_irqs()), so it architecturally cannot
+// fire from EL0 either. ---
 .balign 0x80
-    SPURIOUS_VECTOR 'e'
+    VECTOR_STUB 0 // Synchronous (e.g. svc from EL0)
 .balign 0x80
-    SPURIOUS_VECTOR 'f'
+    VECTOR_STUB 1 // IRQ
 .balign 0x80
-    SPURIOUS_VECTOR 'g'
+    VECTOR_STUB 2 // FIQ
 .balign 0x80
     SPURIOUS_VECTOR 'h'
 

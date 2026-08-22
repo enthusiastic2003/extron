@@ -60,6 +60,18 @@ typedef struct {
 
 /* Machine */
 #define EM_X86_64   62
+#define EM_AARCH64  183
+
+/* Which e_machine value a binary must declare on this build — same
+ * elf_loader.c source compiled for both arches (kernel/proc/elf_loader.c
+ * is otherwise fully portable: it only ever calls the arch-neutral
+ * map_page()/pmm_alloc_page()/phys_to_virt_hhdm()), so this is the one
+ * axis that actually differs per target. */
+#if defined(__aarch64__)
+#define ELF_EXPECTED_MACHINE EM_AARCH64
+#else
+#define ELF_EXPECTED_MACHINE EM_X86_64
+#endif
 
 /* ELF File Header */
 typedef struct {

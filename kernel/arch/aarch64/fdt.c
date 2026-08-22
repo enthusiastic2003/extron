@@ -54,6 +54,17 @@ static int name_is_memory_node(const char *name) {
     return name[6] == '\0' || name[6] == '@';
 }
 
+// Matches a node name of exactly "chosen" (never has a unit-address suffix).
+static int name_is_chosen_node(const char *name) {
+    static const char prefix[] = "chosen";
+    for (int i = 0; prefix[i]; i++) {
+        if (name[i] != prefix[i]) {
+            return 0;
+        }
+    }
+    return name[6] == '\0';
+}
+
 size_t fdt_get_memory_regions(const void *dtb_phys, struct fdt_mem_region *out, size_t max_regions) {
     if (read_be32(dtb_phys) != FDT_MAGIC) {
         return 0;
@@ -136,4 +147,77 @@ size_t fdt_get_memory_regions(const void *dtb_phys, struct fdt_mem_region *out, 
     }
 
     return count;
+}
+
+int fdt_get_initrd_region(const void *dtb_phys, uint64_t *out_start, uint64_t *out_end) {
+    if (read_be32(dtb_phys) != FDT_MAGIC) {
+        return 0;
+    }
+
+    const uint8_t *base = (const uint8_t *)dtb_phys;
+    uint32_t off_dt_struct  = read_be32(base + 8);
+    uint32_t off_dt_strings = read_be32(base + 12);
+    uint32_t size_dt_struct = read_be32(base + 36);
+
+    const uint8_t *struct_block  = base + off_dt_struct;
+    const uint8_t *strings_block = base + off_dt_strings;
+    const uint8_t *p   = struct_block;
+    const uint8_t *end = struct_block + size_dt_struct;
+
+    int in_chosen_node = 0; // depth of the /chosen node we're inside, or 0
+    int depth = 0;
+    int have_start = 0, have_end = 0;
+
+    while (p + 4 <= end) {
+        uint32_t token = read_be32(p);
+        p += 4;
+
+        if (token == FDT_BEGIN_NODE) {
+            const char *name = (const char *)p;
+            size_t namelen = 0;
+            while (p + namelen < end && name[namelen]) {
+                namelen++;
+            }
+            p += align4((uint32_t)namelen + 1);
+            depth++;
+            if (!in_chosen_node && name_is_chosen_node(name)) {
+                in_chosen_node = depth;
+            }
+        } else if (token == FDT_END_NODE) {
+            if (depth == in_chosen_node) {
+                in_chosen_node = 0;
+            }
+            depth--;
+        } else if (token == FDT_PROP) {
+            uint32_t len     = read_be32(p);
+            uint32_t nameoff = read_be32(p + 4);
+            const uint8_t *val = p + 8;
+            p += 8 + align4(len);
+
+            const char *pname = (const char *)(strings_block + nameoff);
+
+            /* linux,initrd-start/-end aren't governed by any #address-cells
+             * (they're not a bus-relative "reg", just raw integers the
+             * bootloader writes) — the property's own byte length tells us
+             * whether it's a 32-bit or 64-bit cell, same generic-by-length
+             * approach as fdt_get_memory_regions() uses for #address-cells. */
+            if (in_chosen_node && (len == 4 || len == 8)) {
+                if (str_eq(pname, "linux,initrd-start")) {
+                    *out_start = read_cells(val, len / 4);
+                    have_start = 1;
+                } else if (str_eq(pname, "linux,initrd-end")) {
+                    *out_end = read_cells(val, len / 4);
+                    have_end = 1;
+                }
+            }
+        } else if (token == FDT_NOP) {
+            // nothing to do
+        } else if (token == FDT_END) {
+            break;
+        } else {
+            break;
+        }
+    }
+
+    return have_start && have_end;
 }

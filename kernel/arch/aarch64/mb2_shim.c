@@ -13,12 +13,25 @@ static void put_u64(uint8_t *dst, uint64_t v) {
 }
 
 uint64_t mb2_shim_build(const struct fdt_mem_region *regions, size_t count,
-                         void *buf, size_t buf_size) {
+                         void *buf, size_t buf_size,
+                         uint64_t initrd_start, uint64_t initrd_end) {
     uint32_t mmap_tag_size = (uint32_t)(sizeof(struct multiboot_tag_mmap) +
                                          count * sizeof(struct multiboot_mmap_entry));
     uint32_t mmap_tag_aligned = (mmap_tag_size + 7u) & ~7u;
+
+    /* struct multiboot_tag_module's cmdline[] is a null-terminated string
+     * per the multiboot2 spec — one byte (an empty string) is enough since
+     * neither tar_init() nor anything else reads it; only mod_start/
+     * mod_end matter to the initrd path. */
+    int have_module = (initrd_start != 0 || initrd_end != 0);
+    uint32_t module_tag_size = have_module
+        ? (uint32_t)(sizeof(struct multiboot_tag_module) + 1)
+        : 0;
+    uint32_t module_tag_aligned = (module_tag_size + 7u) & ~7u;
+
     uint32_t total_size = 8 /* mb2 info header: total_size + reserved */
                         + mmap_tag_aligned
+                        + module_tag_aligned
                         + 8 /* END tag */;
 
     if ((size_t)total_size > buf_size) {
@@ -48,8 +61,18 @@ uint64_t mb2_shim_build(const struct fdt_mem_region *regions, size_t count,
         put_u32(e + 20, 0); // zero
     }
 
+    // --- MODULE tag (the initrd, if one was found) ---
+    if (have_module) {
+        uint8_t *mod = p + 8 + mmap_tag_aligned;
+        put_u32(mod + 0, MULTIBOOT_TAG_TYPE_MODULE);
+        put_u32(mod + 4, module_tag_size);
+        put_u32(mod + 8, (uint32_t)initrd_start);
+        put_u32(mod + 12, (uint32_t)initrd_end);
+        mod[16] = 0; // cmdline: empty string
+    }
+
     // --- END tag ---
-    uint8_t *end = p + 8 + mmap_tag_aligned;
+    uint8_t *end = p + 8 + mmap_tag_aligned + module_tag_aligned;
     put_u32(end + 0, MULTIBOOT_TAG_TYPE_END);
     put_u32(end + 4, 8);
 

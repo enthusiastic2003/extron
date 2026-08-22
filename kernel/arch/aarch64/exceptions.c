@@ -57,6 +57,7 @@ static const char *ec_name(uint32_t ec) {
         case 0x00: return "Unknown reason";
         case 0x0E: return "Illegal Execution state";
         case 0x15: return "SVC instruction (AArch64)";
+        case 0x18: return "Trapped MSR/MRS/System instruction";
         case 0x20: return "Instruction Abort (lower EL)";
         case 0x21: return "Instruction Abort (same EL)";
         case 0x22: return "PC alignment fault";
@@ -100,12 +101,18 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
         return;
     }
 
-    /* Synchronous exception — decode ESR_EL1.EC (bits [31:26]). */
+    /* Synchronous exception — decode ESR_EL1.EC (bits [31:26]). SPSR's
+     * low 4 bits (M[3:0]) name which EL/SP the exception came FROM —
+     * 0x0 = EL0t, 0x5 = EL1h — the direct proof an EL0 eret really
+     * landed and trapped back, not just that *something* faulted. */
     uint32_t ec = (uint32_t)((f->esr_el1 >> 26) & 0x3F);
     panic("SYNCHRONOUS EXCEPTION\n"
           "class=%s\n"
           "ELR=%p\n"
+          "SPSR=%p (mode=%s)\n"
           "ESR=%p\n"
           "FAR=%p\n",
-          ec_name(ec), (void *)f->elr_el1, (void *)f->esr_el1, (void *)f->far_el1);
+          ec_name(ec), (void *)f->elr_el1, (void *)f->spsr_el1,
+          (f->spsr_el1 & 0xF) == 0x0 ? "EL0t" : (f->spsr_el1 & 0xF) == 0x5 ? "EL1h" : "other",
+          (void *)f->esr_el1, (void *)f->far_el1);
 }

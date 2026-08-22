@@ -24,7 +24,10 @@ C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c") \
            kernel/mm/vmm.c \
            kernel/console/console.c \
            kernel/panic.c \
-           kernel/klibc/builtins.c
+           kernel/klibc/builtins.c \
+           kernel/klibc/string.c \
+           kernel/fs/tar.c \
+           kernel/proc/elf_loader.c
 S_SRC   := $(shell find kernel/arch/aarch64 -name "*.S")
 ASM_SRC :=
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
