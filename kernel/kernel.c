@@ -3,6 +3,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/paging.h>
+#include <kernel/mm/kheap.h>
 #include <kernel/arch.h>
 #include <stddef.h>
 #include <kernel/drivers/serial.h>
@@ -74,6 +75,61 @@ static phys_addr_t map_test_counter_page(struct proc *p) {
 }
 */
 
+/* Exercises kmalloc/kfree (kernel/mm/kheap.c — liballoc, already used
+ * indirectly this whole time via proc_create_from_binary()'s struct
+ * proc and kernel stack allocations, but never directly proven).
+ * Allocates three DIFFERENT sizes (small, medium, and one bigger than
+ * a single page — liballoc's allocate_new_page() rounds a request like
+ * that up across multiple pages internally) so any block-boundary
+ * miscalculation would show up as one allocation stomping another's
+ * bytes. Frees the middle one specifically and allocates again to
+ * prove the freed space is actually reusable, not just leaked. */
+static void kheap_test(void) {
+    kprintf("--- kheap test ---\n");
+
+    char *a = kmalloc(16);
+    char *b = kmalloc(128);
+    char *c = kmalloc(5000); /* bigger than one 4KB page */
+
+    if (!a || !b || !c) {
+        panic("kheap test: allocation failed");
+    }
+
+    for (int i = 0; i < 16; i++)   a[i] = 'A';
+    for (int i = 0; i < 128; i++)  b[i] = 'B';
+    for (int i = 0; i < 5000; i++) c[i] = 'C';
+
+    int ok = 1;
+    for (int i = 0; i < 16; i++)   if (a[i] != 'A') ok = 0;
+    for (int i = 0; i < 128; i++)  if (b[i] != 'B') ok = 0;
+    for (int i = 0; i < 5000; i++) if (c[i] != 'C') ok = 0;
+
+    kprintf("kheap test: a=%p b=%p c=%p pattern check %s\n",
+            (void *)a, (void *)b, (void *)c, ok ? "PASSED" : "FAILED");
+
+    kfree(b);
+
+    char *d = kmalloc(64);
+    if (!d) {
+        panic("kheap test: post-free allocation failed");
+    }
+    for (int i = 0; i < 64; i++) d[i] = 'D';
+
+    int ok2 = 1;
+    for (int i = 0; i < 64; i++)   if (d[i] != 'D') ok2 = 0;
+    for (int i = 0; i < 16; i++)   if (a[i] != 'A') ok2 = 0; /* untouched by the free/realloc above? */
+    for (int i = 0; i < 5000; i++) if (c[i] != 'C') ok2 = 0;
+
+    kprintf("kheap test: post-free reuse d=%p pattern check %s\n",
+            (void *)d, ok2 ? "PASSED" : "FAILED");
+
+    kfree(a);
+    kfree(c);
+    kfree(d);
+
+    kprintf("--- kheap test done ---\n");
+}
+
 /**
  * @brief Stage 2: arch-neutral continuation.
  *
@@ -123,6 +179,8 @@ void kernel_stage2(uint64_t mb2_addr) {
     sched_start();
     */
     sched_init();
+
+    kheap_test();
 
     /* Keyboard-echo test: read bytes from the serial console
      * (kernel/drivers/keyboard.c — really just UART RX on this headless

@@ -37,18 +37,28 @@ static struct kbd_buffer kbuf = { .lock = SPINLOCK_INIT };
 
 static void kbd_irq_handler(struct aarch64_frame *f) {
     (void)f;
+    /* No irq_spin_lock needed here: this ISR runs with DAIF fully
+     * masked (automatic on any exception entry), so it can't be
+     * preempted by anything, including a second UART interrupt. The
+     * only other accessor, kbd_getc(), already masks DAIF itself
+     * around its own critical section (that's what irq_spin_lock does
+     * for it) — which means this ISR architecturally cannot even be
+     * entered while kbd_getc() is mid-read, lock or no lock on this
+     * side. On a single core (the only kind this kernel runs on —
+     * boot.S parks the others permanently) there's no other way these
+     * two could ever touch kbuf at the same time, so a lock here would
+     * just be overhead with nothing left to exclude. Revisit if this
+     * ever runs on more than one core. */
     int c;
     /* Drain the ENTIRE hardware FIFO in one go — the whole point is to
      * empty it before more bytes can possibly overflow it, not just
      * take one byte per interrupt. */
     while ((c = serial_try_getc()) != -1) {
-        irq_spin_lock(&kbuf.lock);
         uint32_t next_head = (kbuf.head + 1) % KBD_BUFFER_SIZE;
         if (next_head != kbuf.tail) { /* drop the byte if the software buffer is full too */
             kbuf.buf[kbuf.head] = (char)c;
             kbuf.head = next_head;
         }
-        irq_spin_unlock(&kbuf.lock);
     }
 }
 
