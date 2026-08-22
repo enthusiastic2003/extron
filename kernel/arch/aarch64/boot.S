@@ -171,8 +171,16 @@ skip_el2_setup:
     orr     x1, x1, #0x3
     str     x1, [x0, #(511 * 8)]
 
-    // --- MAIR_EL1: index 0 = Normal WB/WA cacheable, index 1 = Device ---
-    mov     x0, #0xFF
+    // --- MAIR_EL1: index 0 = Normal WB/WA cacheable (0xFF),
+    //     index 1 = Device-nGnRnE (0x00), index 2 = Normal
+    //     Non-cacheable (0x44, outer+inner NC).
+    //
+    // Index 2 exists for memory the GPU or another bus master accesses
+    // directly — the framebuffer. Device would also be coherent, but it
+    // forbids unaligned accesses unconditionally (regardless of
+    // SCTLR_EL1.A) and gathers nothing, so a memcpy into a Device-mapped
+    // framebuffer can fault outright and would be slow if it didn't.
+    ldr     x0, =0x4400FF
     msr     mair_el1, x0
 
     // --- TCR_EL1: 48-bit VA both halves, 4KB granule, TTBR1 enabled

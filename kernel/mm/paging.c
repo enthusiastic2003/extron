@@ -42,6 +42,7 @@
 
 #define MAIR_IDX_NORMAL     0
 #define MAIR_IDX_DEVICE     1
+#define MAIR_IDX_NORMAL_NC  2
 
 static uint64_t g_hhdm_offset = 0;
 static phys_addr_t kernel_l0; /* TTBR1_EL1: the kernel's own top-level table */
@@ -118,6 +119,11 @@ static uint64_t hw_attrs_from_flags(uint64_t flags) {
     uint64_t attrs = PTE_AF;
     if (flags & PAGE_CACHE_DISABLE) {
         attrs |= PTE_ATTR_IDX(MAIR_IDX_DEVICE);
+    } else if (flags & PAGE_NORMAL_NC) {
+        /* Normal but uncached: coherent with the GPU without cache
+         * maintenance, while still allowing unaligned access and write
+         * gathering — which Device memory does not. */
+        attrs |= PTE_SH_INNER | PTE_ATTR_IDX(MAIR_IDX_NORMAL_NC);
     } else {
         attrs |= PTE_SH_INNER | PTE_ATTR_IDX(MAIR_IDX_NORMAL);
     }

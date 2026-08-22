@@ -14,6 +14,7 @@
 #include <kernel/proc/exec.h>
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/mailbox.h>
+#include <kernel/drivers/fb.h>
 
 /**
  * @brief Stage 1: Initialization Phase.
@@ -206,6 +207,17 @@ void kernel_stage2(uint64_t mb2_addr) {
      * between its two available regions. */
     mailbox_init();
     mailbox_report();
+
+    /* Ask for 640x480 — a mode this display can actually present. The
+     * capture showed it negotiating 4:3, so requesting 16:9 would just
+     * get something else back; either way the values the firmware
+     * REPORTS are what fb.c uses. The test pattern is designed so the
+     * usual mistakes look different from each other: skewed bars mean
+     * pitch, misplaced corners mean geometry, permuted colours mean
+     * byte order. */
+    if (fb_init(640, 480)) {
+        fb_test_pattern();
+    }
 
     /* Phase 2 verification, sleep/wake + VMA allocator (already proven
      * on both QEMU and real hardware — see git history for that run):

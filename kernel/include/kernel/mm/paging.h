@@ -18,6 +18,14 @@
 #define PAGE_DIRTY         (1ULL << 6)
 #define PAGE_HUGE          (1ULL << 7)  // For 2MB or 1GB pages
 #define PAGE_GLOBAL        (1ULL << 8)
+/* Normal memory, non-cacheable — for buffers another bus master reads
+ * or writes directly (the framebuffer; DMA later). NOT the same as
+ * PAGE_CACHE_DISABLE, which selects Device memory: Device forbids
+ * unaligned access unconditionally, so a memcpy() into it can fault
+ * even with SCTLR_EL1.A clear, and it permits no write gathering. This
+ * gives coherency with the other master while still behaving like
+ * ordinary memory. Ignored if PAGE_CACHE_DISABLE is also set. */
+#define PAGE_NORMAL_NC     (1ULL << 9)
 #define PAGE_NX            (1ULL << 63) // No Execute (if supported)
 
 // Mask to extract the physical address from an entry (drops the flags)
