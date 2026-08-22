@@ -41,6 +41,7 @@
 #define GICD_IGROUPR    0x080
 #define GICD_ISENABLER  0x100
 #define GICD_IPRIORITYR 0x400
+#define GICD_ITARGETSR  0x800
 
 #define GICC_CTLR 0x000
 #define GICC_PMR  0x004
@@ -65,14 +66,24 @@ void gic_init(void) {
 
     gicd[GICD_CTLR / 4] = 0; /* disable while configuring */
 
-    /* Move every SGI/PPI (0-31) into Group 1 (non-secure). If the GIC's
-     * security extensions aren't implemented at all, this write is
-     * simply ignored (no separate groups to move between) — harmless
-     * either way, and required if they ARE implemented: with them
-     * active, GICD_CTLR's bit0 only enables Group 0, and an interrupt
-     * left in its Group 0 default would sit pending at the distributor
-     * forever, never forwarded to the CPU interface. */
-    gicd[GICD_IGROUPR / 4] = 0xFFFFFFFF;
+    /* Move every SGI/PPI/SPI into Group 1 (non-secure). GICD_IGROUPRn is
+     * an ARRAY, one 32-bit register per 32 interrupt IDs — GICD_IGROUPR0
+     * (below) only covers IDs 0-31 (SGIs/PPIs, enough for the timer).
+     * SPIs (32+, e.g. GIC_SPI_UART0=153, which lands in bank index 4)
+     * live in DIFFERENT registers this loop must also reach, or they'd
+     * sit at their own Group 0 reset default — the exact bug that cost
+     * a full debugging pass for the timer PPI, just for a different
+     * interrupt ID. 16 banks covers IDs 0-511, well past anything
+     * BCM2711 implements. If the GIC's security extensions aren't
+     * implemented at all, these writes are simply ignored (no separate
+     * groups to move between) — harmless either way, and required if
+     * they ARE implemented: with them active, GICD_CTLR's bit0 only
+     * enables Group 0, and an interrupt left in its Group 0 default
+     * would sit pending at the distributor forever, never forwarded to
+     * the CPU interface. */
+    for (int bank = 0; bank < 16; bank++) {
+        gicd[GICD_IGROUPR / 4 + bank] = 0xFFFFFFFF;
+    }
 
     gicd[GICD_CTLR / 4] = 0x3; /* enable Group 0 + Group 1 */
     gicc[GICC_PMR / 4]  = 0xFF; /* allow all interrupt priorities through */
@@ -97,6 +108,22 @@ void gic_init(void) {
 }
 
 void gic_enable_irq(unsigned id) {
+    /* SPIs (32+) need explicit CPU targeting on GICv2 — unlike PPIs
+     * (implicitly banked per-core, no routing decision to make), an SPI
+     * with no target CPU set in GICD_ITARGETSRn just sits pending at
+     * the distributor forever, never forwarded to any CPU interface —
+     * enabled, correctly grouped, genuinely pending, and still never
+     * delivered. GICD_ITARGETSRn is byte-per-interrupt-ID (4 IDs per
+     * 32-bit register, unlike the bit-per-ID IGROUPR/ISENABLER above),
+     * so this is a byte-level read-modify-write: value 0x01 in an ID's
+     * byte targets CPU interface 0, the only core running this kernel
+     * (boot.S parks the others). PPI/SGI bytes (id<32) are read-only,
+     * hardwired to the banked "this CPU" affinity — writing them would
+     * just be silently ignored, so gating on id>=32 is a clarity choice,
+     * not a correctness requirement. */
+    if (id >= 32) {
+        gicd[GICD_ITARGETSR / 4 + id / 4] |= (1U << ((id % 4) * 8));
+    }
     gicd[GICD_ISENABLER / 4 + (id / 32)] = (1U << (id % 32));
 }
 

@@ -15,7 +15,10 @@
 #define UART0_FBRD      (UART0_BASE + 0x28)
 #define UART0_LCRH      (UART0_BASE + 0x2C)
 #define UART0_CR        (UART0_BASE + 0x30)
+#define UART0_IMSC      (UART0_BASE + 0x38)
 #define UART0_ICR       (UART0_BASE + 0x44)
+
+#define UART0_IMSC_RXIM (1u << 4)
 
 static inline void mmio_write(unsigned long addr, unsigned int val) {
     *(volatile unsigned int *)addr = val;
@@ -75,4 +78,15 @@ char serial_getc(void) {
         // wait while RX FIFO empty (UART0_FR.RXFE)
     }
     return (char)(mmio_read(UART0_DR) & 0xFF);
+}
+
+int serial_try_getc(void) {
+    if (mmio_read(UART0_FR) & (1u << 4)) {
+        return -1; // RX FIFO empty right now
+    }
+    return (int)(mmio_read(UART0_DR) & 0xFF);
+}
+
+void serial_enable_rx_irq(void) {
+    mmio_write(UART0_IMSC, mmio_read(UART0_IMSC) | UART0_IMSC_RXIM);
 }
