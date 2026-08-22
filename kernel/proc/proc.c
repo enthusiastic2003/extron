@@ -17,6 +17,7 @@
 _Static_assert(offsetof(struct cpu_context, sp)   == 0x60, "switch.S: sp offset");
 _Static_assert(offsetof(struct cpu_context, fpcr) == 0x68, "switch.S: fpcr offset");
 _Static_assert(offsetof(struct cpu_context, fpsr) == 0x70, "switch.S: fpsr offset");
+_Static_assert(offsetof(struct cpu_context, tpidr_el0) == 0x78, "switch.S: tpidr_el0 offset");
 _Static_assert(offsetof(struct cpu_context, v)    == 0x80, "switch.S: v[] offset");
 _Static_assert(sizeof(((struct cpu_context *)0)->v) == 32 * 16, "switch.S: v[] covers v0-v31");
 

@@ -16,9 +16,9 @@
 // Full 128-bit lanes are checked (d[0] on some, d[1] on others) so a
 // save that only covered the low 64 bits is caught too.
 .section ".rodata"
-pass_msg: .ascii "FP_CTX A: PASS (v0/v1/v8/v9/v31 intact across 20 switches)\n"
+pass_msg: .ascii "FP_CTX A: PASS (v0/v1/v8/v9/v31 + tpidr_el0 intact, 20 switches)\n"
 pass_len = . - pass_msg
-fail_msg: .ascii "FP_CTX A: FAIL (FP state clobbered across context switch)\n"
+fail_msg: .ascii "FP_CTX A: FAIL (FP or tpidr_el0 clobbered across switch)\n"
 fail_len = . - fail_msg
 
 .section ".text"
@@ -36,6 +36,12 @@ _start:
     dup     v8.2d,  x20
     dup     v9.2d,  x20
     dup     v31.2d, x20
+
+    // TPIDR_EL0 too: same per-process-CPU-state question as the FP
+    // registers, same pair-of-procs reason it needs two of us to test.
+    // Written directly from EL0 — architecturally allowed, and the way
+    // a real libc sets its thread pointer.
+    msr     tpidr_el0, x20
 
     mov     x19, #20                    // iterations
 1:
@@ -58,6 +64,9 @@ _start:
     cmp     x1, x20
     b.ne    9f
     umov    x1, v31.d[0]
+    cmp     x1, x20
+    b.ne    9f
+    mrs     x1, tpidr_el0
     cmp     x1, x20
     b.ne    9f
 

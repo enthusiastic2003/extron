@@ -14,7 +14,7 @@
 //
 // struct cpu_context field offsets (kernel/include/kernel/proc/proc.h):
 //   x19..x28 = 0x00..0x48   fp = 0x50   lr = 0x58   sp = 0x60
-//   fpcr = 0x68   fpsr = 0x70   (0x78 = pad)   v0..v31 = 0x80..0x27F
+//   fpcr = 0x68   fpsr = 0x70   tpidr_el0 = 0x78   v0..v31 = 0x80..0x27F
 //
 // The FP/SIMD half saves ALL of v0-v31, not just AAPCS64's callee-saved
 // d8-d15. This isn't preserving a calling convention across a call —
@@ -43,6 +43,13 @@ context_switch:
     mrs x10, fpcr
     mrs x11, fpsr
     stp x10, x11, [x0, #0x68]
+
+    // TPIDR_EL0 (thread pointer): per-process, EL0-writable, and never
+    // touched by the kernel — so like the FP state below, the register
+    // still holds the OUTGOING process's value at this point. x12 is
+    // caller-saved scratch, free to use here.
+    mrs x12, tpidr_el0
+    str x12,      [x0, #0x78]
 
     stp q0,  q1,  [x0, #0x080]
     stp q2,  q3,  [x0, #0x0A0]
@@ -73,6 +80,9 @@ context_switch:
     ldp x10, x11, [x1, #0x68]
     msr fpcr, x10
     msr fpsr, x11
+
+    ldr x12,      [x1, #0x78]
+    msr tpidr_el0, x12
 
     ldp q0,  q1,  [x1, #0x080]
     ldp q2,  q3,  [x1, #0x0A0]

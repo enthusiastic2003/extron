@@ -66,7 +66,21 @@ struct cpu_context {
     uint64_t sp;                                               /* 0x60 */
     uint64_t fpcr;                                             /* 0x68 */
     uint64_t fpsr;                                             /* 0x70 */
-    uint64_t _pad;                        /* 0x78: realign v[] to 16 */
+    /* TPIDR_EL0 — the thread pointer. Architecturally EL0-writable
+     * (that's why sys_tcb_set() notes it may never be called), and
+     * per-process by definition, so it belongs here for exactly the same
+     * reason the FP registers do: the kernel never touches it, so its
+     * value at this point is still the outgoing process's own.
+     *
+     * Nothing uses TLS yet, which is the only reason this wasn't already
+     * a bug — the same way FP/SIMD and SP_EL0 were both invisible until
+     * a workload happened to use the register. Fixed ahead of mlibc
+     * rather than after it, since the symptom would be every thread
+     * seeing another process's TLS base.
+     *
+     * Sits in what used to be pure alignment padding, so the struct's
+     * size and v[]'s offset are unchanged. */
+    uint64_t tpidr_el0;                   /* 0x78 */
     uint64_t v[64];                       /* 0x80: v0-v31, 128 bits each */
 } __attribute__((aligned(16)));
 
