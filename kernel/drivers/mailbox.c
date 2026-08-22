@@ -68,10 +68,23 @@ void mailbox_init(void) {
                   (void *)(MAILBOX_MMIO_PHYS + off));
         }
     }
-    /* High-half alias, so this is reachable under any process's TTBR0 —
-     * the same reason the UART moved in 268c962. Device memory, since
-     * caching a mailbox register would drop the side effects that make
-     * it work. */
+    /* Kernel-only, and deliberately so: kmap() targets kernel_l0, the
+     * TTBR1 table, and the flags above carry no PAGE_USER — so AP[1] is
+     * 0 and EL0 cannot touch these registers at all. Nothing about this
+     * mapping is visible to a process.
+     *
+     * The reason for the HIGH address specifically is that AArch64
+     * selects a translation table by address, not by privilege level:
+     * a low address resolves through TTBR0 (whatever process is loaded)
+     * even when kernel code at EL1 is the one touching it. The raw
+     * 0xFE00B000 would therefore have had to be mapped into every
+     * process just so the kernel could reach it — which is exactly the
+     * mistake the UART carried until 268c962. NEW_HDDM + phys is high,
+     * so it lives in the kernel's own table and is reachable whichever
+     * TTBR0 happens to be current.
+     *
+     * Device memory, since caching a mailbox register would drop the
+     * side effects that make it work. */
     mbox_base = (volatile uint8_t *)(NEW_HDDM + MAILBOX_MMIO_PHYS);
     kprintf("aarch64: VideoCore mailbox mapped (0x%lx)\n",
             (unsigned long)MAILBOX_MMIO_PHYS);
