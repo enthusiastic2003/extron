@@ -19,7 +19,21 @@ struct aarch64_frame {
     uint64_t spsr_el1;
     uint64_t esr_el1;
     uint64_t far_el1;
-    uint64_t _pad; /* keeps the frame 16-byte aligned (AAPCS64 requirement) */
+    /* SP_EL0 — the interrupted context's OWN stack pointer. Must be
+     * saved and restored like any other per-process register.
+     *
+     * It is banked, so it survives an exception on its own and a
+     * single-process system never notices it missing. Across a CONTEXT
+     * SWITCH it is not preserved by anything: only
+     * proc_bootstrap_trampoline() ever writes it, and only on first
+     * launch, so every later resumption inherited whatever SP_EL0 the
+     * previously-running process happened to leave behind. Stayed
+     * invisible until the first processes that actually use a stack
+     * (the C payloads) — every assembly payload pushes nothing.
+     *
+     * Also conveniently keeps the frame 16-byte aligned, which is what
+     * this slot was previously padding for. */
+    uint64_t sp_el0;
 };
 
 /* Exception type, as set by exceptions.S before branching into C —

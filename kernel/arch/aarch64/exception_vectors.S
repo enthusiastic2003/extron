@@ -50,6 +50,14 @@
     mrs x12, far_el1
     stp x9,  x10, [sp, #248]
     stp x11, x12, [sp, #264]
+
+    // SP_EL0: the interrupted context's own stack pointer. Banked, so it
+    // survives the exception itself — but nothing preserves it across a
+    // context switch, so without this a process resumes on whatever
+    // stack pointer the previously-running process left behind. x13 is
+    // already saved above (with x12, at #96), so it's free here.
+    mrs x13, sp_el0
+    str x13,      [sp, #280]
 .endm
 
 .macro RESTORE_CONTEXT
@@ -58,6 +66,12 @@
     msr spsr_el1, x10
     // esr_el1/far_el1 aren't restored: they're set by hardware on the
     // NEXT exception, not meant to be written back on a normal return.
+
+    // Before the general registers, while x9 is still scratch. Writing
+    // it when returning to EL1 is harmless: EL1h runs on SP_EL1, so the
+    // value just goes back unchanged.
+    ldr x9,       [sp, #280]
+    msr sp_el0, x9
 
     ldp x0, x1,   [sp, #0]
     ldp x2, x3,   [sp, #16]
