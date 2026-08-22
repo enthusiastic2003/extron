@@ -2,6 +2,7 @@
 #include <arch/gic.h>
 #include <kernel/console.h>
 #include <kernel/panic.h>
+#include <kernel/proc/syscall.h>
 
 /*
  * exception_dispatch() — the aarch64 counterpart to x86's isr_handler()
@@ -118,6 +119,23 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
      * 0x0 = EL0t, 0x5 = EL1h — the direct proof an EL0 eret really
      * landed and trapped back, not just that *something* faulted. */
     uint32_t ec = (uint32_t)((f->esr_el1 >> 26) & 0x3F);
+
+    if (ec == 0x15) {
+        /* SVC (AArch64) — a real syscall, not a fault. Dispatch and
+         * return normally: ELR_EL1 already points past the svc
+         * instruction (set by hardware on exception entry, no manual
+         * adjustment needed), so falling through to the vector table's
+         * own RESTORE_CONTEXT+eret resumes userland exactly where it
+         * left off, with the result sitting in x0 per AAPCS64's
+         * return-value convention. No separate return path needed —
+         * unlike x86's SYSCALL, which clobbers RSP and needs a
+         * dedicated syscall_return landing pad to rebuild an IRETQ
+         * frame, SP_EL0 here is a banked register eret never touches,
+         * so the user stack pointer survives this round trip for free. */
+        f->x[0] = syscall_dispatch(f);
+        return;
+    }
+
     panic("SYNCHRONOUS EXCEPTION\n"
           "class=%s\n"
           "ELR=%p\n"

@@ -1,0 +1,32 @@
+#ifndef KERNEL_PROC_SYSCALL_H
+#define KERNEL_PROC_SYSCALL_H
+
+#include <stdint.h>
+#include <arch/exceptions.h>
+
+/*
+ * Same numbers as x86's kernel/proc/syscall.h (backup/x86_tree, now
+ * ~/extron-x86-backup/) — one shared ABI concept across both trees, not
+ * a coincidence. Convention here: x8 = number, x0/x1/x2 = args 1-3,
+ * return value written into f->x[0] — the real AAPCS64/Linux syscall
+ * convention, not just an Extron-specific choice, which matters for
+ * mlibc's own generic aarch64 sysdeps eventually landing on this target.
+ */
+#define SYS_READ        0
+#define SYS_WRITE       1
+#define SYS_SLEEP       2
+#define SYS_PROC_DUMP   3
+#define SYS_ANON_ALLOC  4
+#define SYS_ANON_FREE   5
+#define SYS_TCB_SET     6   /* likely unneeded here — see syscall.c */
+#define SYS_EXIT        7
+#define SYS_FORK        8
+#define SYS_EXECVE      9
+
+/* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
+ * syscall's result; the caller writes it into f->x[0] and falls through
+ * to the normal RESTORE_CONTEXT+eret every other exception already
+ * uses — no separate return path needed. */
+uint64_t syscall_dispatch(struct aarch64_frame *f);
+
+#endif

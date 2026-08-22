@@ -182,14 +182,31 @@ void kernel_stage2(uint64_t mb2_addr) {
 
     kheap_test();
 
-    /* Keyboard-echo test: read bytes from the serial console
-     * (kernel/drivers/keyboard.c — really just UART RX on this headless
-     * setup) and write them straight back out. Proves RX end-to-end
-     * before building anything that actually consumes typed input. */
-    init_kbd();
+    /* Keyboard-echo test — parked for the syscall test below, same
+     * "one test at a time" pattern as the 2-proc scheduler test above.
+     * init_kbd() (kernel/drivers/keyboard.c) still runs either way: the
+     * syscall test doesn't need it, but leaving interrupt-driven RX
+     * armed is harmless and saves re-adding it once SYS_READ exists.
+     *
     kprintf("Echo test: type on the serial console...\n");
     for (;;) {
         char c = kbd_getc();
         serial_putc(c);
     }
+    */
+    init_kbd();
+
+    /* Syscall test: one real process, one real svc round trip. Proves
+     * the mechanism end to end — see kernel/proc/syscall.c and
+     * kernel/arch/aarch64/exceptions.c's SVC dispatch. */
+    struct proc *p = proc_create_from_binary("syscall_test.elf");
+    if (!p) {
+        panic("kernel_stage2: failed to create syscall test proc");
+    }
+    sched_policy_add(p);
+
+    kprintf("Starting scheduler with 1 proc (syscall test).\n");
+    sched_start();
+
+    panic("kernel_stage2: sched_start() returned");
 }
