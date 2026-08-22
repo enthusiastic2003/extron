@@ -12,8 +12,21 @@
 // and restoring lr like any other register, then a plain `ret`, is
 // already correct.
 //
-// struct cpu_context field offsets (kernel/arch/aarch64/include/arch/proc.h):
-//   x19..x28 = 0x00..0x48 (8 regs)   fp = 0x50   lr = 0x58   sp = 0x60
+// struct cpu_context field offsets (kernel/include/kernel/proc/proc.h):
+//   x19..x28 = 0x00..0x48   fp = 0x50   lr = 0x58   sp = 0x60
+//   fpcr = 0x68   fpsr = 0x70   (0x78 = pad)   v0..v31 = 0x80..0x27F
+//
+// The FP/SIMD half saves ALL of v0-v31, not just AAPCS64's callee-saved
+// d8-d15. This isn't preserving a calling convention across a call —
+// it's preserving a user process's live FP state across preemption,
+// and preemption lands on an arbitrary instruction rather than a call
+// boundary, so every register is potentially live.
+//
+// Sound only because the kernel is built -mgeneral-regs-only: exception
+// entry never saves v0-v31, so those registers still hold the outgoing
+// process's own values right up to this point. If kernel code could
+// touch FP, this would be saving the kernel's scratch instead and the
+// save would have to move up into SAVE_CONTEXT.
 
 .section ".text"
 .global context_switch
@@ -27,6 +40,27 @@ context_switch:
     mov x9, sp
     str x9,       [x0, #0x60]
 
+    mrs x10, fpcr
+    mrs x11, fpsr
+    stp x10, x11, [x0, #0x68]
+
+    stp q0,  q1,  [x0, #0x080]
+    stp q2,  q3,  [x0, #0x0A0]
+    stp q4,  q5,  [x0, #0x0C0]
+    stp q6,  q7,  [x0, #0x0E0]
+    stp q8,  q9,  [x0, #0x100]
+    stp q10, q11, [x0, #0x120]
+    stp q12, q13, [x0, #0x140]
+    stp q14, q15, [x0, #0x160]
+    stp q16, q17, [x0, #0x180]
+    stp q18, q19, [x0, #0x1A0]
+    stp q20, q21, [x0, #0x1C0]
+    stp q22, q23, [x0, #0x1E0]
+    stp q24, q25, [x0, #0x200]
+    stp q26, q27, [x0, #0x220]
+    stp q28, q29, [x0, #0x240]
+    stp q30, q31, [x0, #0x260]
+
     ldp x19, x20, [x1, #0x00]
     ldp x21, x22, [x1, #0x10]
     ldp x23, x24, [x1, #0x20]
@@ -35,5 +69,26 @@ context_switch:
     ldp x29, x30, [x1, #0x50]
     ldr x9,       [x1, #0x60]
     mov sp, x9
+
+    ldp x10, x11, [x1, #0x68]
+    msr fpcr, x10
+    msr fpsr, x11
+
+    ldp q0,  q1,  [x1, #0x080]
+    ldp q2,  q3,  [x1, #0x0A0]
+    ldp q4,  q5,  [x1, #0x0C0]
+    ldp q6,  q7,  [x1, #0x0E0]
+    ldp q8,  q9,  [x1, #0x100]
+    ldp q10, q11, [x1, #0x120]
+    ldp q12, q13, [x1, #0x140]
+    ldp q14, q15, [x1, #0x160]
+    ldp q16, q17, [x1, #0x180]
+    ldp q18, q19, [x1, #0x1A0]
+    ldp q20, q21, [x1, #0x1C0]
+    ldp q22, q23, [x1, #0x1E0]
+    ldp q24, q25, [x1, #0x200]
+    ldp q26, q27, [x1, #0x220]
+    ldp q28, q29, [x1, #0x240]
+    ldp q30, q31, [x1, #0x260]
 
     ret

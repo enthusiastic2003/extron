@@ -220,14 +220,23 @@ void kernel_stage2(uint64_t mb2_addr) {
      * user_buffer_ok()). Prints three PASS/FAIL lines, then exits, so
      * the interactive test carries on afterwards uninterrupted. */
     struct proc *badptr = proc_create_from_binary("badptr_test.elf");
-    if (!reader || !heartbeat || !badptr) {
+    /* Pair, not a single proc: each loads a different pattern into the
+     * same FP registers and yields repeatedly, so a context_switch that
+     * dropped FP state leaves each holding the other's values. One proc
+     * alone would pass even with no FP save at all, since the kernel is
+     * built -mgeneral-regs-only and never touches those registers. */
+    struct proc *fp_a = proc_create_from_binary("fp_test_a.elf");
+    struct proc *fp_b = proc_create_from_binary("fp_test_b.elf");
+    if (!reader || !heartbeat || !badptr || !fp_a || !fp_b) {
         panic("kernel_stage2: failed to create SYS_READ test procs");
     }
     sched_policy_add(reader);
     sched_policy_add(heartbeat);
     sched_policy_add(badptr);
+    sched_policy_add(fp_a);
+    sched_policy_add(fp_b);
 
-    kprintf("Starting scheduler with 3 procs (SYS_READ + badptr tests) — type on the console.\n");
+    kprintf("Starting scheduler with 5 procs (SYS_READ + badptr + FP tests) — type on the console.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

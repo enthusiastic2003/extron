@@ -39,12 +39,36 @@ enum proc_state {
  *   x19..x28 = 0x00..0x48 (8 regs, 8 bytes each)
  *   fp = 0x50   lr = 0x58   sp = 0x60
  */
+/*
+ * Saved by context_switch (kernel/arch/aarch64/proc/switch.S). Field
+ * order and offsets are load-bearing — that file hardcodes them.
+ *
+ * The FP/SIMD half is not the usual AAPCS64 callee-saved subset
+ * (d8-d15). It is ALL of v0-v31, plus FPCR/FPSR, because what's being
+ * preserved here isn't a compiler calling convention — it's a user
+ * process's live floating-point state, and a process gets preempted at
+ * an arbitrary instruction, not at a call boundary.
+ *
+ * That works because the kernel is built -mgeneral-regs-only (see the
+ * Makefile's comment), so it provably never touches FP. Exception entry
+ * doesn't save v0-v31 and doesn't need to: the registers still hold the
+ * interrupted process's own values all the way down to here, which is
+ * exactly what makes this the right place to swap them.
+ *
+ * Aligned to 16 so the q-register stp/ldp pairs land on aligned
+ * addresses. Not strictly required — boot.S leaves SCTLR_EL1.A clear,
+ * so unaligned SIMD accesses are permitted — but free to get right.
+ */
 struct cpu_context {
-    uint64_t x19, x20, x21, x22, x23, x24, x25, x26, x27, x28;
-    uint64_t fp;
-    uint64_t lr;
-    uint64_t sp;
-};
+    uint64_t x19, x20, x21, x22, x23, x24, x25, x26, x27, x28; /* 0x00 */
+    uint64_t fp;                                               /* 0x50 */
+    uint64_t lr;                                               /* 0x58 */
+    uint64_t sp;                                               /* 0x60 */
+    uint64_t fpcr;                                             /* 0x68 */
+    uint64_t fpsr;                                             /* 0x70 */
+    uint64_t _pad;                        /* 0x78: realign v[] to 16 */
+    uint64_t v[64];                       /* 0x80: v0-v31, 128 bits each */
+} __attribute__((aligned(16)));
 
 struct proc {
     uint64_t            pid;

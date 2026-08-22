@@ -8,6 +8,16 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* kernel/arch/aarch64/proc/switch.S hardcodes these offsets. A silent
+ * mismatch would corrupt FP state across every context switch in a way
+ * that only shows up as wrong pixels or wrong arithmetic much later, so
+ * fail the build instead. */
+_Static_assert(offsetof(struct cpu_context, sp)   == 0x60, "switch.S: sp offset");
+_Static_assert(offsetof(struct cpu_context, fpcr) == 0x68, "switch.S: fpcr offset");
+_Static_assert(offsetof(struct cpu_context, fpsr) == 0x70, "switch.S: fpsr offset");
+_Static_assert(offsetof(struct cpu_context, v)    == 0x80, "switch.S: v[] offset");
+_Static_assert(sizeof(((struct cpu_context *)0)->v) == 32 * 16, "switch.S: v[] covers v0-v31");
+
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
                 virt_addr_t user_sp, phys_addr_t ttbr0) {
     p->pid   = pid;
