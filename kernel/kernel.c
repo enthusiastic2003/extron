@@ -266,11 +266,14 @@ void kernel_stage2(uint64_t mb2_addr) {
      * still showing the system is alive and responsive — and with
      * nothing else runnable it parks the CPU in schedule()'s wfi idle
      * path (e6acf26) rather than spinning. */
-    struct proc *reader = proc_create_from_binary("read_echo_test.elf", 0);
-    if (!reader) {
-        panic("kernel_stage2: failed to create the console reader proc");
-    }
-    sched_policy_add(reader);
+    /* The console echo proc is parked now that DOOM is the payload: it
+     * reads the same keystrokes DOOM does (the ISR feeds both the
+     * blocking kbuf and the shared ring) and echoes them to serial,
+     * which turns every movement key into console noise.
+     *
+     * struct proc *reader = proc_create_from_binary("read_echo_test.elf", 0);
+     * sched_policy_add(reader);
+     */
 
     /* Userspace framebuffer smoke test — proven, parked alongside the
      * rest now that DOOM exercises the same path for real.

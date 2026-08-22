@@ -171,8 +171,20 @@ static void kernel_aarch64_stage2(uint64_t mb2_addr) {
     gic_init();
     kprintf("aarch64: GIC-400 initialized (GICD 0xFF841000, GICC 0xFF842000).\n");
 
-    timer_init(20);
-    kprintf("aarch64: generic timer armed at 20 Hz, IRQ %d enabled.\n", GIC_PPI_NS_PHYS_TIMER);
+    /* 1kHz, so a sleep can resolve to a millisecond.
+     *
+     * 20Hz was fine while the only sleeper was a test payload asking for
+     * whole seconds, but it makes any short sleep a 50ms sleep —
+     * sys_sleep() rounds a sub-tick request up to one tick, so
+     * DG_SleepMs(1) cost 50x what it asked for. DOOM's loop calls that
+     * constantly while waiting for its next 28.6ms tic, so it overshot
+     * every deadline and the whole game felt heavy.
+     *
+     * The cost is 1000 interrupts a second instead of 20; each one
+     * ticks a counter, scans the process table for expired sleepers and
+     * calls schedule(), all of which is trivial on a 1.5GHz A72. */
+    timer_init(1000);
+    kprintf("aarch64: generic timer armed at %u Hz, IRQ %d enabled.\n", timer_ticks_per_second(), GIC_PPI_NS_PHYS_TIMER);
 
     exceptions_enable_irqs();
     kprintf("aarch64: IRQs unmasked at the CPU.\n");

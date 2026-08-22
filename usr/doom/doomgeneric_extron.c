@@ -53,12 +53,25 @@ static unsigned key_write, key_read;
  * interval (typically ~30ms after an initial ~500ms delay) and below
  * anything a player would notice, which is a wide target.
  */
-#define KEY_HOLD_MS 220
-#define MAX_HELD    8
+/*
+ * Two thresholds, because a terminal's auto-repeat has two phases: a
+ * long initial delay (commonly ~500ms) and then a fast stream (~30ms).
+ *
+ * A single threshold cannot serve both. Set it short and a genuinely
+ * held key is released during the initial delay and re-pressed when the
+ * repeats start, which stutters. Set it long and every tap lingers.
+ * So the first byte for a key arms the long deadline, and the first
+ * repeat — proof the key is actually being held — switches it to the
+ * short one.
+ */
+#define KEY_INITIAL_HOLD_MS 600
+#define KEY_REPEAT_HOLD_MS  120
+#define MAX_HELD            8
 
 static struct {
     unsigned char key;
     uint32_t      last_ms;
+    int           repeating;   /* seen a second byte for this key */
 } held[MAX_HELD];
 
 static void queue_key(int pressed, unsigned char key) {
@@ -98,14 +111,18 @@ static unsigned char to_doom_key(int c) {
 static void note_press(unsigned char key, uint32_t now) {
     for (int i = 0; i < MAX_HELD; i++) {
         if (held[i].key == key) {
-            held[i].last_ms = now;   /* auto-repeat: still down */
+            /* A repeat: the key is genuinely down, so the short deadline
+             * applies from here on. */
+            held[i].last_ms   = now;
+            held[i].repeating = 1;
             return;
         }
     }
     for (int i = 0; i < MAX_HELD; i++) {
         if (!held[i].key) {
-            held[i].key = key;
-            held[i].last_ms = now;
+            held[i].key       = key;
+            held[i].last_ms   = now;
+            held[i].repeating = 0;
             queue_key(1, key);
             return;
         }
@@ -114,7 +131,9 @@ static void note_press(unsigned char key, uint32_t now) {
 
 static void expire_holds(uint32_t now) {
     for (int i = 0; i < MAX_HELD; i++) {
-        if (held[i].key && (now - held[i].last_ms) > KEY_HOLD_MS) {
+        uint32_t limit = held[i].repeating ? KEY_REPEAT_HOLD_MS
+                                           : KEY_INITIAL_HOLD_MS;
+        if (held[i].key && (now - held[i].last_ms) > limit) {
             queue_key(0, held[i].key);
             held[i].key = 0;
         }
