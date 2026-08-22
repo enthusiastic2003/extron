@@ -22,6 +22,10 @@
 #define SYS_EXIT        7
 #define SYS_FORK        8
 #define SYS_EXECVE      9
+/* Beyond x86's shared set — no counterpart there to stay aligned with.
+ * Backs doomgeneric's DG_GetTicksMs; see sys_uptime_ms() in syscall.c
+ * for why this can't just report tick_count. */
+#define SYS_UPTIME_MS   10
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

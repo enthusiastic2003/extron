@@ -21,4 +21,8 @@ void timer_set_counter_watch(phys_addr_t a, phys_addr_t b);
 uint64_t timer_ticks(void);
 unsigned timer_ticks_per_second(void);
 
+/* Milliseconds since timer_init(), off CNTPCT_EL0 — real sub-microsecond
+ * resolution, NOT tick_count, which the 20Hz timer limits to 50ms. */
+uint64_t timer_uptime_ms(void);
+
 #endif

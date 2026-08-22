@@ -206,6 +206,21 @@ static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3) {
     return 0;
 }
 
+/* Monotonic milliseconds since boot. Takes no pointer, so nothing to
+ * validate — the result goes back in x0.
+ *
+ * Deliberately NOT derived from timer_ticks(): the timer runs at 20Hz,
+ * so that path can only resolve 50ms, and a game clock built on it would
+ * be quantised well below what it needs (DOOM's tic rate is 35/sec,
+ * ~28.6ms). timer_uptime_ms() reads CNTPCT_EL0 instead — see its comment
+ * in kernel/drivers/timer.c. */
+static uint64_t sys_uptime_ms(uint64_t a, uint64_t b, uint64_t c) {
+    (void)a;
+    (void)b;
+    (void)c;
+    return timer_uptime_ms();
+}
+
 static uint64_t sys_not_implemented(uint64_t a, uint64_t b, uint64_t c) {
     (void)a;
     (void)b;
@@ -225,6 +240,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_EXIT]       = sys_exit,
     [SYS_FORK]       = sys_not_implemented, /* needs VMA + process table */
     [SYS_EXECVE]     = sys_not_implemented, /* needs argv/envp-aware exec */
+    [SYS_UPTIME_MS]  = sys_uptime_ms,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

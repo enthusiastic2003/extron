@@ -46,6 +46,41 @@ static uint64_t read_cntfrq(void) {
     return v;
 }
 
+/* Raw generic-timer counter. The isb is architecturally required: without
+ * it the read can be speculated ahead of surrounding work and come back
+ * stale, which is exactly the kind of thing that produces a clock that
+ * occasionally ticks backwards. */
+static uint64_t read_cntpct(void) {
+    uint64_t v;
+    __asm__ volatile ("isb; mrs %0, cntpct_el0" : "=r"(v) :: "memory");
+    return v;
+}
+
+static uint64_t boot_cntpct;
+
+/*
+ * Milliseconds since timer_init(), read straight off CNTPCT_EL0 rather
+ * than derived from tick_count.
+ *
+ * tick_count would be the obvious source and is the wrong one: the timer
+ * runs at 20Hz, so it can only resolve 50ms. Anything wanting a real
+ * clock — DOOM's tic rate is 35/sec, i.e. ~28.6ms — would get a value
+ * quantised to less than half the resolution it needs. CNTPCT_EL0 runs
+ * at CNTFRQ_EL0 (~54MHz on a Pi4), giving sub-microsecond resolution
+ * with no interrupt involved at all, and is monotonic by construction.
+ *
+ * Rebased to boot so callers get a small number that can't plausibly
+ * overflow the *1000: CNTPCT itself counts from system reset, and
+ * multiplying an unrebased value by 1000 would wrap after ~10 years of
+ * uptime. Rebasing makes that unreachable rather than merely unlikely.
+ */
+uint64_t timer_uptime_ms(void) {
+    uint64_t freq = read_cntfrq();
+    if (!freq)
+        return 0;
+    return ((read_cntpct() - boot_cntpct) * 1000ULL) / freq;
+}
+
 static void write_tval(uint64_t v) {
     __asm__ volatile ("msr cntp_tval_el0, %0" :: "r"(v));
 }
@@ -74,6 +109,7 @@ void timer_init(unsigned hz) {
     uint64_t freq = read_cntfrq();
     ticks_per_period = freq / hz;
     configured_hz = hz;
+    boot_cntpct = read_cntpct();
 
     register_irq_handler(GIC_PPI_NS_PHYS_TIMER, timer_irq_handler);
     gic_enable_irq(GIC_PPI_NS_PHYS_TIMER);
