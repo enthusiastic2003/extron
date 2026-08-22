@@ -6,6 +6,8 @@
 #include <kernel/mm/paging.h>
 #include <kernel/drivers/timer.h>
 #include <kernel/drivers/keyboard.h>
+#include <kernel/fs/tar.h>
+#include <kernel/klibc/string.h>
 #include <stdbool.h>
 
 typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t);
@@ -221,6 +223,60 @@ static uint64_t sys_uptime_ms(uint64_t a, uint64_t b, uint64_t c) {
     return timer_uptime_ms();
 }
 
+/*
+ * Map an initrd file read-only into the caller and return a pointer to
+ * its first byte; *out_size receives the length.
+ *
+ * A view, not a copy. The initrd is already resident in RAM and already
+ * reachable through the kernel's HHDM, so this costs page-table entries
+ * and nothing else — which is the entire reason a multi-megabyte DOOM
+ * WAD can be opened without implementing fopen/fread/fseek first.
+ *
+ * Mapped without VM_WRITE: the initrd is shared by every process and
+ * is the kernel's own copy, so a writable mapping would let one process
+ * corrupt what everything else reads. Without VM_EXEC too, so
+ * arch_translate_vm_flags() marks it NX — data should never be
+ * executable, and a WAD is the archetypal attacker-controlled blob.
+ */
+static uint64_t sys_map_initrd(uint64_t name_addr, uint64_t name_len,
+                               uint64_t out_size_addr) {
+    struct proc *p = my_proc();
+
+    /* TAR_NAME_MAX-ish: tar's own name field is 100 bytes, so anything
+     * longer cannot name a real entry. Bounding here also keeps the
+     * copy below on a fixed-size stack buffer. */
+    char name[101];
+    if (name_len >= sizeof(name))
+        return 0;
+    if (!user_buffer_ok(p, name_addr, name_len) ||
+        !user_buffer_ok(p, out_size_addr, sizeof(uint64_t)))
+        return 0;
+
+    /* Copy in before use: the name is validated as a range, but reading
+     * it twice (once to check, once to use) is the shape TOCTOU bugs
+     * take, and tar_open() would otherwise hold a user pointer. */
+    memcpy(name, (const void *)name_addr, name_len);
+    name[name_len] = '\0';
+
+    struct tar_file f;
+    if (!tar_open(name, &f)) {
+        kprintf("[SYSCALL map_initrd] '%s' not found\n", name);
+        return 0;
+    }
+
+    /* tar_open() hands back an HHDM pointer (kernel/fs/tar.c sets
+     * tar_start = mod_start + NEW_HDDM), so the physical address is just
+     * that minus the offset. */
+    phys_addr_t phys = (phys_addr_t)((uint64_t)f.data - NEW_HDDM);
+
+    virt_addr_t va = vm_map_region(p->mm, phys, f.size, VM_READ | VM_USER);
+    if (!va)
+        return 0;
+
+    *(uint64_t *)out_size_addr = (uint64_t)f.size;
+    return (uint64_t)va;
+}
+
 static uint64_t sys_not_implemented(uint64_t a, uint64_t b, uint64_t c) {
     (void)a;
     (void)b;
@@ -241,6 +297,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_FORK]       = sys_not_implemented, /* needs VMA + process table */
     [SYS_EXECVE]     = sys_not_implemented, /* needs argv/envp-aware exec */
     [SYS_UPTIME_MS]  = sys_uptime_ms,
+    [SYS_MAP_INITRD] = sys_map_initrd,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

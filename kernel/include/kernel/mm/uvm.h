@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h> /* virt_addr_t */
 #include <kernel/sync/spinlock.h>
@@ -28,6 +29,12 @@
 struct vma {
     virt_addr_t base;   /* page-aligned */
     size_t      size;   /* page-aligned */
+    /* False when this region maps memory the process does NOT own —
+     * vm_map_region() views of the initrd, and later the framebuffer.
+     * Tearing such a region down must unmap it and stop there: handing
+     * initrd pages back to the PMM would put live, shared, still-mapped
+     * memory into the free pool to be handed out again. */
+    bool        owns_pages;
     struct vma  *next;  /* sorted ascending by base */
 };
 
@@ -54,5 +61,14 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags);
  * mismatched caller can't corrupt more or less than was really
  * allocated. No-op if no VMA starts at exactly `addr`. */
 void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size);
+
+/* Map EXISTING physical memory into the process at a free VA, rather
+ * than allocating fresh pages for it — a read-only window onto the
+ * initrd today, the framebuffer later. `phys` and `size` need not be
+ * page-aligned; the containing pages are mapped and the returned VA
+ * points at the same byte offset `phys` did. The pages are marked
+ * not-owned, so freeing the region unmaps without returning them to the
+ * PMM. Returns 0 if no gap is big enough or a mapping fails. */
+virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, int flags);
 
 #endif

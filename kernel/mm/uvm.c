@@ -3,6 +3,7 @@
 #include <kernel/mm/kheap.h>
 #include <arch/irq_spinlock.h>
 #include <kernel/klibc/string.h>
+#include <stdbool.h>
 
 /* Range managed by vm_allocate_region()/vm_free_region() — clear of the
  * fixed test VAs used elsewhere (ELF load at 0x400000, stack at
@@ -34,7 +35,10 @@ void vm_space_destroy(struct vm_space *mm) {
             phys_addr_t phys = virt_to_phys(mm->ttbr0, v->base + off);
             if (phys) {
                 unmap_page(mm->ttbr0, v->base + off);
-                pmm_free_page((void *)phys);
+                /* Only pages this process actually owns go back to the
+                 * PMM — see struct vma's owns_pages comment. */
+                if (v->owns_pages)
+                    pmm_free_page((void *)phys);
             }
         }
         kfree(v);
@@ -112,9 +116,10 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags) {
         irq_spin_unlock(&mm->lock);
         return 0;
     }
-    node->base = cursor;
-    node->size = size;
-    node->next = cur;
+    node->base       = cursor;
+    node->size       = size;
+    node->owns_pages = true;   /* freshly allocated here, ours to free */
+    node->next       = cur;
     if (prev)
         prev->next = node;
     else
@@ -151,7 +156,8 @@ void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size) {
         phys_addr_t phys = virt_to_phys(mm->ttbr0, cur->base + off);
         if (phys) {
             unmap_page(mm->ttbr0, cur->base + off);
-            pmm_free_page((void *)phys);
+            if (cur->owns_pages)
+                pmm_free_page((void *)phys);
         }
     }
 
@@ -162,4 +168,81 @@ void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size) {
 
     irq_spin_unlock(&mm->lock);
     kfree(cur);
+}
+
+/*
+ * Map memory that already exists somewhere physical into this process,
+ * instead of allocating fresh pages for it. Same first-fit VA scan as
+ * vm_allocate_region(); everything else differs.
+ *
+ * The point is to hand a process a window onto something the kernel
+ * already holds — a file sitting in the initrd, and later the
+ * framebuffer — without copying it. For a multi-megabyte DOOM WAD
+ * that's the difference between a view and a duplicate: the initrd is
+ * already resident, so mapping it costs page-table entries and nothing
+ * else, and it's the reason the stdio layer (fopen/fread/fseek) can be
+ * skipped entirely.
+ *
+ * phys need not be page-aligned. The containing pages are mapped and
+ * the return value carries the same intra-page offset, so the caller
+ * gets a pointer to the exact byte phys named.
+ */
+virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, int flags) {
+    if (!mm || size == 0)
+        return 0;
+
+    size_t      page_off  = (size_t)(phys & (PAGE_SIZE - 1));
+    phys_addr_t phys_base = phys - page_off;
+    size_t      span      = align_up(page_off + size, PAGE_SIZE);
+
+    irq_spin_lock(&mm->lock);
+
+    virt_addr_t cursor = mm->heap_start;
+    struct vma *prev = NULL;
+    struct vma *cur = mm->vmas;
+
+    while (cur) {
+        if (cur->base - cursor >= span)
+            break;
+        cursor = cur->base + cur->size;
+        prev = cur;
+        cur = cur->next;
+    }
+
+    if (mm->heap_end - cursor < span) {
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    uint64_t pflags = arch_translate_vm_flags(flags);
+    size_t mapped = 0;
+    for (; mapped < span; mapped += PAGE_SIZE) {
+        if (map_page(mm->ttbr0, cursor + mapped, phys_base + mapped, pflags) != 0)
+            break;
+    }
+
+    if (mapped < span) {
+        /* Unmap only — these pages were never ours to free. */
+        for (size_t off = 0; off < mapped; off += PAGE_SIZE)
+            unmap_page(mm->ttbr0, cursor + off);
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    struct vma *node = kmalloc(sizeof(struct vma));
+    if (!node) {
+        for (size_t off = 0; off < span; off += PAGE_SIZE)
+            unmap_page(mm->ttbr0, cursor + off);
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    node->base       = cursor;
+    node->size       = span;
+    node->owns_pages = false;  /* a view, not an allocation */
+    node->next       = cur;
+    if (prev) prev->next = node; else mm->vmas = node;
+
+    irq_spin_unlock(&mm->lock);
+    return cursor + page_off;
 }

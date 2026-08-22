@@ -25,6 +25,13 @@ uint64_t sys_uptime_ms(void) {
     return (uint64_t)__syscall0(SYS_UPTIME_MS);
 }
 
+const void *sys_map_initrd(const char *name, size_t *out_size) {
+    size_t n = 0;
+    while (name[n]) n++;
+    long r = __syscall3(SYS_MAP_INITRD, (long)name, (long)n, (long)out_size);
+    return r ? (const void *)r : NULL;
+}
+
 void *sys_anon_alloc(size_t size) {
     long r = __syscall1(SYS_ANON_ALLOC, size);
     return r ? (void *)r : NULL;

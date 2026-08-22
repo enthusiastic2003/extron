@@ -101,6 +101,17 @@ int main(void) {
     uint64_t dt = sys_uptime_ms() - t0;
     check("sleep+uptime agree", dt >= 150 && dt <= 400);
 
+    /* --- SYS_MAP_INITRD: a view of the initrd, not a copy --- */
+    size_t wsize = 0;
+    const char *w = sys_map_initrd("hello.txt", &wsize);
+    check("map_initrd returns data", w != NULL && wsize == 22);
+    check("map_initrd contents", w && !memcmp(w, "Hello from the initrd!", 22));
+
+    /* Non-existent name must fail cleanly rather than mapping something
+     * arbitrary — the failure mode that would matter most for a WAD. */
+    size_t nsize = 12345;
+    check("map_initrd rejects missing", sys_map_initrd("nope.wad", &nsize) == NULL);
+
     printf("LIBC: %d failure(s)\n", failures);
     return failures;
 }

@@ -19,6 +19,7 @@
 #define SYS_FORK        8
 #define SYS_EXECVE      9
 #define SYS_UPTIME_MS   10
+#define SYS_MAP_INITRD  11
 
 /* x8 = number, x0-x2 = args, result in x0 — the AAPCS64/Linux
  * convention the kernel's syscall.h documents. "memory" clobber so the
@@ -45,6 +46,11 @@ void     sys_exit(int status) __attribute__((noreturn));
 long     sys_sleep(long seconds, long nanos);
 uint64_t sys_uptime_ms(void);
 void    *sys_anon_alloc(size_t size);
+/* Map an initrd file read-only into this process and return a pointer to
+ * its first byte, or NULL. *out_size receives the file's length. The
+ * mapping is a VIEW of memory the kernel already holds — no copy — which
+ * is what lets a multi-megabyte WAD be opened without a stdio layer. */
+const void *sys_map_initrd(const char *name, size_t *out_size);
 long     sys_anon_free(void *addr, size_t size);
 
 #endif
