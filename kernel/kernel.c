@@ -308,6 +308,19 @@ void kernel_stage2(uint64_t mb2_addr) {
     }
     sched_policy_add(fib);
 
+    /* Third proc, on the input path DOOM does NOT use: it blocks in
+     * SYS_READ (kbd_getc -> sleep(&kbuf)) while DOOM polls the mapped
+     * ring. The ISR feeds both, so the same keystroke moves the player
+     * and prints here — the two consumers are independent, not
+     * exclusive. This is also the only thing currently exercising the
+     * channel-based sleep/wake that hung the kernel earlier in this
+     * port. */
+    struct proc *keymon = proc_create_from_binary("key_monitor.elf", 0);
+    if (!keymon) {
+        panic("kernel_stage2: failed to create the key monitor proc");
+    }
+    sched_policy_add(keymon);
+
     kprintf("Starting scheduler — type on the console to echo.\n");
     sched_start();
 
