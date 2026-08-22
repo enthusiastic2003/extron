@@ -295,6 +295,19 @@ void kernel_stage2(uint64_t mb2_addr) {
     }
     sched_policy_add(doom);
 
+    /* Runs concurrently with DOOM, and is the actual demonstration that
+     * this is a multitasking system rather than a program loader: DOOM
+     * is CPU-bound and renders continuously, this one sleeps through
+     * almost its whole life and wakes on a timer, and neither knows the
+     * other exists. Its elapsed-time column is the measurement — if the
+     * scheduler starved it behind DOOM's render loop, or SYS_SLEEP
+     * drifted, the wall clock and the sleep count would separate. */
+    struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
+    if (!fib) {
+        panic("kernel_stage2: failed to create the fibonacci proc");
+    }
+    sched_policy_add(fib);
+
     kprintf("Starting scheduler — type on the console to echo.\n");
     sched_start();
 
