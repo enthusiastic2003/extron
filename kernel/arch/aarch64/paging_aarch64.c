@@ -114,6 +114,35 @@ static uint64_t hw_attrs_from_flags(uint64_t flags) {
     return attrs;
 }
 
+/* AArch64's I-cache and D-cache are NOT automatically coherent — unlike
+ * x86, where hardware snoops this transparently. Code loaded at runtime
+ * (parse_and_load_binary()'s memcpy, kernel/proc/elf_loader.c, shared
+ * with x86 and thus unaware this even needs doing) is written through
+ * the D-cache like any other data; without an explicit clean-D +
+ * invalidate-I sequence, the CPU can fetch stale or non-coherent bytes
+ * the first time it executes that page. boot.S already does this once
+ * for the firmware-loaded kernel image itself (see its DminLine-based
+ * clean_dcache_loop) — this is the same idea, applied per-page, for
+ * anything mapped executable afterward. Silent on QEMU's TCG (which
+ * doesn't model the hazard) — only surfaced booting on real hardware,
+ * as an EC=0x00 "Unknown reason" fault on the very first EL0
+ * instruction fetch of freshly-loaded ELF code. */
+static void sync_icache_dcache(uint64_t va, uint64_t size) {
+    uint64_t ctr;
+    __asm__ volatile ("mrs %0, ctr_el0" : "=r"(ctr));
+    uint64_t dline = 4ULL << ((ctr >> 16) & 0xF); /* CTR_EL0.DminLine */
+    uint64_t iline = 4ULL << (ctr & 0xF);         /* CTR_EL0.IminLine */
+
+    for (uint64_t a = va & ~(dline - 1); a < va + size; a += dline)
+        __asm__ volatile ("dc cvau, %0" :: "r"(a) : "memory");
+    __asm__ volatile ("dsb ish");
+
+    for (uint64_t a = va & ~(iline - 1); a < va + size; a += iline)
+        __asm__ volatile ("ic ivau, %0" :: "r"(a) : "memory");
+    __asm__ volatile ("dsb ish");
+    __asm__ volatile ("isb");
+}
+
 int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
     phys_addr_t l1 = get_next_table(pml4, PML4_IDX(virt));
     phys_addr_t l2 = get_next_table(l1, PDPT_IDX(virt));
@@ -131,6 +160,14 @@ int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
 
     vl3[PT_IDX(virt)] = (phys & PAGE_ADDR_MASK) | hw_attrs_from_flags(flags)
                        | PTE_TABLE_OR_PAGE | PTE_VALID;
+
+    /* Only actual executable Normal memory needs this — Device mappings
+     * (MMIO, PAGE_CACHE_DISABLE) don't participate in cache coherency
+     * the same way, and nothing should ever be fetching instructions
+     * from one anyway. */
+    if (!(flags & PAGE_NX) && !(flags & PAGE_CACHE_DISABLE))
+        sync_icache_dcache((uint64_t)phys_to_virt_hhdm(phys), PAGE_SIZE);
+
     return 0;
 }
 

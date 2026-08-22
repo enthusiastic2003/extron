@@ -22,6 +22,7 @@ C_SRC   := $(shell find kernel/arch/aarch64 -name "*.c") \
            kernel/kernel.c \
            kernel/mm/pmm.c \
            kernel/mm/vmm.c \
+           kernel/mm/kheap.c \
            kernel/console/console.c \
            kernel/panic.c \
            kernel/klibc/builtins.c \

@@ -1,6 +1,7 @@
 #include <arch/proc.h>
 #include <arch/sched.h>
 #include <kernel/mm/vmm.h>
+#include <kernel/mm/kheap.h>
 #include <kernel/panic.h>
 
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
@@ -12,7 +13,12 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->user_sp = user_sp;
     p->next  = NULL;
 
-    p->kernel_stack_base = vmm_alloc_pages(PROC_KERNEL_STACK_PAGES);
+    /* Through kmalloc (kernel/mm/kheap.c), not vmm_alloc_pages() directly
+     * — kheap.c is itself just a byte-granularity layer on top of the
+     * same vmm_alloc_pages()/vmm_free_pages() bitmap allocator, so this
+     * is still page-backed underneath, just going through the proper
+     * kernel allocator instead of reaching past it. */
+    p->kernel_stack_base = (virt_addr_t)kmalloc(PROC_KERNEL_STACK_PAGES * PAGE_SIZE);
     if (!p->kernel_stack_base)
         panic("aarch64 proc_init: kernel stack allocation failed");
     p->kernel_stack_top = p->kernel_stack_base + PROC_KERNEL_STACK_PAGES * PAGE_SIZE;
