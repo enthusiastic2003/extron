@@ -12,14 +12,6 @@
  * proc_init(), which this calls). One page for now; no argv/envp. */
 #define USER_STACK_VA 0x500000
 
-/* uart.c's serial_putc() (kernel/drivers/uart.c) talks to the UART by
- * raw physical address, with no HHDM involved — it only ever worked
- * because boot.S's ORIGINAL TTBR0 identity table covered it. The
- * instant a real, per-proc TTBR0 is loaded (kernel/proc/sched.c's
- * schedule()), every kprintf() while that proc is current goes
- * silently into the void unless its own table maps this page too. */
-#define UART_PHYS_PAGE (0xFE201000ULL)
-
 struct proc *proc_create_from_binary(const char *binary_path) {
     struct tar_file f;
     if (!tar_open(binary_path, &f)) {
@@ -41,8 +33,12 @@ struct proc *proc_create_from_binary(const char *binary_path) {
     }
     map_page(pml4, USER_STACK_VA, stack_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
 
-    uint64_t uart_page = UART_PHYS_PAGE & ~(PAGE_SIZE - 1);
-    map_page(pml4, uart_page, uart_page, PAGE_PRESENT | PAGE_WRITE | PAGE_CACHE_DISABLE);
+    /* No MMIO mapping here any more. The UART used to be identity-mapped
+     * into every process purely so kernel kprintf()s would survive a
+     * TTBR0 swap — uart.c now reaches it through the kernel's own
+     * high-half Device mapping (serial_remap_to_hhdm(), called by
+     * init_paging()), so a user table contains only what that process
+     * actually owns: its ELF segments and its stack. */
 
     struct proc *p = kmalloc(sizeof(struct proc));
     if (!p) {

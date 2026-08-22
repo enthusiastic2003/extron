@@ -89,11 +89,21 @@
 
 // Stack-free: writes one fixed byte to the UART using only registers,
 // for vectors that fire in a context where the current SP isn't known
-// to be valid. Reuses the raw physical UART address — still reachable
-// via TTBR0_EL1's identity mapping (boot.S), unconditionally, regardless
-// of which half of the address space is otherwise in use.
+// to be valid.
+//
+// Uses the UART's high-half alias (NEW_HDDM + 0xFE201000), not the raw
+// physical address. The raw address is a LOW address, so it resolves
+// through TTBR0 — whatever process table is loaded — which meant this
+// path only ever worked because exec.c identity-mapped the page into
+// every process. That mapping is gone; the high alias lives in the
+// kernel's own TTBR1 table and is therefore reachable under any
+// process, which is exactly what a last-ditch panic path needs.
+//
+// Safe unconditionally: boot.S never sets VBAR_EL1, so this table only
+// becomes live in exceptions_init(), which runs after init_paging()
+// has both created the mapping and made TTBR1 current.
 .macro SPURIOUS_VECTOR marker
-    ldr  x9, =0xFE201000
+    ldr  x9, =0xFFFF8000FE201000
 1:  ldr  w10, [x9, #0x18]
     tst  w10, #0x20
     b.ne 1b

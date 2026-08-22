@@ -3,6 +3,7 @@
 #include <kernel/mm/paging.h>
 #include <kernel/console.h>
 #include <kernel/panic.h>
+#include <kernel/drivers/serial.h> /* SERIAL_MMIO_*, serial_remap_to_hhdm */
 #include <boot/multiboot2.h>
 
 /*
@@ -340,6 +341,28 @@ void init_paging(uint64_t mb2_addr) {
     load_cr3(kernel_l0);
 
     g_hhdm_offset = NEW_HDDM;
+
+    /* GPIO + PL011 UART0, as Device memory, in the kernel's own table.
+     * Deliberately not part of the HHDM loop above: that walks only
+     * MULTIBOOT_MEMORY_AVAILABLE regions (real RAM, and these
+     * peripherals sit ~2GB past the top of it), and it maps them Normal
+     * cacheable. Cacheable is exactly wrong for device registers — the
+     * CPU would be free to cache, merge, reorder and speculatively
+     * re-read accesses whose side effects are the whole point, so a
+     * write to the TX register could sit in a cache line and never
+     * reach the chip. MMIO always needs its own PAGE_CACHE_DISABLE
+     * mapping; same convention gic.c's mmio_map_device() uses.
+     *
+     * Must come after g_hhdm_offset is set: kmap() walks page tables
+     * through phys_to_virt_hhdm(), which is only meaningful once the
+     * offset is live and the HHDM covers the RAM those tables sit in. */
+    for (uint64_t off = 0; off < SERIAL_MMIO_SIZE; off += PAGE_SIZE) {
+        if (kmap(NEW_HDDM + SERIAL_MMIO_PHYS + off, SERIAL_MMIO_PHYS + off,
+                 PAGE_PRESENT | PAGE_WRITE | PAGE_NX | PAGE_CACHE_DISABLE) != 0)
+            panic("aarch64 paging: UART/GPIO device mapping failed at %p",
+                  (void *)(SERIAL_MMIO_PHYS + off));
+    }
+    serial_remap_to_hhdm();
 
     set_virtual_pmm_bitmap_location(get_virtual_pmm_bitmap_location() + NEW_HDDM);
 

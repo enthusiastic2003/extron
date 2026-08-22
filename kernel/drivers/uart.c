@@ -1,10 +1,24 @@
 #include <kernel/drivers/serial.h>
+#include <kernel/mm/vmm.h> /* NEW_HDDM */
+#include <stdint.h>
 
 // BCM2711 (RPi4) peripheral base + PL011 UART0 / GPIO offsets.
 // Matches both real hardware and QEMU's raspi4b machine.
-#define PERIPHERAL_BASE 0xFE000000UL
-#define GPIO_BASE       (PERIPHERAL_BASE + 0x200000)
-#define UART0_BASE      (PERIPHERAL_BASE + 0x201000)
+#define PERIPHERAL_PHYS 0xFE000000ULL
+#define GPIO_OFFSET     0x200000ULL
+#define UART0_OFFSET    0x201000ULL
+
+/* A runtime value rather than a #define, because this driver has to
+ * work on both sides of paging bring-up: init_serial() is the very
+ * first thing kernel_stage1() calls, long before init_paging() exists,
+ * so the only way to reach the UART then is the raw physical address
+ * through boot.S's identity table. serial_remap_to_hhdm() switches it
+ * over once the kernel's own table has a real mapping — see that
+ * function's comment for why that switch matters. */
+static uint64_t periph_base = PERIPHERAL_PHYS;
+
+#define GPIO_BASE       (periph_base + GPIO_OFFSET)
+#define UART0_BASE      (periph_base + UART0_OFFSET)
 
 #define GPFSEL1         (GPIO_BASE + 0x04)
 #define GPIO_PUP_PDN0   (GPIO_BASE + 0xE4)
@@ -65,6 +79,30 @@ void init_serial(void) {
 
     // Enable UART, TX, RX.
     mmio_write(UART0_CR, (1u << 0) | (1u << 8) | (1u << 9));
+}
+
+/* Move every register access from the raw physical address to the
+ * kernel's own high-half Device mapping (NEW_HDDM + phys, established
+ * by init_paging()).
+ *
+ * Not cosmetic. On AArch64 the CPU picks a translation table by
+ * ADDRESS, not by privilege level: low addresses resolve through
+ * TTBR0, high through TTBR1, and both are live at once. So kernel code
+ * touching a low address like 0xFE201000 walks whatever *process*
+ * table happens to be loaded — being at EL1 doesn't change that. That
+ * is the entire reason proc_create_from_binary() (kernel/proc/exec.c)
+ * used to identity-map this page into every single process: without
+ * it, every kprintf() went silently into the void the moment a real
+ * TTBR0 was installed.
+ *
+ * Reaching the UART through the high alias instead makes it
+ * TTBR1-resident, so it's available under any process — or none — and
+ * user page tables stop carrying an MMIO mapping they have no business
+ * holding. Same physical registers either way; only the path the MMU
+ * takes to them changes. Matches what gic.c already does for the
+ * GIC-400, which is why that driver never needed the same crutch. */
+void serial_remap_to_hhdm(void) {
+    periph_base = NEW_HDDM + PERIPHERAL_PHYS;
 }
 
 void serial_putc(char c) {
