@@ -14,6 +14,17 @@
 
 static struct proc *current_proc = NULL;
 
+/* Set only while sched_idle_wait() below is parked in its wfi loop.
+ * Interrupts are deliberately unmasked there, so the timer IRQ's own
+ * schedule() (timer_irq_handler, kernel/drivers/timer.c) can land
+ * re-entrantly on this same kernel stack — it must NOT context-switch
+ * out from under the idle loop, or the idling proc's saved context
+ * would point back into the loop instead of into the sleep() call it
+ * actually needs to resume, and it would never return to userland. The
+ * IRQ still does the part that matters (proc_wakeup_expired() making
+ * things runnable); the idle loop picks the result up itself. */
+static volatile int in_idle = 0;
+
 struct proc *my_proc(void) {
     return current_proc;
 }
@@ -78,21 +89,82 @@ static void install_and_switch(struct proc *old, struct proc *next) {
 }
 
 /*
+ * Park until something becomes runnable, then return it. Only reached
+ * when the caller has already marked itself non-runnable and the run
+ * queue is empty — i.e. the whole system is genuinely idle and the only
+ * thing that can change that is an interrupt (timer expiry via
+ * proc_wakeup_expired(), or a keystroke via kbd_irq_handler()'s
+ * wakeup()).
+ *
+ * Runs on the idling proc's own kernel stack rather than a dedicated
+ * scheduler stack (xv6-style per-CPU scheduler context would be the
+ * bigger, cleaner refactor; this is the minimal correct version).
+ * IRQs must be unmasked across the wfi or the handler that ends the
+ * idle can never run — every caller reaches schedule() from an
+ * exception handler with DAIF masked, so the original mask is saved
+ * and restored around each wait rather than assumed.
+ */
+static struct proc *sched_idle_wait(void) {
+    uint64_t daif;
+    __asm__ volatile ("mrs %0, daif" : "=r"(daif));
+
+    in_idle = 1;
+    for (;;) {
+        __asm__ volatile ("msr daifclr, #3");
+        __asm__ volatile ("wfi");
+        __asm__ volatile ("msr daif, %0" :: "r"(daif) : "memory");
+
+        struct proc *next = sched_policy_pick_next();
+        if (next) {
+            in_idle = 0;
+            return next;
+        }
+    }
+}
+
+/*
  * schedule — pick the next runnable proc and context-switch to it.
- * Called from the timer IRQ path (kernel/arch/aarch64/timer.c) —
- * unconditional round robin, one tick = one timeslice.
+ * Called from the timer IRQ path (kernel/drivers/timer.c) — unconditional
+ * round robin, one tick = one timeslice — and from procs voluntarily
+ * giving up the CPU (sys_sleep, sleep(), sys_exit).
  */
 void schedule(void) {
     struct proc *old = current_proc;
     if (!old)
         return;
 
+    /* Re-entered from an IRQ that fired during sched_idle_wait()'s wfi.
+     * The handler's own bookkeeping has already run; leave the switching
+     * decision to the idle loop that's still sitting below us on this
+     * stack. See in_idle's comment. */
+    if (in_idle)
+        return;
+
     struct proc *next = sched_policy_pick_next();
+
     if (!next) {
-        /* Nothing else runnable right now — resume `old` as-is. No idle
-         * loop: this milestone always keeps >=1 other proc runnable, so
-         * an empty pick only happens transiently (e.g. before both test
-         * procs are added at boot). */
+        if (old->state == PROC_RUNNING) {
+            /* Transient gap — nothing else is queued, but `old` is still
+             * perfectly resumable, so just keep running it. This is the
+             * only case where returning without switching is correct. */
+            return;
+        }
+        /* `old` has already marked itself SLEEPING/ZOMBIE, so returning
+         * would resume a proc that believes it isn't running — which is
+         * exactly what made SYS_SLEEP a no-op whenever the only other
+         * proc was blocked in SYS_READ (heartbeat spun at full speed
+         * while flagged PROC_SLEEPING, and proc_wakeup_expired() then
+         * kept re-queuing it, producing duplicate run-queue entries and
+         * self-switches). Wait for a real wakeup instead. */
+        next = sched_idle_wait();
+    }
+
+    if (next == old) {
+        /* We idled and `old` itself is what became runnable again (its
+         * own sleep expired, or its channel was signalled). We ARE old:
+         * no context switch, no address-space swap — just drop the
+         * SLEEPING flag and let the caller unwind back to userland. */
+        old->state = PROC_RUNNING;
         return;
     }
 

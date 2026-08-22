@@ -178,6 +178,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     kprintf("Starting scheduler with 2 procs.\n");
     sched_start();
     */
+    proc_table_init();
     sched_init();
 
     kheap_test();
@@ -196,16 +197,30 @@ void kernel_stage2(uint64_t mb2_addr) {
     */
     init_kbd();
 
-    /* Syscall test: one real process, one real svc round trip. Proves
-     * the mechanism end to end — see kernel/proc/syscall.c and
-     * kernel/arch/aarch64/exceptions.c's SVC dispatch. */
-    struct proc *p = proc_create_from_binary("syscall_test.elf");
-    if (!p) {
-        panic("kernel_stage2: failed to create syscall test proc");
+    /* Phase 2 verification, sleep/wake + VMA allocator (already proven
+     * on both QEMU and real hardware — see git history for that run):
+     * struct proc *sleeper = proc_create_from_binary("sleep_test.elf");
+     * struct proc *spinner = proc_create_from_binary("spin_write_test.elf");
+     * struct proc *allocator = proc_create_from_binary("anon_alloc_test.elf");
+     * sched_policy_add(sleeper); sched_policy_add(spinner); sched_policy_add(allocator);
+     *
+     * Now proving the last item from that same plan's verification
+     * list: SYS_READ genuinely wakes a blocked reader on a real
+     * keystroke rather than busy-spinning. read_echo_test.elf blocks
+     * on SYS_READ and echoes each byte typed; heartbeat_test.elf
+     * prints "." every ~200ms via SYS_SLEEP the whole time — if the
+     * dots keep coming while nothing's been typed, and each keystroke
+     * gets echoed promptly, that's kbd_getc()'s sleep()/wakeup() round
+     * trip proven live, not just inferred. */
+    struct proc *reader = proc_create_from_binary("read_echo_test.elf");
+    struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf");
+    if (!reader || !heartbeat) {
+        panic("kernel_stage2: failed to create SYS_READ test procs");
     }
-    sched_policy_add(p);
+    sched_policy_add(reader);
+    sched_policy_add(heartbeat);
 
-    kprintf("Starting scheduler with 1 proc (syscall test).\n");
+    kprintf("Starting scheduler with 2 procs (SYS_READ test) — type on the console.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");
