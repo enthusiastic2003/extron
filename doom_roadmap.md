@@ -1,4 +1,21 @@
-# DOOM Roadmap
+# DOOM Roadmap — DONE
+
+DOOM runs on real hardware, concurrently with a second process, on one core.
+`captures/doom_hardware.png` is the display; the serial log alongside it shows a
+Fibonacci ticker waking on a timer once a second with `t == n` for 44 consecutive
+seconds — no measurable drift while DOOM saturates the CPU.
+
+That pairing is the actual milestone. DOOM alone shows the kernel can load and
+run a demanding program, which a good program loader could also do. Two
+processes with opposite CPU profiles making independent progress needs
+preemption, sleep/wake, per-process address spaces, FP and SP_EL0 context
+switching, the VMA allocator and an accurate timer — all at once, and none of
+them aware of each other.
+
+The rest of this file is the plan as it was written and what each step actually
+cost. Phase 3 (`SYS_FORK` / `SYS_EXECVE` / process reaping) is next.
+
+---
 
 A deliberate detour: get DOOM running on the aarch64/RPi4 port before continuing
 with Phase 3 (`SYS_FORK` / `SYS_EXECVE` / process reaping).
@@ -214,6 +231,26 @@ hypothetical one. `sys_tcb_set` already exists for its TLS, so the intent stands
 just not on the critical path. Nothing here is wasted: a real libc port reuses the
 same syscall layer underneath.
 
+## 4b. What DOOM found that the tests did not
+
+The premise of this detour was that a real program exercises the system in ways
+test payloads written by the same author do not. It did, immediately:
+
+- **`vsnprintf` had no precision support.** DOOM builds HUD font lump names with
+  `"STCFN%.3d"` and died looking up a lump literally called `STCFN%.3d`. Twenty-one
+  hand-written libc checks all passed, because they shared the blind spots of the
+  person who wrote the library.
+- **`crt0` never set `argc`/`argv`.** `main()` got whatever was in x0/x1 —
+  harmless until something read them.
+- **The 20Hz timer made every short sleep a 50ms sleep.** `sys_sleep()` rounds a
+  sub-tick request up to one tick, so `DG_SleepMs(1)` overshot 50x. DOOM's tic is
+  28.6ms, so it missed every deadline it had and the game felt heavy. Now 1kHz.
+  No test had ever asked for a short sleep.
+- **"RGB" pixel order meant the opposite of what software wants.** Byte 0 = red
+  is `0xAABBGGRR`; DOOM (like most things) composes `0xAARRGGBB`. First run came
+  out entirely blue. Requesting BGR *byte* order gives the layout software
+  expects.
+
 ## 5. doomgeneric Hook Status
 
 | Hook | Status | Needs |
@@ -221,8 +258,8 @@ same syscall layer underneath.
 | `DG_SleepMs` | done | `SYS_SLEEP` |
 | `DG_GetKey` | done | `SYS_READ` |
 | `DG_GetTicksMs` | done | `SYS_UPTIME_MS` (6d8a159) |
-| `DG_DrawFrame` | blocked | section 3 — the only remaining work |
-| `DG_Init` | blocked | section 3 |
+| `DG_DrawFrame` | done | mapped framebuffer, no syscall in the frame loop |
+| `DG_Init` | done | framebuffer mapped at exec |
 
 `DG_GetTicksMs` could NOT be built on `timer_ticks()`: the timer runs at 20Hz,
 so it resolves only 50ms, and DOOM's tic rate is ~28.6ms. `SYS_UPTIME_MS` reads
