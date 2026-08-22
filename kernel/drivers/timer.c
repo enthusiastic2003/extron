@@ -1,4 +1,4 @@
-#include <arch/timer.h>
+#include <kernel/drivers/timer.h>
 #include <arch/gic.h>
 #include <arch/exceptions.h>
 #include <kernel/proc/sched.h>

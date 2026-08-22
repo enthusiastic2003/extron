@@ -7,7 +7,7 @@
 #include <kernel/mm/paging.h>
 #include <arch/exceptions.h>
 #include <arch/gic.h>
-#include <arch/timer.h>
+#include <kernel/drivers/timer.h>
 #include <arch/vma.h>
 #include <kernel/fs/tar.h>
 #include <kernel/proc/elf_loader.h>
