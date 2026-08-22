@@ -12,6 +12,14 @@
  * proc_init(), which this calls). One page for now; no argv/envp. */
 #define USER_STACK_VA 0x500000
 
+/* One page was enough while every payload was hand-written assembly with
+ * no call depth and no locals. C code blows through that immediately —
+ * a single printf frame with a format buffer can approach it — and there
+ * is no guard page, so overflow silently corrupts whatever sits below
+ * rather than faulting. 128KB is cheap per process and leaves room for
+ * the DOOM port's call depth. */
+#define USER_STACK_PAGES 32
+
 struct proc *proc_create_from_binary(const char *binary_path) {
     struct tar_file f;
     if (!tar_open(binary_path, &f)) {
@@ -26,12 +34,15 @@ struct proc *proc_create_from_binary(const char *binary_path) {
         return NULL;
     }
 
-    phys_addr_t stack_phys = (phys_addr_t)pmm_alloc_page();
-    if (!stack_phys) {
-        kprintf("[EXEC] out of memory allocating stack for %s\n", binary_path);
-        return NULL;
+    for (size_t i = 0; i < USER_STACK_PAGES; i++) {
+        phys_addr_t stack_phys = (phys_addr_t)pmm_alloc_page();
+        if (!stack_phys) {
+            kprintf("[EXEC] out of memory allocating stack for %s\n", binary_path);
+            return NULL;
+        }
+        map_page(pml4, USER_STACK_VA + i * PAGE_SIZE, stack_phys,
+                 PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
     }
-    map_page(pml4, USER_STACK_VA, stack_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
 
     /* No MMIO mapping here any more. The UART used to be identity-mapped
      * into every process purely so kernel kprintf()s would survive a
@@ -51,7 +62,7 @@ struct proc *proc_create_from_binary(const char *binary_path) {
      * in — proc_init() is what actually writes p->pid, so it must run
      * with the pid proc_table_add() hands back, not before. */
     uint64_t pid = proc_table_add(p);
-    proc_init(p, pid, entry, USER_STACK_VA + PAGE_SIZE, pml4);
+    proc_init(p, pid, entry, USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE, pml4);
 
     p->mm = vm_space_create(pml4);
     if (!p->mm) {

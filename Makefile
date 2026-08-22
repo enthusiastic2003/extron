@@ -38,7 +38,7 @@ S_SRC   := $(shell find kernel -name "*.S")
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
 S_OBJ   := $(patsubst kernel/%.S,$(BUILD)/kernel/%.o,$(S_SRC))
 OBJ     := $(C_OBJ) $(S_OBJ)
-DEPS    := $(C_OBJ:.o=.d) $(S_OBJ:.o=.d)
+DEPS    := $(C_OBJ:.o=.d) $(S_OBJ:.o=.d) $(USER_LIB_OBJ:.o=.d)
 
 KERNEL_ELF := $(BUILD)/kernel8.elf
 KERNEL_IMG := $(BUILD)/kernel8.img
@@ -56,8 +56,28 @@ USER_LDFLAGS = -ffreestanding -nostdlib -static -no-pie \
                -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none
 
 USER_ASM_SRC := $(wildcard usr/*.S)
+USER_C_SRC   := $(wildcard usr/*.c)
 USER_DATA    := $(wildcard usr/*.txt)
-INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC))
+
+# The userspace C library. Payloads written in C (usr/*.c) link crt0 plus
+# these; payloads written in assembly (usr/*.S) are freestanding and link
+# none of it, which is why they keep their own _start.
+#
+# liballoc.c is the KERNEL's allocator source compiled a second time —
+# not a copy. -Iusr/include shadows kernel/include/liballoc_config.h with
+# the userspace one, which renames kmalloc/kfree to malloc/free and
+# points the page hooks at SYS_ANON_ALLOC (usr/lib/malloc.c).
+USER_LIB_SRC := $(wildcard usr/lib/*.c) kernel/mm/liballoc.c
+USER_LIB_ASM := usr/lib/crt0.S
+USER_LIB_OBJ := $(patsubst %.c,$(BUILD)/usrlib/%.o,$(USER_LIB_SRC)) \
+                $(patsubst %.S,$(BUILD)/usrlib/%.o,$(USER_LIB_ASM))
+
+USER_CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
+               -mcpu=cortex-a72 -mno-outline-atomics -fno-builtin \
+               -MMD -MP -Iusr/include -g
+
+INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC)) \
+                $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC))
 INITRD_DATA  := $(patsubst usr/%,$(BUILD)/initrd/%,$(USER_DATA))
 INITRD       := initrd.tar
 
@@ -77,9 +97,21 @@ $(KERNEL_ELF): $(OBJ) kernel/arch/aarch64/linker.ld
 $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
+$(BUILD)/usrlib/%.o: %.c
+	mkdir -p $(dir $@)
+	$(USER_CC) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD)/usrlib/%.o: %.S
+	mkdir -p $(dir $@)
+	$(USER_CC) $(USER_CFLAGS) -c $< -o $@
+
 $(BUILD)/initrd/%.elf: usr/%.S
 	mkdir -p $(dir $@)
 	$(USER_CC) $(USER_LDFLAGS) $< -o $@
+
+$(BUILD)/initrd/%.elf: usr/%.c $(USER_LIB_OBJ)
+	mkdir -p $(dir $@)
+	$(USER_CC) $(USER_CFLAGS) $(USER_LDFLAGS) $< $(USER_LIB_OBJ) -o $@
 
 $(BUILD)/initrd/%: usr/%
 	mkdir -p $(dir $@)

@@ -232,7 +232,10 @@ void kernel_stage2(uint64_t mb2_addr) {
      * CNTPCT_EL0. Sleeping a known interval and measuring it with the
      * other source validates both. */
     struct proc *uptime = proc_create_from_binary("uptime_test.elf");
-    if (!reader || !heartbeat || !badptr || !fp_a || !fp_b || !uptime) {
+    /* First C payload: crt0 -> main -> libc -> syscalls -> exit, plus
+     * the shared liballoc running on user pages via SYS_ANON_ALLOC. */
+    struct proc *libc = proc_create_from_binary("libc_test.elf");
+    if (!reader || !heartbeat || !badptr || !fp_a || !fp_b || !uptime || !libc) {
         panic("kernel_stage2: failed to create SYS_READ test procs");
     }
     sched_policy_add(reader);
@@ -241,8 +244,9 @@ void kernel_stage2(uint64_t mb2_addr) {
     sched_policy_add(fp_a);
     sched_policy_add(fp_b);
     sched_policy_add(uptime);
+    sched_policy_add(libc);
 
-    kprintf("Starting scheduler with 6 procs (SYS_READ + badptr + FP + uptime tests) — type on the console.\n");
+    kprintf("Starting scheduler with 7 procs (SYS_READ + badptr + FP + uptime + libc tests) — type on the console.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");
