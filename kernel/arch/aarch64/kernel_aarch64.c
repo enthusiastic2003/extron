@@ -10,9 +10,9 @@
 #include <kernel/drivers/timer.h>
 #include <arch/vma.h>
 #include <kernel/fs/tar.h>
-#include <kernel/proc/elf_loader.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
+#include <kernel/proc/exec.h>
 #include "fdt.h"
 #include "mb2_shim.h"
 
@@ -127,42 +127,20 @@ void arch_kernel_mid_init(void) {
     /* Nothing yet — no GDT equivalent on aarch64. */
 }
 
-/*
- * Loads user_test.elf into a fresh address space for the scheduler
- * bring-up test (see kernel_aarch64_stage2()): its own ELF mapping, its
- * own stack page, its own counter page (shared with the kernel via
- * phys_to_virt_hhdm() — the same access pattern already used for the
- * PMM bitmap and the initrd — so progress is observable without either
- * proc making a syscall), and the UART page (needed in EVERY proc's own
- * table now that TTBR0_EL1 actually gets swapped between them — see the
- * single-process version of this comment, earlier in git history, for
- * why serial_putc() breaks without it). Returns the counter page's
- * physical address for timer_set_counter_watch().
+/* Test-only: maps a fresh physical page into `p`'s own address space at
+ * a fixed VA, purely so its EL0 code (user_test.elf's counter-increment
+ * loop) can write progress somewhere the kernel can independently read
+ * back via phys_to_virt_hhdm() — the same access pattern already used
+ * for the PMM bitmap and the initrd — without either proc making a
+ * syscall. Not part of proc_create_from_binary() (kernel/proc/exec.c):
+ * no future real process needs a kernel-observable scratch page, this
+ * is specific to proving the scheduler round-robins correctly. Returns
+ * the page's physical address for timer_set_counter_watch().
  */
-static phys_addr_t setup_test_proc(struct proc *p, uint64_t pid, uint64_t uart_page) {
-    struct tar_file elf_file;
-    if (!tar_open("user_test.elf", &elf_file)) {
-        panic("aarch64: user_test.elf not found in initrd");
-    }
-
-    phys_addr_t pml4 = create_user_pml4();
-    virt_addr_t entry;
-    if (parse_and_load_binary((virt_addr_t)elf_file.data, elf_file.size, pml4, &entry) != 0) {
-        panic("aarch64: ELF load failed for PID %lu", (unsigned long)pid);
-    }
-
-    phys_addr_t stack_phys = (phys_addr_t)pmm_alloc_page();
-    uint64_t stack_va = 0x500000;
-    map_page(pml4, stack_va, stack_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
-
+static phys_addr_t map_test_counter_page(struct proc *p) {
     phys_addr_t counter_phys = (phys_addr_t)pmm_alloc_page();
     *(volatile uint64_t *)phys_to_virt_hhdm(counter_phys) = 0;
-    uint64_t counter_va = 0x600000;
-    map_page(pml4, counter_va, counter_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
-
-    map_page(pml4, uart_page, uart_page, PAGE_PRESENT | PAGE_WRITE | PAGE_CACHE_DISABLE);
-
-    proc_init(p, pid, entry, stack_va + PAGE_SIZE, pml4);
+    map_page(p->ttbr0, 0x600000, counter_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
     return counter_phys;
 }
 
@@ -217,21 +195,23 @@ static void kernel_aarch64_stage2(uint64_t mb2_addr) {
 
     /* Scheduler bring-up: two procs, same ELF (user_test.elf — a tight
      * counter-increment loop, no syscalls involved) loaded into two
-     * separate address spaces, round-robin preempted by the timer IRQ.
-     * Builds directly on the ELF-loader proof above: same
-     * parse_and_load_binary()/create_user_pml4()/map_page() calls, just
-     * done twice and handed to the scheduler instead of eret'd into
-     * directly. See kernel/proc/sched.c for the actual switch
+     * separate address spaces via the generic proc_create_from_binary()
+     * (kernel/proc/exec.c — mirrors x86's own function of the same
+     * name/role in kernel/proc/exec.c), round-robin preempted by the
+     * timer IRQ. See kernel/proc/sched.c for the actual switch
      * mechanism (schedule(), the forkret-style bootstrap trampoline). */
-    uint64_t uart_page = 0xFE201000ULL & ~(PAGE_SIZE - 1);
+    struct proc *proc_a = proc_create_from_binary("user_test.elf");
+    struct proc *proc_b = proc_create_from_binary("user_test.elf");
+    if (!proc_a || !proc_b) {
+        panic("aarch64: failed to create scheduler test procs");
+    }
 
-    static struct proc proc_a, proc_b;
-    phys_addr_t counter_phys_a = setup_test_proc(&proc_a, 0, uart_page);
-    phys_addr_t counter_phys_b = setup_test_proc(&proc_b, 1, uart_page);
+    phys_addr_t counter_phys_a = map_test_counter_page(proc_a);
+    phys_addr_t counter_phys_b = map_test_counter_page(proc_b);
 
     sched_init();
-    sched_policy_add(&proc_a);
-    sched_policy_add(&proc_b);
+    sched_policy_add(proc_a);
+    sched_policy_add(proc_b);
     timer_set_counter_watch(counter_phys_a, counter_phys_b);
 
     kprintf("aarch64: starting scheduler with 2 procs.\n");
