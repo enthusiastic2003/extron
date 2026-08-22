@@ -121,12 +121,19 @@ Two consequences:
   memory map doesn't positively declare usable is therefore unreachable to the
   allocator.
 
-  The one narrow gap is a region declared reserved *inside* an available range —
-  `/memreserve/` or a `/reserved-memory` node — since `mb2_shim_build()` flattens
-  every FDT region to MULTIBOOT_MEMORY_AVAILABLE (mb2_shim.c) and nothing parses
-  those. That is a different question from the carve-out, which is a hole and is
-  handled correctly. Whether this board's firmware DTB declares any such region
-  is unverified.
+  Nothing parses `/memreserve/` or `/reserved-memory`, which declare a different
+  thing from a hole: RAM that IS inside a usable range but is occupied right now
+  (the DTB, resident firmware, CMA, a simplefb handoff) and becomes free later —
+  a lifetime statement, where a hole is a permanent one. That gap is currently
+  theoretical here, because everything such an entry would protect is already
+  covered another way: the DTB is fully consumed before `init_pmm()` exists (its
+  regions and initrd bounds are copied into locals and `dtb_phys` is never read
+  again, so those pages are safe to reuse); the initrd is reserved from the
+  MODULE tag; the armstub at 0x0 falls inside the unconditional first-1MB
+  reservation; secondary cores are parked at `wfe` inside our own kernel text
+  (boot.S) rather than in firmware spin tables; and the mb2 shim buffer is
+  reserved explicitly. Worth revisiting only if one of those stops being true —
+  e.g. if anything ever needs the DTB after boot.
 
 Two known gotchas for the driver itself, worth not rediscovering: the mailbox
 returns a **bus** address (typically `0xC0000000 | phys`) that must be masked
