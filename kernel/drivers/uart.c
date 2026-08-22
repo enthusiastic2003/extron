@@ -69,3 +69,10 @@ void serial_putc(char c) {
     }
     mmio_write(UART0_DR, (unsigned int)c);
 }
+
+char serial_getc(void) {
+    while (mmio_read(UART0_FR) & (1u << 4)) {
+        // wait while RX FIFO empty (UART0_FR.RXFE)
+    }
+    return (char)(mmio_read(UART0_DR) & 0xFF);
+}

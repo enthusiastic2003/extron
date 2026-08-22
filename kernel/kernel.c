@@ -11,6 +11,7 @@
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
+#include <kernel/drivers/keyboard.h>
 
 /**
  * @brief Stage 1: Initialization Phase.
@@ -53,21 +54,25 @@ void kernel_stage1(uint64_t mb2_addr) {
     arch_kernel_jump_to_stage2(mb2_addr, new_stack_top); /* noreturn */
 }
 
-/* Test-only: maps a fresh physical page into `p`'s own address space at
- * a fixed VA, purely so its EL0 code (user_test.elf's counter-increment
- * loop) can write progress somewhere the kernel can independently read
- * back via phys_to_virt_hhdm() — the same access pattern already used
- * for the PMM bitmap and the initrd — without either proc making a
- * syscall. Not part of proc_create_from_binary() (kernel/proc/exec.c):
- * no future real process needs a kernel-observable scratch page, this
- * is specific to proving the scheduler round-robins correctly. Returns
- * the page's physical address for timer_set_counter_watch(). */
+/* Test-only, parked alongside its only caller in kernel_stage2() below
+ * (the commented-out 2-proc scheduler test) — maps a fresh physical
+ * page into `p`'s own address space at a fixed VA, purely so its EL0
+ * code (user_test.elf's counter-increment loop) can write progress
+ * somewhere the kernel can independently read back via
+ * phys_to_virt_hhdm() — the same access pattern already used for the
+ * PMM bitmap and the initrd — without either proc making a syscall.
+ * Not part of proc_create_from_binary() (kernel/proc/exec.c): no future
+ * real process needs a kernel-observable scratch page, this is
+ * specific to proving the scheduler round-robins correctly. Returns
+ * the page's physical address for timer_set_counter_watch().
+ *
 static phys_addr_t map_test_counter_page(struct proc *p) {
     phys_addr_t counter_phys = (phys_addr_t)pmm_alloc_page();
     *(volatile uint64_t *)phys_to_virt_hhdm(counter_phys) = 0;
     map_page(p->ttbr0, 0x600000, counter_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
     return counter_phys;
 }
+*/
 
 /**
  * @brief Stage 2: arch-neutral continuation.
@@ -97,12 +102,10 @@ void kernel_stage2(uint64_t mb2_addr) {
         kprintf("hello.txt not found in initrd.\n");
     }
 
-    /* Scheduler bring-up: two procs, same ELF (user_test.elf — a tight
-     * counter-increment loop, no syscalls involved) loaded into two
-     * separate address spaces via proc_create_from_binary()
-     * (kernel/proc/exec.c), round-robin preempted by the timer IRQ.
-     * See kernel/proc/sched.c for the actual switch mechanism
-     * (schedule(), the forkret-style bootstrap trampoline). */
+    /* Scheduler bring-up test — parked for the keyboard-echo test below,
+     * no processes created this time. See git history / uncomment to
+     * bring back the 2-proc round-robin proof.
+     *
     struct proc *proc_a = proc_create_from_binary("user_test.elf");
     struct proc *proc_b = proc_create_from_binary("user_test.elf");
     if (!proc_a || !proc_b) {
@@ -112,13 +115,23 @@ void kernel_stage2(uint64_t mb2_addr) {
     phys_addr_t counter_phys_a = map_test_counter_page(proc_a);
     phys_addr_t counter_phys_b = map_test_counter_page(proc_b);
 
-    sched_init();
     sched_policy_add(proc_a);
     sched_policy_add(proc_b);
     timer_set_counter_watch(counter_phys_a, counter_phys_b);
 
     kprintf("Starting scheduler with 2 procs.\n");
     sched_start();
+    */
+    sched_init();
 
-    panic("kernel_stage2: sched_start() returned");
+    /* Keyboard-echo test: read bytes from the serial console
+     * (kernel/drivers/keyboard.c — really just UART RX on this headless
+     * setup) and write them straight back out. Proves RX end-to-end
+     * before building anything that actually consumes typed input. */
+    init_kbd();
+    kprintf("Echo test: type on the serial console...\n");
+    for (;;) {
+        char c = kbd_getc();
+        serial_putc(c);
+    }
 }
