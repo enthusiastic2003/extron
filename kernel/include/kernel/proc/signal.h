@@ -49,6 +49,8 @@ int signal_action_set(struct proc *p, int signo,
 int signal_send(struct proc *target, int signo);
 int signal_send_thread(struct proc *target, struct thread *thread, int signo);
 int signal_send_group(uint64_t pgid, int signo);
+int signal_send_group_from(struct proc *sender, uint64_t pgid, int signo);
+bool signal_may_send(struct proc *sender, struct proc *target, int signo);
 void signal_notify_parent(struct proc *child, int code, int status);
 int signal_mask_update(struct thread *t, int how, const uint64_t *set,
                        uint64_t *old);

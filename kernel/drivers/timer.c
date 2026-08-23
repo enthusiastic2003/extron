@@ -5,6 +5,7 @@
 #include <kernel/proc/proc.h>
 #include <kernel/console.h>
 #include <kernel/mm/paging.h>
+#include <arch/irq_spinlock.h>
 
 /*
  * ARM generic timer, non-secure physical timer (CNTP_TVAL_EL0/
@@ -19,6 +20,8 @@
 static uint64_t ticks_per_period;
 static volatile uint64_t tick_count = 0;
 static unsigned configured_hz;
+static spinlock_t realtime_lock = SPINLOCK_INIT;
+static int64_t realtime_offset_ns;
 
 uint64_t timer_ticks(void) {
     return tick_count;
@@ -79,6 +82,28 @@ uint64_t timer_uptime_ms(void) {
     if (!freq)
         return 0;
     return ((read_cntpct() - boot_cntpct) * 1000ULL) / freq;
+}
+
+uint64_t timer_uptime_ns(void) {
+    uint64_t freq = read_cntfrq();
+    if (!freq)
+        return 0;
+    uint64_t elapsed = read_cntpct() - boot_cntpct;
+    return (elapsed / freq) * 1000000000ULL
+         + ((elapsed % freq) * 1000000000ULL) / freq;
+}
+
+int64_t timer_realtime_ns(void) {
+    irq_spin_lock(&realtime_lock);
+    int64_t offset = realtime_offset_ns;
+    irq_spin_unlock(&realtime_lock);
+    return (int64_t)timer_uptime_ns() + offset;
+}
+
+void timer_set_realtime_ns(int64_t value) {
+    irq_spin_lock(&realtime_lock);
+    realtime_offset_ns = value - (int64_t)timer_uptime_ns();
+    irq_spin_unlock(&realtime_lock);
 }
 
 static void write_tval(uint64_t v) {

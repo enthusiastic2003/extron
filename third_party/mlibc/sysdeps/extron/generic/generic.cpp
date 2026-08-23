@@ -73,6 +73,23 @@
 #define SYS_SYMLINK     47
 #define SYS_READLINK    48
 #define SYS_PATH_AT     49
+#define SYS_GETUID      50
+#define SYS_GETEUID     51
+#define SYS_GETGID      52
+#define SYS_GETEGID     53
+#define SYS_SETUID      54
+#define SYS_SETEUID     55
+#define SYS_SETGID      56
+#define SYS_SETEGID     57
+#define SYS_GETGROUPS   58
+#define SYS_SETGROUPS   59
+#define SYS_UMASK       60
+#define SYS_CLOCK_GET   61
+#define SYS_CLOCK_SET   62
+#define SYS_FCHMOD      63
+#define SYS_FCHOWN      64
+#define SYS_FUTIMENS    65
+#define SYS_FCHDIR      66
 
 
 using main_fn = int (*)(int, char **);
@@ -224,10 +241,40 @@ extern "C" void __extron_thread_sysdeps_anchor();
 
 pid_t sys_getpid() { return (pid_t)syscall0(SYS_GETPID); }
 pid_t sys_getppid() { return (pid_t)syscall0(SYS_GETPPID); }
-uid_t sys_getuid() { return 0; }
-uid_t sys_geteuid() { return 0; }
-gid_t sys_getgid() { return 0; }
-gid_t sys_getegid() { return 0; }
+uid_t sys_getuid() { return (uid_t)syscall0(SYS_GETUID); }
+uid_t sys_geteuid() { return (uid_t)syscall0(SYS_GETEUID); }
+gid_t sys_getgid() { return (gid_t)syscall0(SYS_GETGID); }
+gid_t sys_getegid() { return (gid_t)syscall0(SYS_GETEGID); }
+int sys_setuid(uid_t uid) {
+    long ret = syscall1(SYS_SETUID, uid);
+    return ret < 0 ? -ret : 0;
+}
+int sys_seteuid(uid_t uid) {
+    long ret = syscall1(SYS_SETEUID, uid);
+    return ret < 0 ? -ret : 0;
+}
+int sys_setgid(gid_t gid) {
+    long ret = syscall1(SYS_SETGID, gid);
+    return ret < 0 ? -ret : 0;
+}
+int sys_setegid(gid_t gid) {
+    long ret = syscall1(SYS_SETEGID, gid);
+    return ret < 0 ? -ret : 0;
+}
+int sys_getgroups(size_t size, gid_t *list, int *ret_count) {
+    long ret = syscall2(SYS_GETGROUPS, size, (long)list);
+    if (ret < 0) return -ret;
+    *ret_count = (int)ret;
+    return 0;
+}
+int sys_setgroups(size_t size, const gid_t *list) {
+    long ret = syscall2(SYS_SETGROUPS, size, (long)list);
+    return ret < 0 ? -ret : 0;
+}
+int sys_umask(mode_t mode, mode_t *old) {
+    *old = (mode_t)syscall1(SYS_UMASK, mode);
+    return 0;
+}
 
 int sys_getcwd(char *buffer, size_t size) {
     long ret = syscall2(SYS_GETCWD, (long)buffer, size);
@@ -236,6 +283,11 @@ int sys_getcwd(char *buffer, size_t size) {
 
 int sys_chdir(const char *path) {
     long ret = syscall1(SYS_CHDIR, (long)path);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_fchdir(int fd) {
+    long ret = syscall1(SYS_FCHDIR, fd);
     return ret < 0 ? -ret : 0;
 }
 
@@ -275,13 +327,7 @@ int sys_stat(fsfd_target target, int fd, const char *path, int flags,
 }
 
 int sys_access(const char *path, int mode) {
-    /* Permission enforcement is a later VFS stage. For now every existing
-     * object is accessible; this still gives callers correct ENOENT and
-     * ENOTDIR results from the real pathname walker. */
-    if (mode & ~7)
-        return EINVAL;
-    struct stat info;
-    return sys_stat(fsfd_target::path, AT_FDCWD, path, 0, &info);
+    return sys_faccessat(AT_FDCWD, path, mode, 0);
 }
 
 extern "C" void __mlibc_signal_restore();
@@ -311,12 +357,12 @@ int sys_thread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
 
 int sys_kill(int pid, int signal) {
     long ret = syscall2(SYS_KILL, pid, signal);
-    return ret < 0 ? ESRCH : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_tgkill(int pid, int tid, int signal) {
     long ret = syscall3(SYS_TGKILL, pid, tid, signal);
-    return ret < 0 ? ESRCH : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 extern "C" const char __mlibc_syscall_begin[1];
@@ -531,6 +577,15 @@ int sys_open(const char *pathname, int flags, mode_t mode, int *fd) {
     return 0;
 }
 
+int sys_openat(int dirfd, const char *path, int flags, mode_t mode, int *fd) {
+    path_at_request request{7, dirfd, (uint64_t)path, 0, 0, 0,
+                            (uint64_t)mode, (uint64_t)flags};
+    long ret = path_at(request);
+    if (ret < 0) return -ret;
+    *fd = (int)ret;
+    return 0;
+}
+
 int sys_close(int fd) {
     long ret = syscall1(SYS_CLOSE, fd);
     return ret < 0 ? -ret : 0;
@@ -546,6 +601,22 @@ int sys_seek(int fd, off_t offset, int whence, off_t *new_offset) {
 
 int sys_mkdir(const char *path, mode_t mode) {
     long ret = syscall2(SYS_MKDIR, (long)path, mode);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_mkdirat(int dirfd, const char *path, mode_t mode) {
+    path_at_request request{8, dirfd, (uint64_t)path, 0, 0, 0,
+                            (uint64_t)mode, 0};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_faccessat(int dirfd, const char *path, int mode, int flags) {
+    if (mode & ~7)
+        return EINVAL;
+    path_at_request request{9, dirfd, (uint64_t)path, 0, 0, 0,
+                            (uint64_t)mode, (uint64_t)flags};
+    long ret = path_at(request);
     return ret < 0 ? -ret : 0;
 }
 
@@ -618,6 +689,55 @@ int sys_readlinkat(int dirfd, const char *path, void *buffer, size_t size,
     if (ret < 0) return -ret;
     *length = ret;
     return 0;
+}
+
+int sys_chmod(const char *path, mode_t mode) {
+    path_at_request request{10, AT_FDCWD, (uint64_t)path, 0, 0, 0,
+                            (uint64_t)mode, 0};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_fchmod(int fd, mode_t mode) {
+    long ret = syscall2(SYS_FCHMOD, fd, mode);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+    if (flags & ~AT_SYMLINK_NOFOLLOW)
+        return EINVAL;
+    path_at_request request{10, dirfd, (uint64_t)path, 0, 0, 0,
+                            (uint64_t)mode, (uint64_t)flags};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_fchownat(int dirfd, const char *path, uid_t uid, gid_t gid,
+                 int flags) {
+    if ((flags & AT_EMPTY_PATH) && path && !*path) {
+        long ret = syscall3(SYS_FCHOWN, dirfd, uid, gid);
+        return ret < 0 ? -ret : 0;
+    }
+    if (flags & ~AT_SYMLINK_NOFOLLOW)
+        return EINVAL;
+    path_at_request request{11, dirfd, (uint64_t)path, 0, 0,
+                            (uint64_t)uid, (uint64_t)gid, (uint64_t)flags};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_utimensat(int dirfd, const char *path, const struct timespec times[2],
+                  int flags) {
+    if (!path) {
+        long ret = syscall2(SYS_FUTIMENS, dirfd, (long)times);
+        return ret < 0 ? -ret : 0;
+    }
+    if (flags & ~AT_SYMLINK_NOFOLLOW)
+        return EINVAL;
+    path_at_request request{12, dirfd, (uint64_t)path, 0, 0,
+                            (uint64_t)times, 0, (uint64_t)flags};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_pipe(int *fds, int flags) {
@@ -695,9 +815,16 @@ int sys_futex_tid() {
 }
 
 int sys_clock_get(int clock, time_t *secs, long *nanos) {
-    *secs = 0;
-    *nanos = 0;
+    long ret = syscall1(SYS_CLOCK_GET, clock);
+    if (ret < 0) return -ret;
+    *secs = ret / 1000000000L;
+    *nanos = ret % 1000000000L;
     return 0;
+}
+
+int sys_clock_set(int clock, time_t secs, long nanos) {
+    long ret = syscall3(SYS_CLOCK_SET, clock, secs, nanos);
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_ioctl(int fd, unsigned long request, void *arg, int *result) {

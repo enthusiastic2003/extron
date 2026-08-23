@@ -154,8 +154,9 @@ void file_table_close_cloexec(struct proc *p) {
             file_close(p, fd);
 }
 
-int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
-    if (!p)
+int file_open_at(struct proc *p, const struct vfs_path *base,
+                 const char *path, int flags, uint32_t mode) {
+    if (!p || !base)
         return -EINVAL;
     int fd = free_descriptor_from(p, 0);
     if (fd < 0)
@@ -166,13 +167,10 @@ int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
         return -ENOMEM;
     memset(f, 0, sizeof(*f));
     struct vfs_node *node;
-    struct vfs_path cwd;
-    if (proc_cwd_snapshot(p, &cwd) < 0) {
-        kfree(f);
-        return -EIO;
-    }
-    int result = vfs_open(&cwd, path, flags, mode, &node, &f->path);
-    vfs_path_release(&cwd);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    mode &= ~proc_get_umask(p);
+    int result = vfs_open(base, path, flags, mode, &cred, &node, &f->path);
     if (result < 0) {
         kfree(f);
         return result;
@@ -193,6 +191,17 @@ int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
     p->files[fd] = f;
     p->fd_flags[fd] = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
     return fd;
+}
+
+int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
+    if (!p)
+        return -EINVAL;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return -EIO;
+    int result = file_open_at(p, &cwd, path, flags, mode);
+    vfs_path_release(&cwd);
+    return result;
 }
 
 int file_pipe(struct proc *p, int fds[2], int flags) {
@@ -358,6 +367,15 @@ int file_get_path(struct proc *p, int fd, struct vfs_path *out) {
     return 0;
 }
 
+int file_get_node(struct proc *p, int fd, struct vfs_node **out) {
+    if (!descriptor_ok(p, fd) || !out) return -EBADF;
+    struct open_file *f = p->files[fd];
+    if (f->kind != FILE_VNODE) return -EINVAL;
+    *out = f->object.node;
+    vfs_node_retain(*out);
+    return 0;
+}
+
 static long pipe_read(struct open_file *f, void *buffer, size_t count) {
     if (!count)
         return 0;
@@ -475,7 +493,13 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
         f->offset = attr.size;
     }
     long result = vfs_write(f->object.node, f->offset, buffer, count);
-    if (result > 0) f->offset += (size_t)result;
+    if (result > 0) {
+        f->offset += (size_t)result;
+        struct vfs_cred cred;
+        proc_vfs_cred_snapshot(p, &cred);
+        if (cred.uid != 0)
+            vfs_clear_setid(f->object.node);
+    }
     irq_spin_unlock(&f->lock);
     return result;
 }

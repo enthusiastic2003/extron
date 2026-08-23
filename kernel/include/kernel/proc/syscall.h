@@ -65,6 +65,23 @@
 #define SYS_SYMLINK     47
 #define SYS_READLINK    48
 #define SYS_PATH_AT     49
+#define SYS_GETUID      50
+#define SYS_GETEUID     51
+#define SYS_GETGID      52
+#define SYS_GETEGID     53
+#define SYS_SETUID      54
+#define SYS_SETEUID     55
+#define SYS_SETGID      56
+#define SYS_SETEGID     57
+#define SYS_GETGROUPS   58
+#define SYS_SETGROUPS   59
+#define SYS_UMASK       60
+#define SYS_CLOCK_GET   61
+#define SYS_CLOCK_SET   62
+#define SYS_FCHMOD      63
+#define SYS_FCHOWN      64
+#define SYS_FUTIMENS    65
+#define SYS_FCHDIR      66
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

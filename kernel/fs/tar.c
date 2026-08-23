@@ -146,6 +146,11 @@ void tar_foreach(tar_visit_fn visit, void *ctx) {
             .name = header->name,
             .size = size,
             .data = (void *)(ptr + 512),
+            .mode = (uint32_t)octal_to_int(header->mode, sizeof(header->mode)),
+            .uid = (uint32_t)octal_to_int(header->uid, sizeof(header->uid)),
+            .gid = (uint32_t)octal_to_int(header->gid, sizeof(header->gid)),
+            .mtime = (int64_t)octal_to_int(header->mtime,
+                                           sizeof(header->mtime)),
         };
         visit(&file, ctx);
         ptr += 512 + align_up(size, 512);

@@ -108,7 +108,7 @@ int main(void) {
     check("creation mode is retained in inode metadata",
           stat(nested_file, &path_info) == 0
           && S_ISREG(path_info.st_mode)
-          && (path_info.st_mode & 0777) == 0612);
+          && (path_info.st_mode & 0777) == 0610);
 
     char cwd[512], expected_cwd[128];
     snprintf(expected_cwd, sizeof(expected_cwd), "/%s/a/b", test_directory);
@@ -315,7 +315,7 @@ int main(void) {
     check("cwd recovers at retained parent",
           getcwd(cwd, sizeof(cwd)) != NULL && !strcmp(cwd, expected_cwd));
     check("restore root after detached-cwd test", chdir("/") == 0);
-    check("access accepts an existing path while permissions are deferred",
+    check("root access check accepts an existing path",
           access("hello.txt", R_OK | W_OK) == 0);
     errno = 0;
     check("access missing path reports ENOENT",

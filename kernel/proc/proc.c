@@ -10,6 +10,7 @@
 #include <kernel/console.h>
 #include <kernel/mm/uvm.h>
 #include <kernel/fs/file.h>
+#include <kernel/klibc/string.h>
 #include <arch/irq_spinlock.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -93,6 +94,11 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->parent = NULL;
     p->pgid = pid;
     p->sid = pid;
+    p->cred_lock = (spinlock_t)SPINLOCK_INIT;
+    p->ruid = p->euid = p->suid = 0;
+    p->rgid = p->egid = p->sgid = 0;
+    p->supplementary_group_count = 0;
+    p->file_umask = 022;
     p->exit_status = 0;
     p->exited = false;
     p->stopped = false;
@@ -111,6 +117,41 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
         panic("aarch64 proc_init: kernel stack allocation failed");
     p->threads = t;
     p->thread_count = 1;
+}
+
+void proc_vfs_cred_snapshot(struct proc *p, struct vfs_cred *out) {
+    irq_spin_lock(&p->cred_lock);
+    out->uid = p->euid;
+    out->gid = p->egid;
+    out->group_count = p->supplementary_group_count;
+    memcpy(out->groups, p->supplementary_groups,
+           out->group_count * sizeof(out->groups[0]));
+    irq_spin_unlock(&p->cred_lock);
+}
+
+void proc_vfs_real_cred_snapshot(struct proc *p, struct vfs_cred *out) {
+    irq_spin_lock(&p->cred_lock);
+    out->uid = p->ruid;
+    out->gid = p->rgid;
+    out->group_count = p->supplementary_group_count;
+    memcpy(out->groups, p->supplementary_groups,
+           out->group_count * sizeof(out->groups[0]));
+    irq_spin_unlock(&p->cred_lock);
+}
+
+uint32_t proc_get_umask(struct proc *p) {
+    irq_spin_lock(&p->cred_lock);
+    uint32_t mask = p->file_umask;
+    irq_spin_unlock(&p->cred_lock);
+    return mask;
+}
+
+uint32_t proc_set_umask(struct proc *p, uint32_t mask) {
+    irq_spin_lock(&p->cred_lock);
+    uint32_t old = p->file_umask;
+    p->file_umask = mask & 0777;
+    irq_spin_unlock(&p->cred_lock);
+    return old;
 }
 
 int proc_cwd_snapshot(struct proc *p, struct vfs_path *out) {

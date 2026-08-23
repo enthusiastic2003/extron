@@ -130,6 +130,12 @@ struct proc {
     struct proc         *parent;
     uint64_t            pgid;              /* process group for job control */
     uint64_t            sid;               /* session containing that group */
+    spinlock_t          cred_lock;
+    uint32_t            ruid, euid, suid;
+    uint32_t            rgid, egid, sgid;
+    uint32_t            supplementary_groups[VFS_GROUP_MAX];
+    size_t              supplementary_group_count;
+    uint32_t            file_umask;
     int                 exit_status;
     bool                exited;
     bool                stopped;
@@ -214,6 +220,10 @@ struct proc  *proc_find_waitable_child(struct proc *parent, int64_t selector,
                                        int options, int *event_status,
                                        bool *out_any_children);
 bool          proc_group_exists(uint64_t pgid, uint64_t sid);
+void          proc_vfs_cred_snapshot(struct proc *p, struct vfs_cred *out);
+void          proc_vfs_real_cred_snapshot(struct proc *p, struct vfs_cred *out);
+uint32_t      proc_get_umask(struct proc *p);
+uint32_t      proc_set_umask(struct proc *p, uint32_t mask);
 
 /* ---------------------------------------------------------------
  * Thread state and process-exit helpers

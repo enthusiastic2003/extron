@@ -7,6 +7,7 @@
 #include <kernel/klibc/string.h>
 #include <kernel/fs/file.h>
 #include <arch/exceptions.h>
+#include <arch/irq_spinlock.h>
 
 /*
  * fork() — duplicate the calling process.
@@ -68,6 +69,19 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
     child->parent    = parent;
     child->pgid      = parent->pgid;
     child->sid       = parent->sid;
+    irq_spin_lock(&parent->cred_lock);
+    child->ruid = parent->ruid;
+    child->euid = parent->euid;
+    child->suid = parent->suid;
+    child->rgid = parent->rgid;
+    child->egid = parent->egid;
+    child->sgid = parent->sgid;
+    child->supplementary_group_count = parent->supplementary_group_count;
+    memcpy(child->supplementary_groups, parent->supplementary_groups,
+           parent->supplementary_group_count
+               * sizeof(parent->supplementary_groups[0]));
+    child->file_umask = parent->file_umask;
+    irq_spin_unlock(&parent->cred_lock);
     child->user_argc = parent->user_argc;
     child->user_argv = parent->user_argv;
     signal_process_fork(child, parent);

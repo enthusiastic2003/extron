@@ -24,5 +24,8 @@ unsigned timer_ticks_per_second(void);
 /* Milliseconds since timer_init(), off CNTPCT_EL0 — real sub-microsecond
  * resolution, NOT tick_count, which the 20Hz timer limits to 50ms. */
 uint64_t timer_uptime_ms(void);
+uint64_t timer_uptime_ns(void);
+int64_t timer_realtime_ns(void);
+void timer_set_realtime_ns(int64_t value);
 
 #endif

@@ -9,6 +9,10 @@ struct tar_file {
     const char *name;
     size_t size;
     void *data;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    int64_t mtime;
 };
 
 // Initializes the tar filesystem by locating the multiboot module.

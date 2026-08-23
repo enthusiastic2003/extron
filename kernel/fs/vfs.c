@@ -163,6 +163,7 @@ static int step_parent(struct vfs_path *path) {
 
 static int walk_depth(const struct vfs_path *cwd, const char *path,
                 bool parent_only, bool follow_final, unsigned depth,
+                const struct vfs_cred *cred,
                 struct vfs_path *out, char leaf[VFS_NAME_MAX + 1]) {
     if (!path || !out)
         return -EINVAL;
@@ -221,6 +222,17 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
             }
             memcpy(leaf, start, length);
             leaf[length] = '\0';
+            if (!current.dentry->node
+                    || current.dentry->node->type != VFS_NODE_DIRECTORY) {
+                vfs_path_release(&current);
+                return -ENOTDIR;
+            }
+            result = vfs_check_access(current.dentry->node, cred,
+                                      VFS_ACCESS_EXEC);
+            if (result < 0) {
+                vfs_path_release(&current);
+                return result;
+            }
             *out = current;
             return 0;
         }
@@ -238,6 +250,11 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
                 || current.dentry->node->type != VFS_NODE_DIRECTORY) {
             vfs_path_release(&current);
             return -ENOTDIR;
+        }
+        result = vfs_check_access(current.dentry->node, cred, VFS_ACCESS_EXEC);
+        if (result < 0) {
+            vfs_path_release(&current);
+            return result;
         }
         char component[VFS_NAME_MAX + 1];
         memcpy(component, start, length);
@@ -299,7 +316,7 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
                 combined[combined_length] = '\0';
             }
             result = walk_depth(&current, combined, parent_only, follow_final,
-                                depth + 1, out, leaf);
+                                depth + 1, cred, out, leaf);
             kfree(combined);
             kfree(target);
             vfs_path_release(&current);
@@ -313,13 +330,14 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
 }
 
 static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
-                struct vfs_path *out, char leaf[VFS_NAME_MAX + 1]) {
-    return walk_depth(cwd, path, parent_only, true, 0, out, leaf);
+                const struct vfs_cred *cred, struct vfs_path *out,
+                char leaf[VFS_NAME_MAX + 1]) {
+    return walk_depth(cwd, path, parent_only, true, 0, cred, out, leaf);
 }
 
 int vfs_lookup_path(const struct vfs_path *cwd, const char *path,
                     struct vfs_path *out) {
-    int result = walk(cwd, path, false, out, NULL);
+    int result = walk(cwd, path, false, NULL, out, NULL);
     if (result < 0)
         return result;
     size_t length = strlen(path);
@@ -333,7 +351,7 @@ int vfs_lookup_path(const struct vfs_path *cwd, const char *path,
 
 int vfs_lookup_path_nofollow(const struct vfs_path *cwd, const char *path,
                              struct vfs_path *out) {
-    return walk_depth(cwd, path, false, false, 0, out, NULL);
+    return walk_depth(cwd, path, false, false, 0, NULL, out, NULL);
 }
 
 int vfs_mount_at(const struct vfs_path *cwd, const char *path,
@@ -408,17 +426,90 @@ int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size) {
     return 0;
 }
 
+static bool cred_in_group(const struct vfs_cred *cred, uint32_t gid) {
+    if (cred->gid == gid)
+        return true;
+    for (size_t i = 0; i < cred->group_count; i++)
+        if (cred->groups[i] == gid)
+            return true;
+    return false;
+}
+
+int vfs_check_access(struct vfs_node *node, const struct vfs_cred *cred,
+                     int mode) {
+    if (!node || (mode & ~7))
+        return -EINVAL;
+    if (!cred || !mode)
+        return 0;
+    struct vfs_attr attr;
+    int result = vfs_getattr(node, &attr);
+    if (result < 0)
+        return result;
+    if (cred->uid == 0) {
+        if ((mode & VFS_ACCESS_EXEC) && attr.type != VFS_NODE_DIRECTORY
+                && !(attr.mode & 0111))
+            return -EACCES;
+        return 0;
+    }
+    unsigned shift = cred->uid == attr.uid ? 6
+                   : cred_in_group(cred, attr.gid) ? 3 : 0;
+    return (((attr.mode >> shift) & mode) == (unsigned)mode) ? 0 : -EACCES;
+}
+
+int vfs_lookup_path_as(const struct vfs_path *cwd, const char *path,
+                       int follow_final, const struct vfs_cred *cred,
+                       struct vfs_path *out) {
+    return walk_depth(cwd, path, false, follow_final, 0, cred, out, NULL);
+}
+
+static int parent_access(const struct vfs_path *parent,
+                         const struct vfs_cred *cred) {
+    return vfs_check_access(parent->dentry->node, cred,
+                            VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+}
+
+static void creation_identity(const struct vfs_path *parent,
+                              const struct vfs_cred *cred, uint32_t *mode,
+                              uint32_t *uid, uint32_t *gid,
+                              bool directory) {
+    *uid = cred ? cred->uid : 0;
+    *gid = cred ? cred->gid : 0;
+    struct vfs_attr attr;
+    if (vfs_getattr(parent->dentry->node, &attr) == 0
+            && (attr.mode & 02000)) {
+        *gid = attr.gid;
+        if (directory) *mode |= 02000;
+    } else if (cred && cred->uid != 0 && (*mode & 02000)
+            && !cred_in_group(cred, *gid)) {
+        *mode &= ~02000;
+    }
+}
+
+static int sticky_access(struct vfs_node *parent, struct vfs_node *target,
+                         const struct vfs_cred *cred) {
+    if (!cred || cred->uid == 0)
+        return 0;
+    struct vfs_attr parent_attr, target_attr;
+    int result = vfs_getattr(parent, &parent_attr);
+    if (result < 0) return result;
+    if (!(parent_attr.mode & 01000)) return 0;
+    result = vfs_getattr(target, &target_attr);
+    if (result < 0) return result;
+    return cred->uid == parent_attr.uid || cred->uid == target_attr.uid
+        ? 0 : -EPERM;
+}
+
 int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
-             uint32_t mode, struct vfs_node **out, struct vfs_path *opened_path) {
+             uint32_t mode, const struct vfs_cred *cred,
+             struct vfs_node **out, struct vfs_path *opened_path) {
     if (!path || !out || !opened_path)
         return -EINVAL;
     int access = flags & O_ACCMODE;
     if (access != 0 && access != O_WRONLY && access != O_RDWR)
         return -EINVAL;
     struct vfs_path found;
-    int result = flags & O_NOFOLLOW
-        ? vfs_lookup_path_nofollow(cwd, path, &found)
-        : vfs_lookup_path(cwd, path, &found);
+    int result = vfs_lookup_path_as(cwd, path, !(flags & O_NOFOLLOW), cred,
+                                    &found);
     if (result == 0) {
         struct vfs_node *node = found.dentry->node;
         if ((flags & O_NOFOLLOW) && node->type == VFS_NODE_SYMLINK)
@@ -429,9 +520,17 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
             result = -ENOTDIR;
         else if (node->type == VFS_NODE_DIRECTORY && access != 0)
             result = -EISDIR;
-        else if ((flags & O_TRUNC) && access != 0) {
+        else {
+            int requested = access == O_WRONLY ? VFS_ACCESS_WRITE
+                          : access == O_RDWR ? VFS_ACCESS_READ | VFS_ACCESS_WRITE
+                          : VFS_ACCESS_READ;
+            result = vfs_check_access(node, cred, requested);
+        }
+        if (result == 0 && (flags & O_TRUNC) && access != 0) {
             result = node->ops && node->ops->truncate
                 ? node->ops->truncate(node, 0) : -EINVAL;
+            if (result == 0 && cred && cred->uid != 0)
+                vfs_clear_setid(node);
         }
         if (result == 0) {
             vfs_node_retain(node);
@@ -450,16 +549,24 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
 
     struct vfs_path parent;
     char leaf[VFS_NAME_MAX + 1];
-    result = walk(cwd, path, true, &parent, leaf);
+    result = walk(cwd, path, true, cred, &parent, leaf);
     if (result < 0)
         return result;
     if (parent.dentry->node->type != VFS_NODE_DIRECTORY) {
         vfs_path_release(&parent);
         return -ENOTDIR;
     }
+    result = parent_access(&parent, cred);
+    if (result < 0) {
+        vfs_path_release(&parent);
+        return result;
+    }
     struct vfs_dentry *created = NULL;
+    uint32_t uid, gid;
+    creation_identity(&parent, cred, &mode, &uid, &gid, false);
     result = parent.mount->ops->create(parent.mount, parent.dentry, leaf,
-                                       VFS_NODE_REGULAR, mode, &created);
+                                       VFS_NODE_REGULAR, mode, uid, gid,
+                                       &created);
     if (result == 0) {
         created->owner_mount = parent.mount;
         vfs_node_retain(created->node);
@@ -471,19 +578,28 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
     return result;
 }
 
-int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode) {
+int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode,
+              const struct vfs_cred *cred) {
     struct vfs_path parent;
     char leaf[VFS_NAME_MAX + 1];
-    int result = walk(cwd, path, true, &parent, leaf);
+    int result = walk(cwd, path, true, cred, &parent, leaf);
     if (result < 0)
         return result;
     if (parent.dentry->node->type != VFS_NODE_DIRECTORY) {
         vfs_path_release(&parent);
         return -ENOTDIR;
     }
+    result = parent_access(&parent, cred);
+    if (result < 0) {
+        vfs_path_release(&parent);
+        return result;
+    }
     struct vfs_dentry *created = NULL;
+    uint32_t uid, gid;
+    creation_identity(&parent, cred, &mode, &uid, &gid, true);
     result = parent.mount->ops->create(parent.mount, parent.dentry, leaf,
-                                       VFS_NODE_DIRECTORY, mode, &created);
+                                       VFS_NODE_DIRECTORY, mode, uid, gid,
+                                       &created);
     if (result == 0) {
         created->owner_mount = parent.mount;
         vfs_dentry_release(created);
@@ -510,19 +626,25 @@ static bool path_is_root_syntax(const char *path) {
     return !*path;
 }
 
-int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory) {
+int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory,
+               const struct vfs_cred *cred) {
     if (!path)
         return -EINVAL;
     if (path_is_root_syntax(path))
         return directory ? -EBUSY : -EISDIR;
     struct vfs_path parent;
     char leaf[VFS_NAME_MAX + 1];
-    int result = walk(cwd, path, true, &parent, leaf);
+    int result = walk(cwd, path, true, cred, &parent, leaf);
     if (result < 0)
         return result;
     if (!parent.mount->ops->remove) {
         vfs_path_release(&parent);
         return -EROFS;
+    }
+    result = parent_access(&parent, cred);
+    if (result < 0) {
+        vfs_path_release(&parent);
+        return result;
     }
 
     struct vfs_dentry *target = NULL;
@@ -538,6 +660,8 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory) {
         result = -ENOTDIR;
     else if (vfs_is_mountpoint(parent.mount, target))
         result = -EBUSY;
+    else
+        result = sticky_access(parent.dentry->node, target->node, cred);
     vfs_dentry_release(target);
     if (result == 0)
         result = parent.mount->ops->remove(parent.mount, parent.dentry,
@@ -547,17 +671,18 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory) {
 }
 
 int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
-                  const struct vfs_path *new_base, const char *new_path) {
+                  const struct vfs_path *new_base, const char *new_path,
+                  const struct vfs_cred *cred) {
     if (!old_path || !new_path)
         return -EINVAL;
     if (path_is_root_syntax(old_path) || path_is_root_syntax(new_path))
         return -EBUSY;
     struct vfs_path old_parent, new_parent;
     char old_leaf[VFS_NAME_MAX + 1], new_leaf[VFS_NAME_MAX + 1];
-    int result = walk(old_base, old_path, true, &old_parent, old_leaf);
+    int result = walk(old_base, old_path, true, cred, &old_parent, old_leaf);
     if (result < 0)
         return result;
-    result = walk(new_base, new_path, true, &new_parent, new_leaf);
+    result = walk(new_base, new_path, true, cred, &new_parent, new_leaf);
     if (result < 0) {
         vfs_path_release(&old_parent);
         return result;
@@ -570,6 +695,11 @@ int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
         result = -EROFS;
         goto out;
     }
+    result = parent_access(&old_parent, cred);
+    if (result == 0)
+        result = parent_access(&new_parent, cred);
+    if (result < 0)
+        goto out;
 
     struct vfs_dentry *source = NULL;
     result = old_parent.mount->ops->lookup_child(old_parent.mount,
@@ -584,6 +714,8 @@ int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
         result = -ENOTDIR;
     else if (vfs_is_mountpoint(old_parent.mount, source))
         result = -EBUSY;
+    else
+        result = sticky_access(old_parent.dentry->node, source->node, cred);
     vfs_dentry_release(source);
     if (result < 0)
         goto out;
@@ -598,6 +730,9 @@ int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
             result = -ENOTDIR;
         else if (vfs_is_mountpoint(new_parent.mount, destination))
             result = -EBUSY;
+        else
+            result = sticky_access(new_parent.dentry->node,
+                                   destination->node, cred);
         vfs_dentry_release(destination);
         if (result < 0)
             goto out;
@@ -621,26 +756,28 @@ out:
 }
 
 int vfs_rename(const struct vfs_path *cwd, const char *old_path,
-               const char *new_path) {
-    return vfs_rename_at(cwd, old_path, cwd, new_path);
+               const char *new_path, const struct vfs_cred *cred) {
+    return vfs_rename_at(cwd, old_path, cwd, new_path, cred);
 }
 
 int vfs_link(const struct vfs_path *old_base, const char *old_path,
              const struct vfs_path *new_base, const char *new_path,
-             int follow_source) {
+             int follow_source, const struct vfs_cred *cred) {
     struct vfs_path source, parent;
-    int result = follow_source
-        ? vfs_lookup_path(old_base, old_path, &source)
-        : vfs_lookup_path_nofollow(old_base, old_path, &source);
+    int result = vfs_lookup_path_as(old_base, old_path, follow_source, cred,
+                                    &source);
     if (result < 0)
         return result;
     char leaf[VFS_NAME_MAX + 1];
-    result = walk(new_base, new_path, true, &parent, leaf);
+    result = walk(new_base, new_path, true, cred, &parent, leaf);
     if (result < 0) {
         vfs_path_release(&source);
         return result;
     }
-    if (source.mount != parent.mount)
+    int access_result = parent_access(&parent, cred);
+    if (access_result < 0)
+        result = access_result;
+    else if (source.mount != parent.mount)
         result = -EXDEV;
     else if (source.dentry->node->type == VFS_NODE_DIRECTORY)
         result = -EPERM;
@@ -661,20 +798,27 @@ int vfs_link(const struct vfs_path *old_base, const char *old_path,
 }
 
 int vfs_symlink(const struct vfs_path *cwd, const char *target,
-                const char *link_path) {
+                const char *link_path, const struct vfs_cred *cred) {
     if (!target || strlen(target) > VFS_PATH_MAX)
         return -ENAMETOOLONG;
     struct vfs_path parent;
     char leaf[VFS_NAME_MAX + 1];
-    int result = walk(cwd, link_path, true, &parent, leaf);
+    int result = walk(cwd, link_path, true, cred, &parent, leaf);
     if (result < 0)
         return result;
+    result = parent_access(&parent, cred);
+    if (result < 0) {
+        vfs_path_release(&parent);
+        return result;
+    }
     if (!parent.mount->ops->symlink)
         result = -EROFS;
     else {
         struct vfs_dentry *created = NULL;
+        uint32_t mode = 0777, uid, gid;
+        creation_identity(&parent, cred, &mode, &uid, &gid, false);
         result = parent.mount->ops->symlink(parent.mount, parent.dentry,
-                                             leaf, target, &created);
+                                             leaf, target, uid, gid, &created);
         if (result == 0) {
             created->owner_mount = parent.mount;
             vfs_dentry_release(created);
@@ -685,9 +829,9 @@ int vfs_symlink(const struct vfs_path *cwd, const char *target,
 }
 
 long vfs_readlink(const struct vfs_path *cwd, const char *path,
-                  void *buffer, size_t size) {
+                  void *buffer, size_t size, const struct vfs_cred *cred) {
     struct vfs_path found;
-    int result = vfs_lookup_path_nofollow(cwd, path, &found);
+    int result = vfs_lookup_path_as(cwd, path, false, cred, &found);
     if (result < 0)
         return result;
     if (found.dentry->node->type != VFS_NODE_SYMLINK)
@@ -702,11 +846,11 @@ long vfs_readlink(const struct vfs_path *cwd, const char *path,
 }
 
 int vfs_stat(const struct vfs_path *cwd, const char *path,
-             struct vfs_attr *attr) {
+             struct vfs_attr *attr, const struct vfs_cred *cred) {
     if (!attr)
         return -EINVAL;
     struct vfs_path found;
-    int result = vfs_lookup_path(cwd, path, &found);
+    int result = vfs_lookup_path_as(cwd, path, true, cred, &found);
     if (result < 0)
         return result;
     result = vfs_getattr(found.dentry->node, attr);
@@ -715,14 +859,106 @@ int vfs_stat(const struct vfs_path *cwd, const char *path,
 }
 
 int vfs_lstat(const struct vfs_path *cwd, const char *path,
-              struct vfs_attr *attr) {
+              struct vfs_attr *attr, const struct vfs_cred *cred) {
     struct vfs_path found;
-    int result = vfs_lookup_path_nofollow(cwd, path, &found);
+    int result = vfs_lookup_path_as(cwd, path, false, cred, &found);
     if (result < 0)
         return result;
     result = vfs_getattr(found.dentry->node, attr);
     vfs_path_release(&found);
     return result;
+}
+
+int vfs_access_path(const struct vfs_path *cwd, const char *path, int mode,
+                    int follow_final, const struct vfs_cred *cred) {
+    if (mode & ~7)
+        return -EINVAL;
+    struct vfs_path found;
+    int result = vfs_lookup_path_as(cwd, path, follow_final, cred, &found);
+    if (result < 0)
+        return result;
+    result = vfs_check_access(found.dentry->node, cred, mode);
+    vfs_path_release(&found);
+    return result;
+}
+
+int vfs_chmod_node(struct vfs_node *node, uint32_t mode,
+                   const struct vfs_cred *cred) {
+    if (!cred) return -EINVAL;
+    struct vfs_attr current;
+    int result = vfs_getattr(node, &current);
+    if (result < 0) return result;
+    if (cred->uid != 0 && cred->uid != current.uid)
+        return -EPERM;
+    struct vfs_setattr change = {
+        .valid = VFS_SET_MODE,
+        .mode = mode & 07777,
+    };
+    if (cred->uid != 0 && !cred_in_group(cred, current.gid))
+        change.mode &= ~02000;
+    return vfs_setattr(node, &change);
+}
+
+int vfs_chown_node(struct vfs_node *node, uint32_t uid, uint32_t gid,
+                   const struct vfs_cred *cred) {
+    if (!cred) return -EINVAL;
+    struct vfs_attr current;
+    int result = vfs_getattr(node, &current);
+    if (result < 0) return result;
+    bool uid_change = uid != UINT32_MAX && uid != current.uid;
+    bool gid_change = gid != UINT32_MAX && gid != current.gid;
+    if (cred->uid != 0) {
+        if (cred->uid != current.uid || uid_change
+                || (gid_change && !cred_in_group(cred, gid)))
+            return -EPERM;
+    }
+    struct vfs_setattr change = {0};
+    if (uid != UINT32_MAX) {
+        change.valid |= VFS_SET_UID;
+        change.uid = uid;
+    }
+    if (gid != UINT32_MAX) {
+        change.valid |= VFS_SET_GID;
+        change.gid = gid;
+    }
+    if (uid_change || gid_change) {
+        change.valid |= VFS_SET_MODE;
+        change.mode = current.mode & ~06000;
+    }
+    return change.valid ? vfs_setattr(node, &change) : 0;
+}
+
+int vfs_utimens_node(struct vfs_node *node,
+                     const struct vfs_timestamp *atime,
+                     const struct vfs_timestamp *mtime, int explicit_times,
+                     const struct vfs_cred *cred) {
+    if (!cred || !atime || !mtime) return -EINVAL;
+    struct vfs_attr current;
+    int result = vfs_getattr(node, &current);
+    if (result < 0) return result;
+    if (cred->uid != 0 && cred->uid != current.uid) {
+        if (explicit_times)
+            return -EPERM;
+        result = vfs_check_access(node, cred, VFS_ACCESS_WRITE);
+        if (result < 0) return result;
+    }
+    struct vfs_setattr change = {
+        .valid = VFS_SET_ATIME | VFS_SET_MTIME,
+        .atime = *atime,
+        .mtime = *mtime,
+    };
+    return vfs_setattr(node, &change);
+}
+
+void vfs_clear_setid(struct vfs_node *node) {
+    struct vfs_attr current;
+    if (vfs_getattr(node, &current) < 0 || !(current.mode & 06000))
+        return;
+    struct vfs_setattr change = {
+        .valid = VFS_SET_MODE,
+        .mode = current.mode & ~06000,
+    };
+    vfs_setattr(node, &change);
 }
 
 long vfs_read(struct vfs_node *node, size_t offset, void *buffer, size_t count) {
@@ -748,4 +984,10 @@ int vfs_getattr(struct vfs_node *node, struct vfs_attr *attr) {
     if (!node || !node->ops || !node->ops->getattr || !attr)
         return -EINVAL;
     return node->ops->getattr(node, attr);
+}
+
+int vfs_setattr(struct vfs_node *node, const struct vfs_setattr *attr) {
+    if (!node || !attr || !node->ops || !node->ops->setattr)
+        return -EROFS;
+    return node->ops->setattr(node, attr);
 }

@@ -41,6 +41,8 @@ void file_table_close_all(struct proc *p);
 void file_table_close_cloexec(struct proc *p);
 
 int     file_open(struct proc *p, const char *path, int flags, uint32_t mode);
+int     file_open_at(struct proc *p, const struct vfs_path *base,
+                     const char *path, int flags, uint32_t mode);
 int     file_pipe(struct proc *p, int fds[2], int flags);
 int     file_dup(struct proc *p, int oldfd, int minimum, int cloexec);
 int     file_dup2(struct proc *p, int oldfd, int newfd, int cloexec);
@@ -57,5 +59,6 @@ int     file_info(struct proc *p, int fd, struct vfs_attr *attr);
 int     file_is_tty(struct proc *p, int fd);
 int     file_poll(struct proc *p, int fd, short events, short *revents);
 int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
+int     file_get_node(struct proc *p, int fd, struct vfs_node **out);
 
 #endif

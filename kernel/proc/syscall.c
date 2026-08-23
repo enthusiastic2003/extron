@@ -14,6 +14,7 @@
 #include <kernel/fs/vfs.h>
 #include <kernel/errno.h>
 #include <kernel/klibc/string.h>
+#include <arch/irq_spinlock.h>
 #include <stdbool.h>
 
 /*
@@ -295,12 +296,17 @@ static uint64_t sys_kill(uint64_t pid, uint64_t signo, uint64_t c,
     int64_t selector = (int64_t)pid;
     if (selector > 0) {
         struct proc *target = proc_lookup((uint64_t)selector);
-        return signal_send(target, (int)signo) == 0 ? 0 : (uint64_t)-1;
+        if (!target)
+            return (uint64_t)-ESRCH;
+        if (!signal_may_send(my_proc(), target, (int)signo))
+            return (uint64_t)-EPERM;
+        return signal_send(target, (int)signo) == 0 ? 0 : (uint64_t)-EINVAL;
     }
     uint64_t pgid = selector == 0 ? my_proc()->pgid
                                   : selector < -1 ? (uint64_t)-selector : 0;
-    return pgid && signal_send_group(pgid, (int)signo) == 0
-        ? 0 : (uint64_t)-1;
+    return pgid ? (uint64_t)signal_send_group_from(
+                      my_proc(), pgid, (int)signo)
+                : (uint64_t)-EINVAL;
 }
 
 static uint64_t sys_tgkill(uint64_t pid, uint64_t tid, uint64_t signo,
@@ -309,9 +315,15 @@ static uint64_t sys_tgkill(uint64_t pid, uint64_t tid, uint64_t signo,
     if ((int64_t)pid <= 0 || (int64_t)tid <= 0)
         return (uint64_t)-1;
     struct proc *target = proc_lookup(pid);
+    if (!target)
+        return (uint64_t)-ESRCH;
     struct thread *thread = proc_thread_lookup(target, tid);
+    if (!thread)
+        return (uint64_t)-ESRCH;
+    if (!signal_may_send(my_proc(), target, (int)signo))
+        return (uint64_t)-EPERM;
     return signal_send_thread(target, thread, (int)signo) == 0
-        ? 0 : (uint64_t)-1;
+        ? 0 : (uint64_t)-EINVAL;
 }
 
 static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_addr,
@@ -587,6 +599,35 @@ static uint64_t sys_uptime_ms(uint64_t a, uint64_t b, uint64_t c,
     return timer_uptime_ms();
 }
 
+static uint64_t sys_clock_get(uint64_t clock, uint64_t b, uint64_t c,
+                              struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    if (clock == 0)
+        return (uint64_t)timer_realtime_ns();
+    if (clock == 1)
+        return timer_uptime_ns();
+    return (uint64_t)-EINVAL;
+}
+
+static uint64_t sys_clock_set(uint64_t clock, uint64_t seconds,
+                              uint64_t nanos, struct aarch64_frame *f) {
+    (void)f;
+    if (clock != 0 || (int64_t)nanos < 0 || nanos >= 1000000000ULL)
+        return (uint64_t)-EINVAL;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    bool privileged = p->euid == 0;
+    irq_spin_unlock(&p->cred_lock);
+    if (!privileged)
+        return (uint64_t)-EPERM;
+    int64_t secs = (int64_t)seconds;
+    if (secs > INT64_MAX / 1000000000LL
+            || secs < INT64_MIN / 1000000000LL)
+        return (uint64_t)-EINVAL;
+    timer_set_realtime_ns(secs * 1000000000LL + (int64_t)nanos);
+    return 0;
+}
+
 /*
  * Map an initrd file read-only into the caller and return a pointer to
  * its first byte; *out_size receives the length.
@@ -709,7 +750,10 @@ static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
     struct vfs_path cwd;
     if (proc_cwd_snapshot(my_proc(), &cwd) < 0)
         return (uint64_t)-EIO;
-    result = vfs_mkdir(&cwd, path, (uint32_t)mode);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(my_proc(), &cred);
+    result = vfs_mkdir(&cwd, path,
+                       (uint32_t)mode & ~proc_get_umask(my_proc()), &cred);
     vfs_path_release(&cwd);
     return (uint64_t)result;
 }
@@ -723,7 +767,9 @@ static uint64_t sys_unlink_common(uint64_t path_addr, int directory) {
     struct vfs_path cwd;
     if (proc_cwd_snapshot(p, &cwd) < 0)
         return (uint64_t)-EIO;
-    result = vfs_unlink(&cwd, path, directory);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_unlink(&cwd, path, directory, &cred);
     vfs_path_release(&cwd);
     return (uint64_t)result;
 }
@@ -754,7 +800,9 @@ static uint64_t sys_rename(uint64_t old_addr, uint64_t new_addr, uint64_t c,
     struct vfs_path cwd;
     if (proc_cwd_snapshot(p, &cwd) < 0)
         return (uint64_t)-EIO;
-    result = vfs_rename(&cwd, old_path, new_path);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_rename(&cwd, old_path, new_path, &cred);
     vfs_path_release(&cwd);
     return (uint64_t)result;
 }
@@ -770,7 +818,9 @@ static uint64_t sys_link(uint64_t old_addr, uint64_t new_addr, uint64_t flags,
     if (result < 0) return (uint64_t)result;
     struct vfs_path cwd;
     if (proc_cwd_snapshot(p, &cwd) < 0) return (uint64_t)-EIO;
-    result = vfs_link(&cwd, old_path, &cwd, new_path, !!flags);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_link(&cwd, old_path, &cwd, new_path, !!flags, &cred);
     vfs_path_release(&cwd);
     return (uint64_t)result;
 }
@@ -786,7 +836,9 @@ static uint64_t sys_symlink(uint64_t target_addr, uint64_t link_addr, uint64_t c
     if (result < 0) return (uint64_t)result;
     struct vfs_path cwd;
     if (proc_cwd_snapshot(p, &cwd) < 0) return (uint64_t)-EIO;
-    result = vfs_symlink(&cwd, target, link_path);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_symlink(&cwd, target, link_path, &cred);
     vfs_path_release(&cwd);
     return (uint64_t)result;
 }
@@ -801,7 +853,9 @@ static uint64_t sys_readlink(uint64_t path_addr, uint64_t buffer,
     if (result < 0) return (uint64_t)result;
     struct vfs_path cwd;
     if (proc_cwd_snapshot(p, &cwd) < 0) return (uint64_t)-EIO;
-    result = vfs_readlink(&cwd, path, (void *)buffer, size);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_readlink(&cwd, path, (void *)buffer, size, &cred);
     vfs_path_release(&cwd);
     return (uint64_t)result;
 }
@@ -810,6 +864,148 @@ static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
                            struct aarch64_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     return my_proc()->pid;
+}
+
+static uint64_t sys_getuid(uint64_t a, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    uint32_t value = p->ruid;
+    irq_spin_unlock(&p->cred_lock);
+    return value;
+}
+
+static uint64_t sys_geteuid(uint64_t a, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    uint32_t value = p->euid;
+    irq_spin_unlock(&p->cred_lock);
+    return value;
+}
+
+static uint64_t sys_getgid(uint64_t a, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    uint32_t value = p->rgid;
+    irq_spin_unlock(&p->cred_lock);
+    return value;
+}
+
+static uint64_t sys_getegid(uint64_t a, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    uint32_t value = p->egid;
+    irq_spin_unlock(&p->cred_lock);
+    return value;
+}
+
+static uint64_t set_user_id(uint32_t uid, bool effective_only) {
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    if (p->euid == 0 && !effective_only)
+        p->ruid = p->euid = p->suid = uid;
+    else if (p->euid == 0 || uid == p->ruid || uid == p->suid)
+        p->euid = uid;
+    else {
+        irq_spin_unlock(&p->cred_lock);
+        return (uint64_t)-EPERM;
+    }
+    irq_spin_unlock(&p->cred_lock);
+    return 0;
+}
+
+static uint64_t set_group_id(uint32_t gid, bool effective_only) {
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    if (p->euid == 0 && !effective_only)
+        p->rgid = p->egid = p->sgid = gid;
+    else if (p->euid == 0 || gid == p->rgid || gid == p->sgid)
+        p->egid = gid;
+    else {
+        irq_spin_unlock(&p->cred_lock);
+        return (uint64_t)-EPERM;
+    }
+    irq_spin_unlock(&p->cred_lock);
+    return 0;
+}
+
+static uint64_t sys_setuid(uint64_t uid, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return set_user_id((uint32_t)uid, false);
+}
+
+static uint64_t sys_seteuid(uint64_t uid, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return set_user_id((uint32_t)uid, true);
+}
+
+static uint64_t sys_setgid(uint64_t gid, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return set_group_id((uint32_t)gid, false);
+}
+
+static uint64_t sys_setegid(uint64_t gid, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return set_group_id((uint32_t)gid, true);
+}
+
+static uint64_t sys_getgroups(uint64_t size, uint64_t list_addr, uint64_t c,
+                              struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    size_t count = p->supplementary_group_count;
+    if (!size) {
+        irq_spin_unlock(&p->cred_lock);
+        return count;
+    }
+    if (size < count || !user_buffer_ok(p, list_addr,
+                                        count * sizeof(uint32_t))) {
+        irq_spin_unlock(&p->cred_lock);
+        return (uint64_t)(size < count ? -EINVAL : -EFAULT);
+    }
+    memcpy((void *)list_addr, p->supplementary_groups,
+           count * sizeof(uint32_t));
+    irq_spin_unlock(&p->cred_lock);
+    return count;
+}
+
+static uint64_t sys_setgroups(uint64_t size, uint64_t list_addr, uint64_t c,
+                              struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (size > VFS_GROUP_MAX)
+        return (uint64_t)-EINVAL;
+    if (size && !user_buffer_ok(p, list_addr, size * sizeof(uint32_t)))
+        return (uint64_t)-EFAULT;
+    irq_spin_lock(&p->cred_lock);
+    if (p->euid != 0) {
+        irq_spin_unlock(&p->cred_lock);
+        return (uint64_t)-EPERM;
+    }
+    if (size)
+        memcpy(p->supplementary_groups, (const void *)list_addr,
+               size * sizeof(uint32_t));
+    p->supplementary_group_count = size;
+    irq_spin_unlock(&p->cred_lock);
+    return 0;
+}
+
+static uint64_t sys_umask(uint64_t mask, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return proc_set_umask(my_proc(), (uint32_t)mask);
 }
 
 static uint64_t sys_getppid(uint64_t a, uint64_t b, uint64_t c,
@@ -882,7 +1078,9 @@ static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
     if (proc_cwd_snapshot(p, &cwd) < 0)
         return (uint64_t)-EIO;
     struct vfs_path resolved;
-    int result = vfs_lookup_path(&cwd, path, &resolved);
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    int result = vfs_lookup_path_as(&cwd, path, 1, &cred, &resolved);
     vfs_path_release(&cwd);
     if (result < 0)
         return (uint64_t)result;
@@ -890,9 +1088,30 @@ static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
         vfs_path_release(&resolved);
         return (uint64_t)-ENOTDIR;
     }
+    result = vfs_check_access(resolved.dentry->node, &cred, VFS_ACCESS_EXEC);
+    if (result < 0) {
+        vfs_path_release(&resolved);
+        return (uint64_t)result;
+    }
     proc_cwd_set(p, &resolved);
     vfs_path_release(&resolved);
     return 0;
+}
+
+static uint64_t sys_fchdir(uint64_t fd, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    struct vfs_path path;
+    int result = file_get_path(p, (int)fd, &path);
+    if (result < 0) return (uint64_t)result;
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_check_access(path.dentry->node, &cred, VFS_ACCESS_EXEC);
+    if (result == 0)
+        proc_cwd_set(p, &path);
+    vfs_path_release(&path);
+    return (uint64_t)result;
 }
 
 static uint64_t sys_readdir(uint64_t fd, uint64_t buffer, uint64_t size,
@@ -930,6 +1149,11 @@ struct path_at_request {
 #define AT_SYMLINK_NOFOLLOW_KERNEL 0x100
 #define AT_REMOVEDIR_KERNEL  0x200
 #define AT_SYMLINK_FOLLOW_KERNEL   0x400
+#define AT_EACCESS_KERNEL          0x200
+#define UTIME_NOW_KERNEL  ((1LL << 30) - 1)
+#define UTIME_OMIT_KERNEL ((1LL << 30) - 2)
+
+struct extron_timespec { int64_t sec, nsec; };
 
 static int path_at_base(struct proc *p, int64_t dirfd, const char *path,
                         struct vfs_path *out) {
@@ -962,8 +1186,10 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
         struct vfs_path cwd;
         if (proc_cwd_snapshot(p, &cwd) < 0)
             return (uint64_t)-EIO;
-        int result = target == 2 ? vfs_lstat(&cwd, path, &attr)
-                                 : vfs_stat(&cwd, path, &attr);
+        struct vfs_cred cred;
+        proc_vfs_cred_snapshot(p, &cred);
+        int result = target == 2 ? vfs_lstat(&cwd, path, &attr, &cred)
+                                 : vfs_stat(&cwd, path, &attr, &cred);
         vfs_path_release(&cwd);
         if (result < 0)
             return (uint64_t)result;
@@ -985,6 +1211,12 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     st->size = (int64_t)attr.size;
     st->blksize = 4096;
     st->blocks = (int64_t)((attr.size + 511) / 512);
+    st->atim.sec = attr.atime.sec;
+    st->atim.nsec = attr.atime.nsec;
+    st->mtim.sec = attr.mtime.sec;
+    st->mtim.nsec = attr.mtime.nsec;
+    st->ctim.sec = attr.ctime.sec;
+    st->ctim.nsec = attr.ctime.nsec;
     return 0;
 }
 
@@ -1001,6 +1233,12 @@ static void store_extron_stat(struct extron_stat *st,
     st->size = (int64_t)attr->size;
     st->blksize = 4096;
     st->blocks = (int64_t)((attr->size + 511) / 512);
+    st->atim.sec = attr->atime.sec;
+    st->atim.nsec = attr->atime.nsec;
+    st->mtim.sec = attr->mtime.sec;
+    st->mtim.nsec = attr->mtime.nsec;
+    st->ctim.sec = attr->ctime.sec;
+    st->ctim.nsec = attr->ctime.nsec;
 }
 
 static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
@@ -1010,6 +1248,8 @@ static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
     if (!user_buffer_ok(p, request_addr, sizeof(struct path_at_request)))
         return (uint64_t)-EFAULT;
     struct path_at_request request = *(struct path_at_request *)request_addr;
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
     char path1[VFS_PATH_MAX + 1], path2[VFS_PATH_MAX + 1];
     long result = copy_user_string(p, request.path1, path1, sizeof(path1));
     if (result < 0) return (uint64_t)result;
@@ -1035,26 +1275,26 @@ static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
         case 1:
             if (request.flags & ~AT_REMOVEDIR_KERNEL) result = -EINVAL;
             else result = vfs_unlink(&base1, path1,
-                !!(request.flags & AT_REMOVEDIR_KERNEL));
+                !!(request.flags & AT_REMOVEDIR_KERNEL), &cred);
             break;
         case 2:
             if (request.flags) result = -EINVAL;
-            else result = vfs_rename_at(&base1, path1, &base2, path2);
+            else result = vfs_rename_at(&base1, path1, &base2, path2, &cred);
             break;
         case 3:
             if (request.flags & ~AT_SYMLINK_FOLLOW_KERNEL) result = -EINVAL;
             else result = vfs_link(&base1, path1, &base2, path2,
-                !!(request.flags & AT_SYMLINK_FOLLOW_KERNEL));
+                !!(request.flags & AT_SYMLINK_FOLLOW_KERNEL), &cred);
             break;
         case 4:
             if (request.flags) result = -EINVAL;
-            else result = vfs_symlink(&base2, path1, path2);
+            else result = vfs_symlink(&base2, path1, path2, &cred);
             break;
         case 5:
             if (request.flags || !user_buffer_ok(p, request.buffer, request.size))
                 result = request.flags ? -EINVAL : -EFAULT;
             else result = vfs_readlink(&base1, path1,
-                (void *)request.buffer, request.size);
+                (void *)request.buffer, request.size, &cred);
             break;
         case 6: {
             if (request.flags & ~AT_SYMLINK_NOFOLLOW_KERNEL)
@@ -1065,12 +1305,128 @@ static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
             else {
                 struct vfs_attr attr;
                 result = request.flags & AT_SYMLINK_NOFOLLOW_KERNEL
-                    ? vfs_lstat(&base1, path1, &attr)
-                    : vfs_stat(&base1, path1, &attr);
+                    ? vfs_lstat(&base1, path1, &attr, &cred)
+                    : vfs_stat(&base1, path1, &attr, &cred);
                 if (result == 0)
                     store_extron_stat((struct extron_stat *)request.buffer,
                                       &attr);
             }
+            break;
+        }
+        case 7:
+            result = file_open_at(p, &base1, path1, (int)request.flags,
+                                  (uint32_t)request.size);
+            break;
+        case 8:
+            if (request.flags) result = -EINVAL;
+            else result = vfs_mkdir(&base1, path1,
+                (uint32_t)request.size & ~proc_get_umask(p), &cred);
+            break;
+        case 9: {
+            if (request.flags & ~(AT_EACCESS_KERNEL
+                                  | AT_SYMLINK_NOFOLLOW_KERNEL)) {
+                result = -EINVAL;
+                break;
+            }
+            struct vfs_cred access_cred;
+            if (request.flags & AT_EACCESS_KERNEL)
+                proc_vfs_cred_snapshot(p, &access_cred);
+            else
+                proc_vfs_real_cred_snapshot(p, &access_cred);
+            result = vfs_access_path(&base1, path1, (int)request.size,
+                !(request.flags & AT_SYMLINK_NOFOLLOW_KERNEL), &access_cred);
+            break;
+        }
+        case 10: {
+            if (request.flags & ~AT_SYMLINK_NOFOLLOW_KERNEL) {
+                result = -EINVAL;
+                break;
+            }
+            struct vfs_path found;
+            result = vfs_lookup_path_as(&base1, path1,
+                !(request.flags & AT_SYMLINK_NOFOLLOW_KERNEL), &cred, &found);
+            if (result == 0) {
+                result = vfs_chmod_node(found.dentry->node,
+                                        (uint32_t)request.size, &cred);
+                vfs_path_release(&found);
+            }
+            break;
+        }
+        case 11: {
+            if (request.flags & ~AT_SYMLINK_NOFOLLOW_KERNEL) {
+                result = -EINVAL;
+                break;
+            }
+            struct vfs_path found;
+            result = vfs_lookup_path_as(&base1, path1,
+                !(request.flags & AT_SYMLINK_NOFOLLOW_KERNEL), &cred, &found);
+            if (result == 0) {
+                result = vfs_chown_node(found.dentry->node,
+                    (uint32_t)request.buffer, (uint32_t)request.size, &cred);
+                vfs_path_release(&found);
+            }
+            break;
+        }
+        case 12: {
+            if (request.flags & ~AT_SYMLINK_NOFOLLOW_KERNEL) {
+                result = -EINVAL;
+                break;
+            }
+            struct vfs_path found;
+            result = vfs_lookup_path_as(&base1, path1,
+                !(request.flags & AT_SYMLINK_NOFOLLOW_KERNEL), &cred, &found);
+            if (result < 0) break;
+            struct vfs_attr current;
+            result = vfs_getattr(found.dentry->node, &current);
+            if (result < 0) {
+                vfs_path_release(&found);
+                break;
+            }
+            struct vfs_timestamp atime = current.atime;
+            struct vfs_timestamp mtime = current.mtime;
+            bool explicit_times = false;
+            bool change_atime = true, change_mtime = true;
+            int64_t now = timer_realtime_ns();
+            if (!request.buffer) {
+                atime.sec = mtime.sec = now / 1000000000LL;
+                atime.nsec = mtime.nsec = now % 1000000000LL;
+            } else if (!user_buffer_ok(p, request.buffer,
+                                      2 * sizeof(struct extron_timespec))) {
+                result = -EFAULT;
+            } else {
+                const struct extron_timespec *times
+                    = (const struct extron_timespec *)request.buffer;
+                for (int i = 0; i < 2; i++)
+                    if (times[i].nsec < 0
+                            || (times[i].nsec >= 1000000000LL
+                                && times[i].nsec != UTIME_NOW_KERNEL
+                                && times[i].nsec != UTIME_OMIT_KERNEL))
+                        result = -EINVAL;
+                if (result >= 0) {
+                    explicit_times = !(times[0].nsec == UTIME_NOW_KERNEL
+                                    && times[1].nsec == UTIME_NOW_KERNEL);
+                    struct vfs_timestamp *values[2] = { &atime, &mtime };
+                    bool *changes[2] = { &change_atime, &change_mtime };
+                    for (int i = 0; i < 2; i++) {
+                        if (times[i].nsec == UTIME_OMIT_KERNEL)
+                            *changes[i] = false;
+                        else if (times[i].nsec == UTIME_NOW_KERNEL) {
+                            values[i]->sec = now / 1000000000LL;
+                            values[i]->nsec = now % 1000000000LL;
+                        } else {
+                            values[i]->sec = times[i].sec;
+                            values[i]->nsec = times[i].nsec;
+                        }
+                    }
+                }
+            }
+            if (result >= 0 && (change_atime || change_mtime)) {
+                if (!change_atime) atime = current.atime;
+                if (!change_mtime) mtime = current.mtime;
+                result = vfs_utimens_node(found.dentry->node, &atime, &mtime,
+                                           explicit_times, &cred);
+            }
+            vfs_path_release(&found);
             break;
         }
         default:
@@ -1078,6 +1434,91 @@ static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
     }
     vfs_path_release(&base2);
     vfs_path_release(&base1);
+    return (uint64_t)result;
+}
+
+static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    struct vfs_node *node;
+    int result = file_get_node(p, (int)fd, &node);
+    if (result < 0) return (uint64_t)result;
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_chmod_node(node, (uint32_t)mode, &cred);
+    vfs_node_release(node);
+    return (uint64_t)result;
+}
+
+static uint64_t sys_fchown(uint64_t fd, uint64_t uid, uint64_t gid,
+                           struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    struct vfs_node *node;
+    int result = file_get_node(p, (int)fd, &node);
+    if (result < 0) return (uint64_t)result;
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    result = vfs_chown_node(node, (uint32_t)uid, (uint32_t)gid, &cred);
+    vfs_node_release(node);
+    return (uint64_t)result;
+}
+
+static uint64_t sys_futimens(uint64_t fd, uint64_t times_addr, uint64_t c,
+                             struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    struct vfs_node *node;
+    int result = file_get_node(p, (int)fd, &node);
+    if (result < 0) return (uint64_t)result;
+    struct vfs_attr current;
+    result = vfs_getattr(node, &current);
+    struct vfs_timestamp atime = {0}, mtime = {0};
+    if (result == 0) {
+        atime = current.atime;
+        mtime = current.mtime;
+    }
+    bool explicit_times = false;
+    bool change_atime = true, change_mtime = true;
+    int64_t now = timer_realtime_ns();
+    if (result == 0 && !times_addr) {
+        atime.sec = mtime.sec = now / 1000000000LL;
+        atime.nsec = mtime.nsec = now % 1000000000LL;
+    } else if (result == 0 && !user_buffer_ok(
+                   p, times_addr, 2 * sizeof(struct extron_timespec))) {
+        result = -EFAULT;
+    } else if (result == 0) {
+        const struct extron_timespec *times
+            = (const struct extron_timespec *)times_addr;
+        explicit_times = !(times[0].nsec == UTIME_NOW_KERNEL
+                        && times[1].nsec == UTIME_NOW_KERNEL);
+        struct vfs_timestamp *values[2] = { &atime, &mtime };
+        struct vfs_timestamp original[2] = { current.atime, current.mtime };
+        bool *changes[2] = { &change_atime, &change_mtime };
+        for (int i = 0; i < 2; i++) {
+            if (times[i].nsec == UTIME_OMIT_KERNEL) {
+                *values[i] = original[i];
+                *changes[i] = false;
+            } else if (times[i].nsec == UTIME_NOW_KERNEL) {
+                values[i]->sec = now / 1000000000LL;
+                values[i]->nsec = now % 1000000000LL;
+            } else if (times[i].nsec < 0 || times[i].nsec >= 1000000000LL) {
+                result = -EINVAL;
+                break;
+            } else {
+                values[i]->sec = times[i].sec;
+                values[i]->nsec = times[i].nsec;
+            }
+        }
+    }
+    if (result == 0 && (change_atime || change_mtime)) {
+        struct vfs_cred cred;
+        proc_vfs_cred_snapshot(p, &cred);
+        result = vfs_utimens_node(node, &atime, &mtime,
+                                  explicit_times, &cred);
+    }
+    vfs_node_release(node);
     return (uint64_t)result;
 }
 
@@ -1317,6 +1758,23 @@ static const syscall_fn syscall_table[] = {
     [SYS_SYMLINK] = sys_symlink,
     [SYS_READLINK] = sys_readlink,
     [SYS_PATH_AT] = sys_path_at,
+    [SYS_GETUID] = sys_getuid,
+    [SYS_GETEUID] = sys_geteuid,
+    [SYS_GETGID] = sys_getgid,
+    [SYS_GETEGID] = sys_getegid,
+    [SYS_SETUID] = sys_setuid,
+    [SYS_SETEUID] = sys_seteuid,
+    [SYS_SETGID] = sys_setgid,
+    [SYS_SETEGID] = sys_setegid,
+    [SYS_GETGROUPS] = sys_getgroups,
+    [SYS_SETGROUPS] = sys_setgroups,
+    [SYS_UMASK] = sys_umask,
+    [SYS_CLOCK_GET] = sys_clock_get,
+    [SYS_CLOCK_SET] = sys_clock_set,
+    [SYS_FCHMOD] = sys_fchmod,
+    [SYS_FCHOWN] = sys_fchown,
+    [SYS_FUTIMENS] = sys_futimens,
+    [SYS_FCHDIR] = sys_fchdir,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

@@ -1,6 +1,7 @@
 #include <kernel/proc/signal.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
+#include <kernel/errno.h>
 #include <kernel/mm/paging.h>
 #include <kernel/klibc/string.h>
 #include <arch/exceptions.h>
@@ -142,11 +143,17 @@ static bool default_stop_is_ready(struct proc *p, struct thread *directed,
 
 static struct signal_info make_info(int signo, int code) {
     struct proc *sender = my_proc();
+    uint32_t sender_uid = 0;
+    if (sender) {
+        irq_spin_lock(&sender->cred_lock);
+        sender_uid = sender->euid;
+        irq_spin_unlock(&sender->cred_lock);
+    }
     return (struct signal_info) {
         .signo = signo,
         .code = code,
         .sender_pid = sender ? sender->pid : 0,
-        .sender_uid = 0,
+        .sender_uid = sender_uid,
     };
 }
 
@@ -302,11 +309,36 @@ int signal_send_thread(struct proc *target, struct thread *thread, int signo) {
     return 0;
 }
 
-struct group_send_context { uint64_t pgid; int signo; int count; };
+bool signal_may_send(struct proc *sender, struct proc *target, int signo) {
+    if (!sender || !target) return false;
+    if (sender == target) return true;
+    irq_spin_lock(&sender->cred_lock);
+    uint32_t sender_ruid = sender->ruid, sender_euid = sender->euid;
+    irq_spin_unlock(&sender->cred_lock);
+    irq_spin_lock(&target->cred_lock);
+    uint32_t target_ruid = target->ruid, target_suid = target->suid;
+    irq_spin_unlock(&target->cred_lock);
+    return sender_euid == 0
+        || sender_ruid == target_ruid || sender_ruid == target_suid
+        || sender_euid == target_ruid || sender_euid == target_suid
+        || (signo == SIGCONT && sender->sid == target->sid);
+}
+
+struct group_send_context {
+    struct proc *sender;
+    uint64_t pgid;
+    int signo;
+    int matched;
+    int count;
+};
 
 static void send_group_member(struct proc *p, void *opaque) {
     struct group_send_context *context = opaque;
-    if (!p->exited && p->pgid == context->pgid
+    if (p->exited || p->pgid != context->pgid)
+        return;
+    context->matched++;
+    if ((!context->sender
+            || signal_may_send(context->sender, p, context->signo))
             && signal_send(p, context->signo) == 0)
         context->count++;
 }
@@ -314,7 +346,20 @@ static void send_group_member(struct proc *p, void *opaque) {
 int signal_send_group(uint64_t pgid, int signo) {
     if (!pgid)
         return -1;
-    struct group_send_context context = { .pgid = pgid, .signo = signo };
+    struct group_send_context context = {
+        .sender = NULL, .pgid = pgid, .signo = signo
+    };
+    proc_for_each(send_group_member, &context);
+    if (context.count) return 0;
+    return context.matched ? -EPERM : -ESRCH;
+}
+
+int signal_send_group_from(struct proc *sender, uint64_t pgid, int signo) {
+    if (!sender || !pgid)
+        return -1;
+    struct group_send_context context = {
+        .sender = sender, .pgid = pgid, .signo = signo
+    };
     proc_for_each(send_group_member, &context);
     return context.count ? 0 : -1;
 }
