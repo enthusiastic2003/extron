@@ -85,23 +85,14 @@ static bool user_buffer_ok(struct proc *p, uint64_t addr, uint64_t len) {
 static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count,
                           struct aarch64_frame *f) {
     (void)f;
-    if (fd >= 3) {
-        if (!user_buffer_ok(my_proc(), buf_addr, count))
-            return (uint64_t)-1;
-        return (uint64_t)file_write(my_proc(), (int)fd,
-                                    (const void *)buf_addr, count);
-    }
-    if (fd != 1 && fd != 2) {
-        kprintf("[SYSCALL write] unsupported fd=%lu\n", (unsigned long)fd);
-        return (uint64_t)-1;
-    }
     if (!user_buffer_ok(my_proc(), buf_addr, count)) {
         kprintf("[SYSCALL write] rejected buffer %p (+%lu) from pid %lu\n",
                 (void *)buf_addr, (unsigned long)count,
                 my_proc() ? (unsigned long)my_proc()->pid : 0);
         return (uint64_t)-1;
     }
-    return (uint64_t)tty_write((const void *)buf_addr, count);
+    return (uint64_t)file_write(my_proc(), (int)fd,
+                                (const void *)buf_addr, count);
 }
 
 /* x86 needs this because FS_BASE (its TLS base) historically requires
@@ -143,6 +134,9 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
             p ? (unsigned long)p->pid : 0, (unsigned long)status);
     if (p) {
         p->exit_status = (int)status;
+        /* Descriptor lifetime ends at exit, not when the parent eventually
+         * reaps the zombie. In particular this publishes pipe EOF now. */
+        file_table_close_all(p);
         proc_set_zombie(p);
         /* The parent may be blocked in sys_wait() on its own address as
          * a channel. Safe to signal before we stop running: this whole
@@ -167,15 +161,6 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
                          struct aarch64_frame *f) {
     (void)f;
-    if (fd >= 3) {
-        if (!user_buffer_ok(my_proc(), buf_addr, count))
-            return (uint64_t)-1;
-        return (uint64_t)file_read(my_proc(), (int)fd, (void *)buf_addr, count);
-    }
-    if (fd != 0) {
-        kprintf("[SYSCALL read] unsupported fd=%lu\n", (unsigned long)fd);
-        return (uint64_t)-1;
-    }
     /* Checked before blocking, not after: kbd_getc() sleeps, and coming
      * back from that only to discover the destination was never valid
      * would mean a keystroke consumed and thrown away. */
@@ -185,7 +170,7 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
                 my_proc() ? (unsigned long)my_proc()->pid : 0);
         return (uint64_t)-1;
     }
-    return (uint64_t)tty_read((void *)buf_addr, count);
+    return (uint64_t)file_read(my_proc(), (int)fd, (void *)buf_addr, count);
 }
 
 #define TCGETS 0x5401
@@ -207,7 +192,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
                           struct aarch64_frame *f) {
     (void)f;
     struct proc *p = my_proc();
-    if (fd > 2)
+    if (!file_is_tty(p, (int)fd))
         return (uint64_t)-1;
     if (request == TCGETS) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
@@ -234,15 +219,10 @@ static int poll_scan(struct extron_pollfd *fds, size_t count) {
     int ready = 0;
     for (size_t i = 0; i < count; i++) {
         fds[i].revents = 0;
-        if (fds[i].fd == 0) {
-            if ((fds[i].events & POLLIN) && kbd_input_ready())
-                fds[i].revents |= POLLIN;
-        } else if (fds[i].fd == 1 || fds[i].fd == 2) {
-            if (fds[i].events & POLLOUT)
-                fds[i].revents |= POLLOUT;
-        } else if (fds[i].fd >= 0) {
+        if (fds[i].fd >= 0
+                && file_poll(my_proc(), fds[i].fd, fds[i].events,
+                             &fds[i].revents) < 0)
             fds[i].revents = POLLNVAL;
-        }
         if (fds[i].revents)
             ready++;
     }
@@ -265,12 +245,73 @@ static uint64_t sys_poll(uint64_t fds_addr, uint64_t count, uint64_t timeout_raw
 
     bool waits_for_input = false;
     for (size_t i = 0; i < count; i++)
-        if (fds[i].fd == 0 && (fds[i].events & POLLIN))
+        if (file_is_tty(my_proc(), fds[i].fd)
+                && (fds[i].events & POLLIN))
             waits_for_input = true;
     if (!waits_for_input)
         return 0;
     kbd_wait_for_input(timeout);
     return (uint64_t)poll_scan(fds, count);
+}
+
+#define O_CLOEXEC 02000000
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#define F_DUPFD_CLOEXEC 1030
+
+static uint64_t sys_pipe(uint64_t fds_addr, uint64_t flags, uint64_t c,
+                         struct aarch64_frame *f) {
+    (void)c; (void)f;
+    if (!user_buffer_ok(my_proc(), fds_addr, 2 * sizeof(int)))
+        return (uint64_t)-1;
+    int fds[2];
+    if (file_pipe(my_proc(), fds, (int)flags) != 0)
+        return (uint64_t)-1;
+    ((int *)fds_addr)[0] = fds[0];
+    ((int *)fds_addr)[1] = fds[1];
+    return 0;
+}
+
+static uint64_t sys_dup(uint64_t oldfd, uint64_t flags, uint64_t c,
+                        struct aarch64_frame *f) {
+    (void)c; (void)f;
+    if (flags & ~O_CLOEXEC)
+        return (uint64_t)-1;
+    return (uint64_t)file_dup(my_proc(), (int)oldfd, 0,
+                              !!(flags & O_CLOEXEC));
+}
+
+static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t flags,
+                         struct aarch64_frame *f) {
+    (void)f;
+    if (flags & ~O_CLOEXEC)
+        return (uint64_t)-1;
+    return (uint64_t)file_dup2(my_proc(), (int)oldfd, (int)newfd,
+                               !!(flags & O_CLOEXEC));
+}
+
+static uint64_t sys_fcntl(uint64_t fd, uint64_t request, uint64_t arg,
+                          struct aarch64_frame *f) {
+    (void)f;
+    switch (request) {
+        case F_DUPFD:
+            return (uint64_t)file_dup(my_proc(), (int)fd, (int)arg, 0);
+        case F_DUPFD_CLOEXEC:
+            return (uint64_t)file_dup(my_proc(), (int)fd, (int)arg, 1);
+        case F_GETFD:
+            return (uint64_t)file_get_fd_flags(my_proc(), (int)fd);
+        case F_SETFD:
+            return (uint64_t)file_set_fd_flags(my_proc(), (int)fd, (int)arg);
+        case F_GETFL:
+            return (uint64_t)file_get_status_flags(my_proc(), (int)fd);
+        case F_SETFL:
+            return (uint64_t)file_set_status_flags(my_proc(), (int)fd, (int)arg);
+        default:
+            return (uint64_t)-1;
+    }
 }
 
 /* Ticks-from-time using the actually configured Hz (timer_ticks_per_
@@ -747,6 +788,10 @@ static const syscall_fn syscall_table[] = {
     [SYS_STAT]       = sys_stat,
     [SYS_IOCTL]      = sys_ioctl,
     [SYS_POLL]       = sys_poll,
+    [SYS_PIPE]       = sys_pipe,
+    [SYS_DUP]        = sys_dup,
+    [SYS_DUP2]       = sys_dup2,
+    [SYS_FCNTL]      = sys_fcntl,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

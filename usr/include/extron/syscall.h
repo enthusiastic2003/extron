@@ -33,6 +33,10 @@
 #define SYS_STAT        22
 #define SYS_IOCTL       23
 #define SYS_POLL        24
+#define SYS_PIPE        25
+#define SYS_DUP         26
+#define SYS_DUP2        27
+#define SYS_FCNTL       28
 
 /* x8 = number, x0-x2 = args, result in x0 — the AAPCS64/Linux
  * convention the kernel's syscall.h documents. "memory" clobber so the

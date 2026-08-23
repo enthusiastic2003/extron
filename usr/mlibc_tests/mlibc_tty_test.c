@@ -4,6 +4,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 
 static int fail(const char *what) {
     printf("TTY_TEST_FAIL: %s: %s\n", what, strerror(errno));
@@ -23,6 +24,37 @@ int main(void) {
         return fail("TIOCGWINSZ");
     if (!size.ws_row || !size.ws_col) {
         puts("TTY_TEST_FAIL: zero terminal dimensions");
+        return 1;
+    }
+
+    struct pollfd writable = {
+        .fd = STDOUT_FILENO,
+        .events = POLLOUT,
+    };
+    if (poll(&writable, 1, 0) != 1 || !(writable.revents & POLLOUT)) {
+        puts("TTY_TEST_FAIL: stdout did not poll writable");
+        return 1;
+    }
+
+    struct pollfd invalid = {
+        .fd = 99,
+        .events = POLLIN,
+    };
+    if (poll(&invalid, 1, 0) != 1 || !(invalid.revents & POLLNVAL)) {
+        puts("TTY_TEST_FAIL: invalid descriptor did not report POLLNVAL");
+        return 1;
+    }
+
+    /* Discard a possible LF left by a CRLF command terminator, then prove
+     * that a zero-timeout readiness check does not invent input. */
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved) != 0)
+        return fail("TCSAFLUSH");
+    struct pollfd readable = {
+        .fd = STDIN_FILENO,
+        .events = POLLIN,
+    };
+    if (poll(&readable, 1, 0) != 0 || readable.revents != 0) {
+        puts("TTY_TEST_FAIL: stdin unexpectedly readable after flush");
         return 1;
     }
 
@@ -46,7 +78,7 @@ int main(void) {
     if (tcsetattr(STDIN_FILENO, TCSANOW, &saved) != 0)
         return fail("tcsetattr restore");
 
-    printf("TTY_TEST_PASS: %ux%u termios round-trip\n",
+    printf("TTY_TEST_PASS: %ux%u termios + poll\n",
            (unsigned)size.ws_col, (unsigned)size.ws_row);
     return 0;
 }

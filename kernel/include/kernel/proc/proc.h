@@ -116,6 +116,7 @@ struct proc {
     struct proc         *parent;
     int                 exit_status;
     struct open_file    *files[PROC_MAX_FDS];
+    uint8_t             fd_flags[PROC_MAX_FDS];
     char                cwd[101]; /* canonical path relative to ramfs root */
 };
 

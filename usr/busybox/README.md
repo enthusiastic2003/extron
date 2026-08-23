@@ -27,9 +27,17 @@ tree lives elsewhere.
 ## Supported shell baseline
 
 The QEMU smoke test covers shell startup, external applet re-exec,
-`ls`, `cat hello.txt`, `mkdir`, `cd`, and `pwd`. This is backed by ramfs path
-resolution, directory iteration, `stat`/`fstat`, cwd inheritance, and the
-existing fork/exec/wait implementation.
+`ls`, `cat hello.txt`, `mkdir`, `cd`, `pwd`, input/output/append redirection,
+and multi-process pipelines. This is backed by ramfs path resolution,
+directory iteration, `stat`/`fstat`, cwd inheritance, fork/exec/wait, and a
+real descriptor table with shared open-file descriptions.
+
+Anonymous pipes use a 4 KiB kernel circular buffer. Readers and writers sleep
+on scheduler wait channels when the buffer is empty or full, so pipelines do
+not poll the UART or spin the CPU. `dup`, `dup2`, the `fcntl` operations used
+by ash (`F_DUPFD_CLOEXEC`, descriptor flags, and status flags), and close on
+exec are implemented. Closing or exiting the final writer delivers EOF to
+readers. Run `/mlibc_pipe_test.elf` to exercise these primitives directly.
 
 The console is now a kernel TTY rather than raw UART reads with hard-coded
 echo. It implements the termios and winsize ioctls used by BusyBox, canonical
@@ -40,11 +48,13 @@ editor therefore owns interactive echo and provides cursor editing, a
 interrupt-driven; finite `poll` waits use the scheduler timer and do not scan
 the UART in a loop. Run `/mlibc_tty_test.elf` to check the userspace ABI.
 
-This is not yet a complete POSIX shell environment. The TTY does not yet
-deliver `ISIG` control characters to process groups, and noncanonical `VTIME`
-combinations beyond the BusyBox path (`VMIN=1`, `VTIME=0`) are not complete.
-Pipelines and redirection need `pipe`, `dup2`, and more descriptor semantics;
-job control needs userspace signals, process groups, sessions, and controlling
-TTY semantics. The filesystem also still lacks `unlink`, `rename`, symlinks,
-permissions enforcement, and persistent storage. Those are the next
-compatibility layers, rather than BusyBox-specific libc workarounds.
+This is not yet a complete POSIX shell environment. A write to a pipe with no
+readers returns an error, but signals and `SIGPIPE` do not exist yet. Blocking
+`poll` currently sleeps for console input only; pipe readiness is supported
+for zero-time readiness checks. The TTY does not yet deliver `ISIG` control
+characters to process groups, and noncanonical `VTIME` combinations beyond
+the BusyBox path (`VMIN=1`, `VTIME=0`) are not complete. Job control needs
+userspace signals, process groups, sessions, and controlling TTY semantics.
+The filesystem also lacks `unlink`, `rename`, symlinks, permissions
+enforcement, and persistent storage. Those are the next compatibility layers,
+rather than BusyBox-specific libc workarounds.

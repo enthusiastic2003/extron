@@ -373,5 +373,6 @@ int proc_exec_replace(struct proc *p, const char *binary_path,
     flush_tlb();
 
     vm_space_destroy(old);
+    file_table_close_cloexec(p);
     return 0;
 }

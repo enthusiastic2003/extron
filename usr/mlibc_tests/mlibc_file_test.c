@@ -26,7 +26,9 @@ int main(void) {
     }
     check("missing file reports failure", fopen("missing", "rb") == NULL);
 
-    check("mkdir creates a ramfs directory", mkdir("saves", 0755) == 0);
+    char test_directory[32];
+    snprintf(test_directory, sizeof(test_directory), "file-test-%ld", (long)getpid());
+    check("mkdir creates a ramfs directory", mkdir(test_directory, 0755) == 0);
     FILE *created = fopen("default.cfg", "wb");
     check("fopen creates writable ramfs file", created != NULL);
     if (created) {

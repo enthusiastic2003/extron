@@ -8,6 +8,8 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <poll.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <stdlib.h>            // exit() — the real termination path, see __mlibc_start_main
 #include <mlibc/elf/startup.h> // mlibc::entry_stack — argc/argv, parsed by __dlapi_enter()
 
@@ -45,6 +47,10 @@
 #define SYS_STAT        22
 #define SYS_IOCTL       23
 #define SYS_POLL        24
+#define SYS_PIPE        25
+#define SYS_DUP         26
+#define SYS_DUP2        27
+#define SYS_FCNTL       28
 
 
 using main_fn = int (*)(int, char **);
@@ -412,6 +418,44 @@ int sys_mkdir(const char *path, mode_t mode) {
     return ret < 0 ? EIO : 0;
 }
 
+int sys_pipe(int *fds, int flags) {
+    long ret = syscall2(SYS_PIPE, (long)fds, flags);
+    return ret < 0 ? EMFILE : 0;
+}
+
+int sys_dup(int fd, int flags, int *newfd) {
+    long ret = syscall2(SYS_DUP, fd, flags);
+    if (ret < 0) return EBADF;
+    *newfd = (int)ret;
+    return 0;
+}
+
+int sys_dup2(int fd, int flags, int newfd) {
+    long ret = syscall3(SYS_DUP2, fd, newfd, flags);
+    return ret < 0 ? EBADF : 0;
+}
+
+int sys_fcntl(int fd, int request, va_list args, int *result) {
+    long argument = 0;
+    switch (request) {
+        case F_DUPFD:
+        case F_DUPFD_CLOEXEC:
+        case F_SETFD:
+        case F_SETFL:
+            argument = va_arg(args, int);
+            break;
+        case F_GETFD:
+        case F_GETFL:
+            break;
+        default:
+            return EINVAL;
+    }
+    long ret = syscall3(SYS_FCNTL, fd, request, argument);
+    if (ret < 0) return EBADF;
+    *result = (int)ret;
+    return 0;
+}
+
 int sys_vm_map(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
     sys_libc_log("[mlibc stub] sys_vm_map called\n");
     return ENOSYS; // You will implement this later for file-backed mapping
@@ -472,10 +516,9 @@ int sys_poll(struct pollfd *fds, nfds_t count, int timeout, int *num_events) {
 // Add any other functions mlibc complains about during linking as ENOSYS stubs here...
 
 int sys_isatty(int fd) {
-
-    if (fd == 0 || fd == 1 || fd == 2)
-        return 0;
-    return ENOTTY;
+    struct termios termios;
+    long ret = syscall3(SYS_IOCTL, fd, TCGETS, (long)&termios);
+    return ret < 0 ? ENOTTY : 0;
 }
 
 

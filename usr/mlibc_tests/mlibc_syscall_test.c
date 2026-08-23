@@ -23,12 +23,8 @@
  *    mlibc's headers, and the two syscall.h's are deliberately
  *    duplicated ABI boundaries, not something to mix.
  *
- * Built with the aarch64-extron cross toolchain
- * (~/extron-toolkit/toolchain/bin), not aarch64-linux-gnu-gcc — see
- * README at the bottom of this file for the exact build/inject
- * commands, since this doesn't go through the kernel's own Makefile
- * (that Makefile only knows how to build against usr/lib, the other
- * libc).
+ * Built by the normal Makefile with the aarch64-extron cross toolchain
+ * (~/extron-toolkit/toolchain/bin), not aarch64-linux-gnu-gcc.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +32,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <termios.h>
 #include <sys/wait.h>
 
 static int failures = 0;
@@ -74,8 +71,10 @@ static long raw_syscall(long n, long a1, long a2, long a3) {
 static void test_write(void) {
     printf("\n[mlibc_test] === SYS_WRITE (via printf/write) ===\n");
 
-    ssize_t n = write(1, "[mlibc_test] raw write() to fd 1\n", 34);
-    check("write() to fd 1 returns the byte count", n == 34);
+    static const char message[] = "[mlibc_test] raw write() to fd 1\n";
+    ssize_t n = write(1, message, sizeof(message) - 1);
+    check("write() to fd 1 returns the byte count",
+          n == (ssize_t)(sizeof(message) - 1));
 
     /* printf's return value is also SYS_WRITE's byte count, laundered
      * through stdio's own formatting and buffering. */
@@ -210,12 +209,12 @@ static void test_tcb_set(void) {
 }
 
 /* ---------------------------------------------------------------
- * SYS_MAP_INITRD — no libc entry point reaches it (sys_open() in
- * generic.cpp is an ENOSYS stub, so fopen() cannot currently open
- * anything, initrd or otherwise). Exercised directly.
+ * SYS_MAP_INITRD — the legacy zero-copy initrd mapping ABI has no libc
+ * entry point and remains useful to test directly. Ordinary programs
+ * now reach the same initrd seed through ramfs and fopen().
  * --------------------------------------------------------------- */
 static void test_map_initrd(void) {
-    printf("\n[mlibc_test] === SYS_MAP_INITRD (raw — no libc entry point yet) ===\n");
+    printf("\n[mlibc_test] === SYS_MAP_INITRD (raw) + ramfs fopen() ===\n");
 
     static const char name[] = "hello.txt";
     uint64_t size = 0;
@@ -237,13 +236,17 @@ static void test_map_initrd(void) {
     long bad = raw_syscall(SYS_MAP_INITRD, (long)missing, sizeof(missing) - 1, (long)&size);
     check("mapping a nonexistent initrd file fails", bad == 0);
 
-    /* fopen() itself: confirms sys_open()'s ENOSYS stub round-trips
-     * correctly into a real libc-level failure (NULL + errno set),
-     * rather than crashing or silently "succeeding". Documents the
-     * current real boundary of this port rather than hiding it. */
+    /* The same file must also be reachable through the ordinary mlibc
+     * descriptor path now that SYS_OPEN and ramfs are implemented. */
     FILE *f = fopen("hello.txt", "r");
-    check("fopen() correctly fails (sys_open is not implemented yet)", f == NULL);
-    if (f) fclose(f);
+    check("fopen() opens the initrd-seeded ramfs file", f != NULL);
+    if (f) {
+        char via_stdio[23] = {0};
+        size_t got = fread(via_stdio, 1, 22, f);
+        check("fread() returns the initrd-seeded contents",
+              got == 22 && memcmp(via_stdio, "Hello from the initrd!", 22) == 0);
+        check("fclose() closes the ramfs descriptor", fclose(f) == 0);
+    }
 }
 
 /* ---------------------------------------------------------------
@@ -307,18 +310,36 @@ static void test_fork_exec_wait(const char *self_path) {
 }
 
 /* ---------------------------------------------------------------
- * SYS_READ — the one syscall this suite cannot exercise unattended:
- * it blocks on a real keystroke (kbd_getc(), kernel/drivers/
- * keyboard.c). Deliberately LAST, so every automated check above has
- * already printed its result before anything here can block forever.
+ * SYS_READ — the one syscall this suite cannot exercise unattended.
+ * Enter noncanonical mode and flush bytes left by the command that
+ * launched this program, then wait for exactly one NEW key. Deliberately
+ * last, so every automated check has printed before this can block.
  * --------------------------------------------------------------- */
 static void test_read_interactive(void) {
     printf("\n[mlibc_test] === SYS_READ (via read()) — INTERACTIVE, type a character ===\n");
-    printf("[mlibc_test] waiting for one keystroke on fd 0...\n");
+
+    struct termios saved;
+    if (tcgetattr(STDIN_FILENO, &saved) != 0) {
+        check("tcgetattr() before interactive read", 0);
+        return;
+    }
+    struct termios raw = saved;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    printf("[mlibc_test] waiting for one fresh keystroke on fd 0...\n");
+    fflush(stdout);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) {
+        check("enter noncanonical mode and flush pending input", 0);
+        return;
+    }
 
     char c = 0;
-    ssize_t n = read(0, &c, 1);
+    ssize_t n = read(STDIN_FILENO, &c, 1);
+    int restored = tcsetattr(STDIN_FILENO, TCSANOW, &saved) == 0;
     check("read() from fd 0 returned exactly one byte", n == 1);
+    check("interactive test restored the TTY settings", restored);
     if (n == 1) {
         if (c >= 0x20 && c < 0x7F)
             printf("[mlibc_test] got '%c'\n", c);
@@ -353,35 +374,3 @@ int main(int argc, char **argv) {
     printf("\n[mlibc_test] === %d total failure(s) ===\n", failures);
     return failures;
 }
-
-/*
- * --- Build & inject (no Makefile rule for this yet — see the comment
- * at the top of this file) ---
- *
- * The compiler binary (aarch64-extron-gcc) is still a machine-local
- * toolchain build — building one from source is its own undertaking
- * (a binutils+GCC bootstrap, several patches to teach both about the
- * "extron" target name, plus the linker-script/specs fix that makes
- * __ehdr_start real — none of that is in this repo). What THIS repo
- * does carry is usr/mlibc-sysroot/: mlibc's actual build output for
- * this target — headers, libc.a, crt0.o/crt1.o — the part that
- * changes whenever sysdeps/extron changes and that a clone of this
- * repo should not have to rebuild an entire cross toolchain just to
- * get back. Confirmed sufficient on its own (not just "happens to
- * match a machine-local copy"): built successfully with the
- * toolchain's own aarch64-extron/{include,usr,lib} moved out of the
- * way entirely, producing a byte-identical binary.
- *
- * export PATH="$HOME/extron-toolkit/toolchain/bin:$PATH"   # or wherever yours lives
- * aarch64-extron-gcc --sysroot="$(pwd)/usr/mlibc-sysroot" \
- *     usr/mlibc_tests/mlibc_syscall_test.c \
- *     -o /tmp/mlibc_syscall_test -static -O1
- *
- * cp /tmp/mlibc_syscall_test build/initrd/mlibc_syscall_test.elf
- * tar -f initrd.tar --delete mlibc_syscall_test.elf 2>/dev/null
- * tar -rf initrd.tar -C build/initrd mlibc_syscall_test.elf
- *
- * Then point kernel.c's boot list at "mlibc_syscall_test.elf" (0 flags
- * — it needs no framebuffer), rebuild the kernel proper (make), and
- * boot under QEMU or real hardware.
- */

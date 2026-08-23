@@ -40,6 +40,10 @@
 #define SYS_STAT        22
 #define SYS_IOCTL       23
 #define SYS_POLL        24
+#define SYS_PIPE        25
+#define SYS_DUP         26
+#define SYS_DUP2        27
+#define SYS_FCNTL       28
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through
