@@ -10,6 +10,7 @@
 #include <kernel/drivers/timer.h>
 #include <kernel/fs/tar.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/fs/devfs.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
@@ -130,6 +131,25 @@ void kernel_stage2(uint64_t mb2_addr) {
      * multiboot2 MODULE tag -> tar_init(). */
     tar_init(mb2_addr);
     vfs_init();
+
+    /* Conventional top-level layout. /dev must exist as a plain ramfs
+     * directory before devfs_init() can mount over it — vfs_mount_at()
+     * covers an existing directory, the same as any other mount point.
+     * /bin isn't populated yet — every proc_create_from_binary() call
+     * below still names a root-level initrd file directly — but exec
+     * now resolves through the VFS, so anything placed under /bin at
+     * runtime is immediately runnable. */
+    struct vfs_path fs_root;
+    struct vfs_cred root_cred = {0};
+    if (vfs_root_path(&fs_root) == 0) {
+        vfs_mkdir(&fs_root, "/dev", 0755, &root_cred);
+        vfs_mkdir(&fs_root, "/bin", 0755, &root_cred);
+        vfs_mkdir(&fs_root, "/etc", 0755, &root_cred);
+        vfs_mkdir(&fs_root, "/tmp", 01777, &root_cred);
+        vfs_path_release(&fs_root);
+    }
+    devfs_init();
+
     tar_list();
     struct tar_file f;
     if (tar_open("hello.txt", &f)) {

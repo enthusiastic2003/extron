@@ -26,6 +26,7 @@ enum vfs_node_type {
     VFS_NODE_REGULAR,
     VFS_NODE_DIRECTORY,
     VFS_NODE_SYMLINK,
+    VFS_NODE_DEVICE,
 };
 
 struct vfs_timestamp {

@@ -1,7 +1,7 @@
 #include <kernel/proc/exec.h>
 #include <kernel/proc/elf_loader.h>
 #include <kernel/proc/sched.h>
-#include <kernel/fs/tar.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/mm/paging.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/kheap.h>
@@ -223,6 +223,69 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
 }
 
 /*
+ * Reads the whole of `binary_path` through the VFS into a fresh kmalloc
+ * buffer — not the initrd tar directly, so anything the ramfs namespace
+ * can resolve (an initrd-seeded file, one created after boot, one
+ * reached through a mount) is loadable. `requester` supplies the cwd and
+ * credentials path resolution runs as; NULL means a kernel-initiated
+ * boot spawn, which resolves from / as root.
+ *
+ * On success *out_size is the file's length and the return value is a
+ * buffer the caller must kfree(); on failure returns NULL.
+ */
+static void *load_binary_bytes(struct proc *requester, const char *binary_path,
+                               size_t *out_size) {
+    struct vfs_cred cred = {0};
+    struct vfs_path cwd = {0};
+    if (requester) {
+        proc_vfs_cred_snapshot(requester, &cred);
+        proc_cwd_snapshot(requester, &cwd);
+    } else if (vfs_root_path(&cwd) < 0) {
+        return NULL;
+    }
+
+    struct vfs_node *node;
+    struct vfs_path opened;
+    int result = vfs_open(&cwd, binary_path, 0, 0, &cred, &node, &opened);
+    vfs_path_release(&cwd);
+    if (result < 0) {
+        kprintf("[EXEC] %s not found (%d)\n", binary_path, result);
+        return NULL;
+    }
+    if (node->type != VFS_NODE_REGULAR
+            || vfs_check_access(node, &cred, VFS_ACCESS_EXEC) < 0) {
+        kprintf("[EXEC] %s is not an executable regular file\n", binary_path);
+        vfs_node_release(node);
+        vfs_path_release(&opened);
+        return NULL;
+    }
+
+    struct vfs_attr attr;
+    if (vfs_getattr(node, &attr) < 0) {
+        vfs_node_release(node);
+        vfs_path_release(&opened);
+        return NULL;
+    }
+    void *buffer = attr.size ? kmalloc(attr.size) : NULL;
+    if (attr.size && !buffer) {
+        kprintf("[EXEC] out of memory reading %s\n", binary_path);
+        vfs_node_release(node);
+        vfs_path_release(&opened);
+        return NULL;
+    }
+    long read = attr.size ? vfs_read(node, 0, buffer, attr.size) : 0;
+    vfs_node_release(node);
+    vfs_path_release(&opened);
+    if (read < 0 || (size_t)read != attr.size) {
+        kprintf("[EXEC] short read loading %s\n", binary_path);
+        if (buffer) kfree(buffer);
+        return NULL;
+    }
+    *out_size = attr.size;
+    return buffer;
+}
+
+/*
  * Build a complete, ready-to-run address space for `binary_path`.
  *
  * Everything a process needs and nothing that belongs to whoever asked:
@@ -231,22 +294,24 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
  * property is what makes execve() safe to attempt — the old image is
  * only discarded once there is definitely a new one to replace it with.
  */
-static int exec_image_build(const char *binary_path, unsigned flags,
-                            const char *const *args, int argc,
+static int exec_image_build(struct proc *requester, const char *binary_path,
+                            unsigned flags, const char *const *args, int argc,
                             struct exec_image *out) {
-    struct tar_file f;
-    if (!tar_open(binary_path, &f)) {
-        kprintf("[EXEC] %s not found in initrd\n", binary_path);
+    size_t binary_size;
+    void *binary = load_binary_bytes(requester, binary_path, &binary_size);
+    if (!binary)
+        return -1;
+    if (argc < 1 || argc > EXEC_MAX_ARGS) {
+        kfree(binary);
         return -1;
     }
-    if (argc < 1 || argc > EXEC_MAX_ARGS)
-        return -1;
 
     out->mm = NULL;
 
     phys_addr_t ttbr0 = create_user_pml4();
     if (!ttbr0) {
         kprintf("[EXEC] out of memory creating page table for %s\n", binary_path);
+        kfree(binary);
         return -1;
     }
 
@@ -254,13 +319,16 @@ static int exec_image_build(const char *binary_path, unsigned flags,
     if (!mm) {
         kprintf("[EXEC] out of memory allocating vm_space for %s\n", binary_path);
         free_user_page_tables(ttbr0);
+        kfree(binary);
         return -1;
     }
     out->mm    = mm;
     out->ttbr0 = ttbr0;
 
-    if (parse_and_load_binary((virt_addr_t)f.data, f.size, ttbr0,
-                              &out->entry, mm) != 0) {
+    int load_result = parse_and_load_binary((virt_addr_t)binary, binary_size,
+                                            ttbr0, &out->entry, mm);
+    kfree(binary);
+    if (load_result != 0) {
         kprintf("[EXEC] ELF load failed for %s\n", binary_path);
         goto fail;
     }
@@ -319,7 +387,7 @@ struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flag
                                           const char *const *args, int argc) {
     struct exec_image img;
 
-    if (exec_image_build(binary_path, flags, args, argc, &img) != 0)
+    if (exec_image_build(NULL, binary_path, flags, args, argc, &img) != 0)
         return NULL;
 
     struct proc *p = kmalloc(sizeof(struct proc));
@@ -352,7 +420,7 @@ int proc_exec_replace(struct proc *p, const char *binary_path,
     struct thread *t = my_thread();
     if (!p || !t || t->process != p)
         return -1;
-    if (exec_image_build(binary_path, 0, args, argc, out) != 0)
+    if (exec_image_build(p, binary_path, 0, args, argc, out) != 0)
         return -1;
 
     struct vm_space *old = p->mm;

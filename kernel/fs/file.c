@@ -1,9 +1,10 @@
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/fs/devfs.h>
 #include <kernel/errno.h>
+#include <kernel/panic.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
-#include <kernel/drivers/tty.h>
 #include <kernel/drivers/keyboard.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/klibc/string.h>
@@ -13,6 +14,7 @@
 /* Extron's mlibc ABI values (abi-bits/fcntl.h). */
 #define O_ACCMODE  03
 #define O_WRONLY   01
+#define O_RDWR     02
 #define O_APPEND   02000
 #define O_NONBLOCK 04000
 #define O_CLOEXEC  02000000
@@ -35,35 +37,17 @@ struct pipe_buffer {
     char data[PIPE_CAPACITY];
 };
 
-/* Console descriptions are permanent kernel objects. Descriptor slots can
- * refer to them, duplicate them, or close them, but they are never freed. */
-static struct open_file console_input = {
-    .lock = SPINLOCK_INIT,
-    .refs = 1,
-    .kind = FILE_CONSOLE_IN,
-};
-static struct open_file console_output = {
-    .lock = SPINLOCK_INIT,
-    .refs = 1,
-    .kind = FILE_CONSOLE_OUT,
-};
-
-static bool permanent_file(const struct open_file *f) {
-    return f == &console_input || f == &console_output;
-}
+/* Placeholder for file_pipe()'s two-slot reservation below. Never
+ * installed as a real descriptor and never dereferenced. */
+static struct open_file reserved_slot;
 
 static void file_retain(struct open_file *f) {
-    if (permanent_file(f))
-        return;
     irq_spin_lock(&f->lock);
     f->refs++;
     irq_spin_unlock(&f->lock);
 }
 
 static void file_release(struct open_file *f) {
-    if (permanent_file(f))
-        return;
-
     irq_spin_lock(&f->lock);
     bool last = --f->refs == 0;
     irq_spin_unlock(&f->lock);
@@ -109,9 +93,34 @@ void file_table_init(struct proc *p) {
         p->files[fd] = NULL;
         p->fd_flags[fd] = 0;
     }
-    p->files[0] = &console_input;
-    p->files[1] = &console_output;
-    p->files[2] = &console_output;
+
+    /* Called from proc_init(), after p->cwd/p->cred are set up (root cwd,
+     * uid/gid 0 for every freshly-created proc) but before anything else
+     * exists to hand out an fd — so fd 0/1/2 all share one real open-file
+     * description against /dev/console, exactly like any other program's
+     * stdio would. */
+    struct vfs_cred cred;
+    struct vfs_path cwd;
+    proc_vfs_cred_snapshot(p, &cred);
+    proc_cwd_snapshot(p, &cwd);
+    struct vfs_node *node;
+    struct vfs_path opened;
+    int result = vfs_open(&cwd, "/dev/console", O_RDWR, 0, &cred, &node, &opened);
+    vfs_path_release(&cwd);
+    if (result < 0)
+        panic("file_table_init: /dev/console is missing");
+
+    struct open_file *console = kmalloc(sizeof(*console));
+    if (!console)
+        panic("file_table_init: out of memory");
+    memset(console, 0, sizeof(*console));
+    console->lock = (spinlock_t)SPINLOCK_INIT;
+    console->refs = 3;
+    console->kind = FILE_VNODE;
+    console->object.node = node;
+    console->path = opened;
+    console->flags = O_RDWR;
+    p->files[0] = p->files[1] = p->files[2] = console;
 }
 
 int file_table_clone(struct proc *dst, struct proc *src) {
@@ -211,7 +220,7 @@ int file_pipe(struct proc *p, int fds[2], int flags) {
     if (read_fd < 0)
         return -EMFILE;
     /* Reserve the first slot while finding the second. */
-    p->files[read_fd] = &console_input;
+    p->files[read_fd] = &reserved_slot;
     int write_fd = free_descriptor_from(p, 0);
     p->files[read_fd] = NULL;
     if (write_fd < 0)
@@ -452,8 +461,6 @@ long file_read(struct proc *p, int fd, void *buffer, size_t count) {
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_CONSOLE_IN)
-        return tty_read(buffer, count);
     if (f->kind == FILE_PIPE_READER)
         return pipe_read(f, buffer, count);
     if (f->kind != FILE_VNODE)
@@ -473,8 +480,6 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_CONSOLE_OUT)
-        return tty_write(buffer, count);
     if (f->kind == FILE_PIPE_WRITER)
         return pipe_write(f, buffer, count);
     if (f->kind != FILE_VNODE)
@@ -541,8 +546,8 @@ int file_close(struct proc *p, int fd) {
 int file_is_tty(struct proc *p, int fd) {
     if (!descriptor_ok(p, fd))
         return 0;
-    enum open_file_kind kind = p->files[fd]->kind;
-    return kind == FILE_CONSOLE_IN || kind == FILE_CONSOLE_OUT;
+    struct open_file *f = p->files[fd];
+    return f->kind == FILE_VNODE && devfs_is_console(f->object.node);
 }
 
 int file_poll(struct proc *p, int fd, short events, short *revents) {
@@ -552,13 +557,15 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_CONSOLE_IN) {
+    if (f->kind == FILE_VNODE && devfs_is_console(f->object.node)) {
         if ((events & POLLIN) && kbd_input_ready())
             *revents |= POLLIN;
-    } else if (f->kind == FILE_CONSOLE_OUT || f->kind == FILE_VNODE) {
         if (events & POLLOUT)
             *revents |= POLLOUT;
-        if (f->kind == FILE_VNODE && (events & POLLIN))
+    } else if (f->kind == FILE_VNODE) {
+        if (events & POLLOUT)
+            *revents |= POLLOUT;
+        if (events & POLLIN)
             *revents |= POLLIN;
     } else {
         struct pipe_buffer *pipe = f->object.pipe;

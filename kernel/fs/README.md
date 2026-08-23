@@ -106,13 +106,49 @@ Directory descriptors now also back `openat()`, `mkdirat()`, `faccessat()`,
 transitions, supplementary groups, permission denial, sticky and setgid
 semantics, timestamps, symlink no-follow metadata, and the new `*at()` calls.
 
+## Stage 5 devfs
+
+`/dev` is a second, real VFS mount (`kernel/fs/devfs.c`), covered over a plain
+ramfs directory the same way any future mount will be — not a set of special
+cases in ramfs. It is a fixed namespace: `console`, `tty` (an alias of the same
+inode, `nlink` 2), `null`, and `zero`. Every mutating `vfs_fs_ops` entry
+(`create`/`remove`/`rename`/`link`/`symlink`) returns `-EROFS` rather than
+being left null, since the VFS layer calls them unconditionally.
+
+`file_table_init()` now opens `/dev/console` through the VFS for fd 0/1/2,
+sharing one open-file description across all three exactly like any other
+process's stdio — there is no more a `FILE_CONSOLE_IN`/`FILE_CONSOLE_OUT`
+kind, and `file_is_tty()` recognizes the console by node identity instead.
+`mlibc_devfs_test.elf` checks the mount, the two device semantics, and that
+stdin really is `/dev/console` now.
+
+## Stage 6 VFS-backed program loading
+
+`execve()` and `proc_create_from_binary()` read the target ELF through the VFS
+(`kernel/proc/exec.c`'s `load_binary_bytes()`) — open, `fstat` for size, one
+`vfs_read()` into a kernel buffer — rather than pulling it out of the initrd
+tar directly. Path resolution runs as the calling process's own cwd and
+credentials (root's for a kernel-initiated boot spawn), and a real
+`VFS_ACCESS_EXEC` check now gates it, which the old tar-only path never
+enforced. Since ramfs already serves initrd-seeded files as ordinary nodes,
+this is also the first point at which a file created or mounted after boot —
+never present in the initrd — is directly executable. `mlibc_vfsexec_test.elf`
+proves exactly that: it copies an existing ELF's bytes into a brand-new file
+under `/tmp` and `execve()`s the copy.
+
+`/bin`, `/etc`, and `/tmp` now exist as real top-level directories, created
+before devfs mounts over `/dev`. `/bin` is not yet populated: BusyBox's own
+`CONFIG_BUSYBOX_EXEC_PATH` is compiled in as `/sh`, so relocating it needs a
+BusyBox rebuild with an updated path (or a `/sh` -> `/bin/sh` symlink once
+something else lives at the real location) — left for a follow-up rather than
+risked alongside everything else in this stage.
+
 ## Deliberately deferred
 
 - access-control lists, capabilities, file flags, and a user/group database;
 - complete identity APIs such as `setresuid()`/`setresgid()` and filesystem-ID
   variants;
-- devfs and VFS-backed console/TTY device nodes;
-- VFS-based executable loading (exec still reads an initrd image directly);
+- moving BusyBox and the other initrd binaries into `/bin` (see Stage 6);
 - persistent/block-backed storage and an unmount protocol.
 
 `usr/mlibc_tests/mlibc_file_test.c` exercises the namespace stages end to end:

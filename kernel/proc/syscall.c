@@ -1203,7 +1203,8 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     memset(st, 0, sizeof(*st));
     st->ino = attr.ino;
     st->mode = (attr.type == VFS_NODE_DIRECTORY ? 0040000
-              : attr.type == VFS_NODE_SYMLINK ? 0120000 : 0100000)
+              : attr.type == VFS_NODE_SYMLINK ? 0120000
+              : attr.type == VFS_NODE_DEVICE ? 0020000 : 0100000)
              | attr.mode;
     st->nlink = attr.nlink;
     st->uid = attr.uid;
@@ -1225,7 +1226,8 @@ static void store_extron_stat(struct extron_stat *st,
     memset(st, 0, sizeof(*st));
     st->ino = attr->ino;
     st->mode = (attr->type == VFS_NODE_DIRECTORY ? 0040000
-              : attr->type == VFS_NODE_SYMLINK ? 0120000 : 0100000)
+              : attr->type == VFS_NODE_SYMLINK ? 0120000
+              : attr->type == VFS_NODE_DEVICE ? 0020000 : 0100000)
              | attr->mode;
     st->nlink = attr->nlink;
     st->uid = attr->uid;

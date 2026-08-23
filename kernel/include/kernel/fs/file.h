@@ -12,8 +12,6 @@ struct proc;
 struct pipe_buffer;
 
 enum open_file_kind {
-    FILE_CONSOLE_IN,
-    FILE_CONSOLE_OUT,
     FILE_VNODE,
     FILE_PIPE_READER,
     FILE_PIPE_WRITER,
