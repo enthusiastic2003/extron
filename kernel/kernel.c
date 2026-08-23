@@ -57,26 +57,6 @@ void kernel_stage1(uint64_t mb2_addr) {
     arch_kernel_jump_to_stage2(mb2_addr, new_stack_top); /* noreturn */
 }
 
-/* Test-only, parked alongside its only caller in kernel_stage2() below
- * (the commented-out 2-proc scheduler test) — maps a fresh physical
- * page into `p`'s own address space at a fixed VA, purely so its EL0
- * code (user_test.elf's counter-increment loop) can write progress
- * somewhere the kernel can independently read back via
- * phys_to_virt_hhdm() — the same access pattern already used for the
- * PMM bitmap and the initrd — without either proc making a syscall.
- * Not part of proc_create_from_binary() (kernel/proc/exec.c): no future
- * real process needs a kernel-observable scratch page, this is
- * specific to proving the scheduler round-robins correctly. Returns
- * the page's physical address for timer_set_counter_watch().
- *
-static phys_addr_t map_test_counter_page(struct proc *p) {
-    phys_addr_t counter_phys = (phys_addr_t)pmm_alloc_page();
-    *(volatile uint64_t *)phys_to_virt_hhdm(counter_phys) = 0;
-    map_page(p->ttbr0, 0x600000, counter_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
-    return counter_phys;
-}
-*/
-
 /* Exercises kmalloc/kfree (kernel/mm/kheap.c — liballoc, already used
  * indirectly this whole time via proc_create_from_binary()'s struct
  * proc and kernel stack allocations, but never directly proven).
@@ -160,26 +140,11 @@ void kernel_stage2(uint64_t mb2_addr) {
         kprintf("hello.txt not found in initrd.\n");
     }
 
-    /* Scheduler bring-up test — parked for the keyboard-echo test below,
-     * no processes created this time. See git history / uncomment to
-     * bring back the 2-proc round-robin proof.
-     *
-    struct proc *proc_a = proc_create_from_binary("user_test.elf", 0);
-    struct proc *proc_b = proc_create_from_binary("user_test.elf", 0);
-    if (!proc_a || !proc_b) {
-        panic("kernel_stage2: failed to create scheduler test procs");
-    }
-
-    phys_addr_t counter_phys_a = map_test_counter_page(proc_a);
-    phys_addr_t counter_phys_b = map_test_counter_page(proc_b);
-
-    sched_policy_add(proc_a);
-    sched_policy_add(proc_b);
-    timer_set_counter_watch(counter_phys_a, counter_phys_b);
-
-    kprintf("Starting scheduler with 2 procs.\n");
-    sched_start();
-    */
+    /* The original 2-proc round-robin scheduler proof (user_test.elf,
+     * driven by map_test_counter_page()/timer_set_counter_watch()) is
+     * retired along with user_test.S — see git history for both if it's
+     * ever needed again. Superseded by the mlibc fork/exec/wait suite's
+     * own concurrency demonstration (usr/mlibc_tests/mlibc_fork_stress.c). */
     proc_table_init();
     sched_init();
 
@@ -221,91 +186,64 @@ void kernel_stage2(uint64_t mb2_addr) {
         fb_test_pattern();
     }
 
-    /* Verification payloads, all proven on QEMU and real hardware and
-     * parked to keep the console readable while the framebuffer is the
-     * thing under test. Same "one test at a time" pattern as the earlier
-     * scheduler and keyboard-echo tests above; uncomment a block to
-     * bring it back.
-     *
-     * Phase 2 — sleep/wake + VMA allocator:
-     *   sleep_test.elf, spin_write_test.elf, anon_alloc_test.elf
-     * Syscall pointer validation (user_buffer_ok):
-     *   badptr_test.elf — 3 checks
-     * Per-process CPU state across context switches. A PAIR, because one
-     * proc passes even with no save at all:
-     *   fp_test_a.elf + fp_test_b.elf — v0-v31, FPCR/FPSR, TPIDR_EL0
-     * The two independent clocks cross-checking each other (SYS_SLEEP
-     * counts 20Hz ticks, SYS_UPTIME_MS reads CNTPCT_EL0):
-     *   uptime_test.elf
-     * Userspace C: crt0 -> main -> libc -> syscalls -> exit, plus the
-     * shared liballoc on user pages, and SYS_MAP_INITRD:
-     *   libc_test.elf — 21 checks
-     * 8192 page allocations plus the out-of-memory refusal paths:
-     *   mem_stress.elf — 8 checks
-     *
-     * struct proc *badptr    = proc_create_from_binary("badptr_test.elf", 0);
-     * struct proc *fp_a      = proc_create_from_binary("fp_test_a.elf", 0);
-     * struct proc *fp_b      = proc_create_from_binary("fp_test_b.elf", 0);
-     * struct proc *uptime    = proc_create_from_binary("uptime_test.elf", 0);
-     * struct proc *libc      = proc_create_from_binary("libc_test.elf", 0);
-     * struct proc *memstress = proc_create_from_binary("mem_stress.elf", 0);
-     * sched_policy_add(badptr);  sched_policy_add(fp_a);
-     * sched_policy_add(fp_b);    sched_policy_add(uptime);
-     * sched_policy_add(libc);    sched_policy_add(memstress);
-     *
-     * heartbeat_test.elf stays parked too — its ~5 dots/second is exactly
-     * the clutter this is about, and its job (proving a blocked reader
-     * really yields the CPU) is done.
-     *
-     * struct proc *heartbeat = proc_create_from_binary("heartbeat_test.elf", 0);
-     * sched_policy_add(heartbeat);
+    /* The raw-syscall/hand-rolled-asm test payloads that used to be
+     * parked here (sleep_test, spin_write_test, anon_alloc_test,
+     * badptr_test, fp_test_a/b, uptime_test, libc_test, mem_stress,
+     * heartbeat_test, read_echo_test, fb_user_test, fork_test — all
+     * .S/.c files directly under usr/) are retired. Every one of them
+     * either had its coverage superseded outright (DOOM + fib_ticker +
+     * key_monitor together demonstrate real concurrency and framebuffer
+     * use far more thoroughly than the smoke tests they replace) or was
+     * ported to a real-mlibc equivalent under usr/mlibc_tests/:
+     *   mlibc_badptr_test.c   — user_buffer_ok() pointer isolation
+     *   mlibc_fp_test.c       — FP/SIMD + TPIDR_EL0 across preemption
+     *   mlibc_mem_stress.c    — allocator load + OOM refusal paths
+     *   mlibc_fork_stress.c   — fork/execve/wait + PMM leak check
+     *   mlibc_syscall_test.c  — every syscall, exercised through mlibc
+     * See git history for the retired originals if ever needed again.
+     * All future usr/ tests are written against mlibc, not raw
+     * syscalls or hand-rolled asm — see any of the files above for the
+     * established pattern (a local raw_syscall() shim only for the
+     * handful of extron-specific syscalls mlibc has no libc entry point
+     * for at all).
      */
 
-    /* One proc left running: it blocks in SYS_READ and echoes what you
-     * type. Silent until then, so it costs nothing on the console while
-     * still showing the system is alive and responsive — and with
-     * nothing else runnable it parks the CPU in schedule()'s wfi idle
-     * path (e6acf26) rather than spinning. */
-    /* The console echo proc is parked now that DOOM is the payload: it
-     * reads the same keystrokes DOOM does (the ISR feeds both the
-     * blocking kbuf and the shared ring) and echoes them to serial,
-     * which turns every movement key into console noise.
-     *
-     * struct proc *reader = proc_create_from_binary("read_echo_test.elf", 0);
-     * sched_policy_add(reader);
-     */
+    /* TEMPORARY — real-hardware verification of the four mlibc_tests/
+     * ports (already 0-failure in QEMU) plus the pre-existing
+     * mlibc_syscall_test.c. DOOM/fib_ticker/key_monitor parked below
+     * for this run; see git history / uncomment to bring them back once
+     * hardware confirms these. */
+    struct proc *badptr = proc_create_from_binary("mlibc_badptr_test.elf", 0);
+    if (!badptr) panic("kernel_stage2: failed to create mlibc_badptr_test");
+    sched_policy_add(badptr);
 
-    /* Userspace framebuffer smoke test — proven, parked alongside the
-     * rest now that DOOM exercises the same path for real.
-     *
-     * struct proc *fbuser = proc_create_from_binary("fb_user_test.elf",
-     *                                               PROC_MAP_FRAMEBUFFER);
-     * sched_policy_add(fbuser);
-     */
+    struct proc *fptest = proc_create_from_binary("mlibc_fp_test.elf", 0);
+    if (!fptest) panic("kernel_stage2: failed to create mlibc_fp_test");
+    sched_policy_add(fptest);
 
-    /* fork/execve/wait — Phase 3. Run alone, deliberately: its PMM
-     * free-page numbers are only a valid leak measurement in isolation,
-     * since DOOM/fib/key_monitor allocating underneath would move that
-     * count for reasons unrelated to what is being tested. Restore the
-     * commented-out trio below once this has a clean run. */
-    struct proc *forktest = proc_create_from_binary("fork_test.elf", 0);
-    if (!forktest) {
-        panic("kernel_stage2: failed to create the fork test proc");
-    }
-    sched_policy_add(forktest);
+    struct proc *memstress = proc_create_from_binary("mlibc_mem_stress.elf", 0);
+    if (!memstress) panic("kernel_stage2: failed to create mlibc_mem_stress");
+    sched_policy_add(memstress);
 
-    /*
-     * DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
+    struct proc *forkstress = proc_create_from_binary("mlibc_fork_stress.elf", 0);
+    if (!forkstress) panic("kernel_stage2: failed to create mlibc_fork_stress");
+    sched_policy_add(forkstress);
+
+    struct proc *syscalltest = proc_create_from_binary("mlibc_syscall_test.elf", 0);
+    if (!syscalltest) panic("kernel_stage2: failed to create mlibc_syscall_test");
+    sched_policy_add(syscalltest);
+
+    /* DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
      * ring at creation, so its frame loop makes no syscall to draw and
      * none to poll input — only SYS_SLEEP to pace itself and
      * SYS_UPTIME_MS for its clock. The WAD comes out of the initrd via
      * SYS_MAP_INITRD, mapped rather than copied.
      *
-     * Skipped, not fatal, when there is no display: the firmware
-     * refuses ALLOCATE_BUFFER with no HDMI sink attached (config.txt
-     * has no hdmi_force_hotplug), and panicking on that used to take
-     * the whole boot down, including every process that never wanted a
-     * framebuffer. A headless board is a normal way to run this kernel.
+     * Creation is allowed to fail without panicking the boot: the
+     * firmware refuses ALLOCATE_BUFFER with no HDMI sink attached
+     * (config.txt has no hdmi_force_hotplug), and a headless board is a
+     * normal way to run this kernel, not a reason to take the rest of
+     * the boot down with it.
      *
      * struct proc *doom = proc_create_from_binary("doom.elf",
      *                                             PROC_MAP_FRAMEBUFFER);
@@ -315,27 +253,11 @@ void kernel_stage2(uint64_t mb2_addr) {
      *     kprintf("[BOOT] no framebuffer — skipping DOOM, continuing headless\n");
      * }
      *
-     * Runs concurrently with DOOM, and is the actual demonstration that
-     * this is a multitasking system rather than a program loader: DOOM
-     * is CPU-bound and renders continuously, this one sleeps through
-     * almost its whole life and wakes on a timer, and neither knows the
-     * other exists. Its elapsed-time column is the measurement — if the
-     * scheduler starved it behind DOOM's render loop, or SYS_SLEEP
-     * drifted, the wall clock and the sleep count would separate.
-     *
      * struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
      * if (!fib) {
      *     panic("kernel_stage2: failed to create the fibonacci proc");
      * }
      * sched_policy_add(fib);
-     *
-     * Third proc, on the input path DOOM does NOT use: it blocks in
-     * SYS_READ (kbd_getc -> sleep(&kbuf)) while DOOM polls the mapped
-     * ring. The ISR feeds both, so the same keystroke moves the player
-     * and prints here — the two consumers are independent, not
-     * exclusive. This is also the only thing currently exercising the
-     * channel-based sleep/wake that hung the kernel earlier in this
-     * port.
      *
      * struct proc *keymon = proc_create_from_binary("key_monitor.elf", 0);
      * if (!keymon) {
@@ -344,7 +266,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * sched_policy_add(keymon);
      */
 
-    kprintf("Starting scheduler — fork_test running alone.\n");
+    kprintf("Starting scheduler — mlibc_tests (badptr, fp, mem_stress, fork_stress, syscall_test).\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

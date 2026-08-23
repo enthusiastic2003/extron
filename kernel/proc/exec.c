@@ -142,19 +142,37 @@ static int map_framebuffer_into(struct vm_space *mm, const char *binary_path) {
 /* The whole argument block has to fit in the single page it is written
  * into, or build_arg_stack() would run off the bottom of that page and
  * corrupt the stack page below it. Sized so it cannot: worst case is
- * every argument present, every byte used, plus the pointer array and
- * its NULL terminator, plus 16 bytes of alignment slack. */
-_Static_assert(EXEC_ARG_BYTES + (EXEC_MAX_ARGS + 1) * sizeof(uint64_t) + 16
+ * every argument present, every byte used, plus argc's own word, the
+ * argv pointer array, argv's NULL terminator, envp's (empty) NULL
+ * terminator, plus 16 bytes of alignment slack. */
+_Static_assert(EXEC_ARG_BYTES + (EXEC_MAX_ARGS + 3) * sizeof(uint64_t) + 16
                < PAGE_SIZE, "exec argument block must fit one stack page");
 
 /*
- * Lay argc/argv out on the top page of the new stack.
+ * Lay out a REAL argc/argv/envp stack — the actual AArch64/SysV ELF
+ * entry-point ABI (argc at [sp], argv[] after it, a NULL, then envp[]
+ * — empty here, so just one more NULL), not the simplified
+ * "argc/argv in registers only" shape this kernel used until now.
  *
- * The strings and the pointer array both live ABOVE the returned stack
- * pointer, so the first thing the process does — establishing its own
- * frame below sp — can't tread on them. argc and argv reach main() in
- * x0/x1 (usr/lib/crt0.S passes them straight through), so nothing needs
- * to be readable at sp itself the way the Linux ELF ABI requires.
+ * That simplification was fine for usr/lib/crt0.S, which never reads
+ * sp for anything — it takes argc/argv straight from x0/x1 (still set
+ * up the same way below, untouched). It silently was NOT fine for
+ * mlibc: __dlapi_enter()'s bootstrap (sysdeps/extron/generic/
+ * generic.cpp's __mlibc_start_main()) runs a real
+ * [[gnu::constructor]] — options/elf/generic/startup.cpp's
+ * init_libc() — completely automatically, as part of running this
+ * executable's own .init_array, and that constructor unconditionally
+ * parses whatever pointer __dlapi_enter() was given as a genuine
+ * SysV stack. Handing it anything else (a bare argv array, a null,
+ * anything not shaped exactly like this) is read as valid argc/argv/
+ * envp and corrupts mlibc's own startup state before main() ever
+ * runs. There is no way to opt out of that constructor short of
+ * patching mlibc's own options/elf code — building the real shape
+ * once, here, is far less invasive than that would be.
+ *
+ * The strings and this whole block live ABOVE the returned stack
+ * pointer, so the first thing the process does — establishing its
+ * own frame below sp — can't tread on them.
  *
  * `top_phys` is the physical page backing [USER_STACK_TOP-PAGE_SIZE,
  * USER_STACK_TOP). Writing through the HHDM is what lets this run
@@ -180,16 +198,23 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     }
 
     off &= ~(size_t)7;
-    off -= (size_t)(argc + 1) * sizeof(uint64_t);
+    /* argc's own word, argc argv pointers, argv's NULL terminator,
+     * envp's (empty) NULL terminator. */
+    off -= (size_t)(argc + 3) * sizeof(uint64_t);
     off &= ~(size_t)15;             /* AAPCS64: sp must be 16-byte aligned */
 
-    uint64_t *argv = (uint64_t *)(page + off);
+    uint64_t *sp_words = (uint64_t *)(page + off);
+    sp_words[0] = (uint64_t)argc;
     for (int i = 0; i < argc; i++)
-        argv[i] = str_va[i];
-    argv[argc] = 0;                 /* argv[argc] == NULL, as C requires */
+        sp_words[1 + i] = str_va[i];
+    sp_words[1 + argc]     = 0;     /* argv[argc] == NULL, as C requires */
+    sp_words[1 + argc + 1] = 0;     /* envp[0] == NULL: no environment yet */
 
-    *out_argv_va = page_va + off;
-    return page_va + off;
+    /* x1 (our own crt0's argv register) points at the argv array
+     * specifically — one word past argc — not at sp itself. */
+    *out_argv_va = page_va + off + sizeof(uint64_t);
+    return page_va + off;           /* sp: argc, then argv[], as mlibc's
+                                      * init_libc() constructor expects */
 }
 
 /*

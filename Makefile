@@ -76,8 +76,24 @@ USER_CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
                -mcpu=cortex-a72 -mno-outline-atomics -fno-builtin \
                -MMD -MP -Iusr/include -g
 
+# --- mlibc-based userland tests (usr/mlibc_tests/) ---
+# Built with the real aarch64-extron cross toolchain against this repo's
+# own usr/mlibc-sysroot/ rather than aarch64-linux-gnu-gcc + usr/lib:
+# these are real mlibc programs (crt1/TLS/constructors via __dlapi_enter,
+# malloc, fork/execve/wait, printf) rather than the raw-syscall/hand-
+# rolled-libc payloads above. The toolchain binary itself is still a
+# machine-local build (see usr/mlibc_tests/mlibc_syscall_test.c's header
+# comment) — MLIBC_GCC can be overridden if it doesn't live at the
+# default path. The sysroot (headers + libc.a + crt0.o/crt1.o) is
+# checked into this repo and confirmed sufficient on its own.
+MLIBC_GCC     ?= $(HOME)/extron-toolkit/toolchain/bin/aarch64-extron-gcc
+MLIBC_SYSROOT := usr/mlibc-sysroot
+MLIBC_C_SRC   := $(wildcard usr/mlibc_tests/*.c)
+MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/%.elf,$(MLIBC_C_SRC))
+
 INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC)) \
                 $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
+                $(MLIBC_ELF) \
                 $(BUILD)/initrd/doom.elf
 
 # --- DOOM ---
@@ -137,6 +153,10 @@ $(BUILD)/initrd/%.elf: usr/%.S
 $(BUILD)/initrd/%.elf: usr/%.c $(USER_LIB_OBJ)
 	mkdir -p $(dir $@)
 	$(USER_CC) $(USER_CFLAGS) $(USER_LDFLAGS) $< $(USER_LIB_OBJ) -o $@
+
+$(BUILD)/initrd/%.elf: usr/mlibc_tests/%.c
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
 
 $(BUILD)/initrd/%: usr/%
 	mkdir -p $(dir $@)
