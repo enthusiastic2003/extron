@@ -162,7 +162,23 @@ static void sync_icache_dcache(uint64_t va, uint64_t size) {
     __asm__ volatile ("isb");
 }
 
-int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
+/*
+ * Map one page from already-encoded AArch64 attribute bits, rather than
+ * from paging.h's semantic flags.
+ *
+ * This exists for fork(): the child's copy of a page has to land with
+ * *exactly* the permissions and memory type the parent's mapping had,
+ * and the only faithful record of those is the parent's own descriptor.
+ * Round-tripping through the semantic flags would lose information —
+ * PAGE_NORMAL_NC and PAGE_CACHE_DISABLE both collapse into "not plain
+ * Normal", and there is no PAGE_* bit that means "read-only text" as
+ * distinct from "read-only data", so a re-derived flag set would be a
+ * guess. Copying the attribute bits verbatim is not a guess.
+ *
+ * `attrs` must be the descriptor with the physical address masked out;
+ * PTE_TABLE_OR_PAGE and PTE_VALID are added here.
+ */
+int map_page_raw(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t attrs) {
     /* -1 when an intermediate table can't be allocated. Any tables that
      * did get created on the way down stay: they're empty, correctly
      * linked, and the next mapping through this range will reuse them.
@@ -185,17 +201,50 @@ int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
         return -2;
     }
 
-    vl3[PT_IDX(virt)] = (phys & PAGE_ADDR_MASK) | hw_attrs_from_flags(flags)
+    vl3[PT_IDX(virt)] = (phys & PAGE_ADDR_MASK) | (attrs & ~PAGE_ADDR_MASK)
                        | PTE_TABLE_OR_PAGE | PTE_VALID;
 
     /* Only actual executable Normal memory needs this — Device mappings
-     * (MMIO, PAGE_CACHE_DISABLE) don't participate in cache coherency
-     * the same way, and nothing should ever be fetching instructions
-     * from one anyway. */
-    if (!(flags & PAGE_NX) && !(flags & PAGE_CACHE_DISABLE))
+     * don't participate in cache coherency the same way, and nothing
+     * should ever be fetching instructions from one anyway. Tested off
+     * the encoded bits so this holds for fork()'s copied text pages too,
+     * which is precisely where a stale I-cache would bite: the child
+     * executes bytes that reached RAM through the D-cache and have never
+     * been fetched as instructions from that physical page before. */
+    uint64_t attr_idx = (attrs >> 2) & 0x7;
+    if (!(attrs & PTE_UXN) && attr_idx == MAIR_IDX_NORMAL)
         sync_icache_dcache((uint64_t)phys_to_virt_hhdm(phys), PAGE_SIZE);
 
     return 0;
+}
+
+int map_page(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t flags) {
+    return map_page_raw(pml4, virt, phys, hw_attrs_from_flags(flags));
+}
+
+/* The raw L3 descriptor for `virt`, or 0 if it isn't mapped as a 4KB
+ * page. Deliberately does NOT resolve blocks: user tables are built
+ * exclusively by map_page_raw() above, so a block descriptor in one
+ * would mean something is wrong, and silently reporting a 1GB/2MB
+ * mapping as if it were a page is the kind of answer a caller would act
+ * on incorrectly. */
+uint64_t pte_lookup(pml4_t pml4, virt_addr_t virt) {
+    uint64_t *l0v = table_ptr(pml4);
+    uint64_t l0e = l0v[PML4_IDX(virt)];
+    if (!(l0e & PTE_VALID) || !(l0e & PTE_TABLE_OR_PAGE)) return 0;
+
+    uint64_t *l1v = table_ptr(l0e & PAGE_ADDR_MASK);
+    uint64_t l1e = l1v[PDPT_IDX(virt)];
+    if (!(l1e & PTE_VALID) || !(l1e & PTE_TABLE_OR_PAGE)) return 0;
+
+    uint64_t *l2v = table_ptr(l1e & PAGE_ADDR_MASK);
+    uint64_t l2e = l2v[PD_IDX(virt)];
+    if (!(l2e & PTE_VALID) || !(l2e & PTE_TABLE_OR_PAGE)) return 0;
+
+    uint64_t *l3v = table_ptr(l2e & PAGE_ADDR_MASK);
+    uint64_t l3e = l3v[PT_IDX(virt)];
+    if (!(l3e & PTE_VALID)) return 0;
+    return l3e;
 }
 
 /* Internal-only, mirrors x86's map_page_2mb: not part of paging.h's
@@ -289,6 +338,51 @@ phys_addr_t create_user_pml4(void) {
      * all-zero TTBR0_EL1 table for the user half needs no copying at
      * all to see it. */
     return alloc_table_zeroed();
+}
+
+/*
+ * Free the L0-L3 *tables* of a user address space, not the pages they
+ * map. The caller (vm_space_destroy(), kernel/mm/uvm.c) has already
+ * walked its VMA list and disposed of the leaves — which is the only
+ * place that knows which of them this process actually owned and which
+ * were shared views of the initrd or the framebuffer.
+ *
+ * Without this, every exec and every reaped process leaked one table
+ * page per populated 512-entry span, silently and forever. Nothing
+ * noticed while processes were created at boot and never destroyed.
+ *
+ * TTBR0 tables only. The kernel's own L0 (TTBR1) must never reach here:
+ * it is shared by every process and its tables map the HHDM.
+ */
+void free_user_page_tables(phys_addr_t pml4) {
+    if (!pml4)
+        return;
+
+    uint64_t *l0v = table_ptr(pml4);
+    for (int i = 0; i < 512; i++) {
+        uint64_t l0e = l0v[i];
+        if (!(l0e & PTE_VALID) || !(l0e & PTE_TABLE_OR_PAGE)) continue;
+
+        uint64_t *l1v = table_ptr(l0e & PAGE_ADDR_MASK);
+        for (int j = 0; j < 512; j++) {
+            uint64_t l1e = l1v[j];
+            /* A block descriptor here maps 1GB directly and owns no
+             * table below it. create_user_pml4()/map_page_raw() never
+             * produce one, but skipping rather than dereferencing is
+             * what keeps a corrupt entry from freeing a random page. */
+            if (!(l1e & PTE_VALID) || !(l1e & PTE_TABLE_OR_PAGE)) continue;
+
+            uint64_t *l2v = table_ptr(l1e & PAGE_ADDR_MASK);
+            for (int k = 0; k < 512; k++) {
+                uint64_t l2e = l2v[k];
+                if (!(l2e & PTE_VALID) || !(l2e & PTE_TABLE_OR_PAGE)) continue;
+                pmm_free_page((void *)(l2e & PAGE_ADDR_MASK));
+            }
+            pmm_free_page((void *)(l1e & PAGE_ADDR_MASK));
+        }
+        pmm_free_page((void *)(l0e & PAGE_ADDR_MASK));
+    }
+    pmm_free_page((void *)pml4);
 }
 
 uint64_t arch_translate_vm_flags(int vm_flags) {

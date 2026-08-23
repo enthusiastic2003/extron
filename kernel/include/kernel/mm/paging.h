@@ -94,6 +94,19 @@ phys_addr_t virt_to_phys(pml4_t pml4, virt_addr_t virt); /* walks an arbitrary p
 uint64_t* phys_to_virt_hhdm(phys_addr_t p);
 uint64_t* virt_to_phys_hhdm(virt_addr_t v);
 phys_addr_t create_user_pml4(void);
+
+/* Descriptor-level access, for fork()'s address-space clone. map_page()
+ * is map_page_raw() with hw_attrs_from_flags() applied; pte_lookup()
+ * hands back the exact bits so a copied page can be mapped with the
+ * parent's real permissions and memory type rather than a guess
+ * re-derived from the semantic PAGE_* flags. See map_page_raw(). */
+uint64_t    pte_lookup(pml4_t pml4, virt_addr_t virt);   /* raw L3 descriptor, 0 if unmapped */
+int         map_page_raw(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t attrs);
+
+/* Frees a user address space's page TABLES (not the pages they map —
+ * the caller disposes of those, since only it knows which were owned).
+ * Never call on the kernel's TTBR1 table. */
+void        free_user_page_tables(phys_addr_t pml4);
 void load_cr3(uint64_t phys_addr);
 void flush_tlb(void);
 

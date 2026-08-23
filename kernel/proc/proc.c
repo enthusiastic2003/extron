@@ -6,6 +6,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/panic.h>
 #include <kernel/console.h>
+#include <kernel/mm/uvm.h>
 #include <arch/irq_spinlock.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -32,6 +33,10 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->chan  = NULL;
     p->sleep_until = 0;
     p->mm    = NULL;
+    p->user_argc = 0;
+    p->user_argv = 0;
+    p->parent = NULL;
+    p->exit_status = 0;
 
     /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
      * have a guard page. kmalloc hands back byte-granularity memory from
@@ -69,6 +74,38 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->context.sp = p->kernel_stack_top;
 }
 
+/*
+ * The inverse of proc_init() plus the address space on top: kernel
+ * stack, page tables, every page the process owned, its slot in the
+ * table, and the struct itself.
+ *
+ * Never safe to call on the running process. It frees the kernel stack
+ * the caller would be standing on, and hands the page tables TTBR0_EL1
+ * points at back to the PMM to be reissued to somebody else while the
+ * TLB still refers to them. sys_wait() runs this in the PARENT's
+ * context, which is the whole reason a process becomes a ZOMBIE rather
+ * than cleaning up after itself in sys_exit().
+ */
+void proc_destroy(struct proc *p) {
+    if (!p)
+        return;
+
+    if (p->mm) {
+        vm_space_destroy(p->mm);   /* pages, then the tables under them */
+        p->mm = NULL;
+        p->ttbr0 = 0;
+    }
+
+    /* The guard page sits one page below the base and is unmapped by
+     * construction, so it can't go through vmm_free_pages(). */
+    virt_addr_t guard = p->kernel_stack_base - PAGE_SIZE;
+    vmm_free_pages(p->kernel_stack_base, PROC_KERNEL_STACK_PAGES);
+    vmm_free_unmapped_page(guard);
+
+    proc_table_remove(p);
+    kfree(p);
+}
+
 /* -------------------------------------------------------------
  * Process table — ported from x86's kernel/proc/proc.c
  * (~/extron-x86-backup/): a fixed slot array + a lock + a monotonic
@@ -81,14 +118,17 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
 static struct proc *proc_table[MAX_PROCS];
 static size_t       proc_table_count = 0;
 static spinlock_t   proc_table_lock  = SPINLOCK_INIT;
-static uint64_t     next_pid         = 0;
+/* PIDs start at 1, not 0. fork() reports 0 to the child and the child's
+ * pid to the parent, so a process that legitimately owned pid 0 would
+ * make those two answers indistinguishable. */
+static uint64_t     next_pid         = 1;
 
 void proc_table_init(void) {
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++)
         proc_table[i] = NULL;
     proc_table_count = 0;
-    next_pid         = 0;
+    next_pid         = 1;
     irq_spin_unlock(&proc_table_lock);
     kprintf("[PROC] Process table initialized (capacity %u)\n", (unsigned)MAX_PROCS);
 }
@@ -144,6 +184,41 @@ struct proc *proc_lookup(uint64_t pid) {
     return found;
 }
 
+/*
+ * Find a ZOMBIE child of `parent` for sys_wait() to reap, and report
+ * whether `parent` has any children at all.
+ *
+ * The second answer is what distinguishes "wait a bit longer" from
+ * "there is nothing left to wait for" — without it wait() would block
+ * forever the moment a caller reaped one child too many.
+ *
+ * Returns with the lock RELEASED: the caller immediately calls
+ * proc_destroy(), which takes it again via proc_table_remove(). Safe to
+ * let go of it in between only because the whole syscall path runs
+ * DAIF-masked, so nothing can touch the table in that window.
+ */
+struct proc *proc_find_zombie_child(struct proc *parent, bool *out_any_children) {
+    struct proc *found = NULL;
+    bool any = false;
+
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = proc_table[i];
+        if (!p || p->parent != parent)
+            continue;
+        any = true;
+        if (p->state == PROC_ZOMBIE) {
+            found = p;
+            break;
+        }
+    }
+    irq_spin_unlock(&proc_table_lock);
+
+    if (out_any_children)
+        *out_any_children = any;
+    return found;
+}
+
 void proc_for_each(void (*fn)(struct proc *, void *), void *arg) {
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++) {
@@ -178,8 +253,9 @@ void proc_dump_table(void) {
                 (unsigned long)p->ttbr0, (unsigned long)(uint64_t)p->chan);
     }
     kprintf("----------------------------------------\n");
-    kprintf("TOTAL: %lu\n========================================\n",
-            (unsigned long)proc_table_count);
+    kprintf("TOTAL: %lu  PMM FREE: %lu pages\n========================================\n",
+            (unsigned long)proc_table_count,
+            (unsigned long)pmm_free_pages());
 
     irq_spin_unlock(&proc_table_lock);
 }

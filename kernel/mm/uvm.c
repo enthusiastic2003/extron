@@ -44,14 +44,141 @@ void vm_space_destroy(struct vm_space *mm) {
         kfree(v);
         v = next;
     }
+
+    /* The leaves are gone; the tables that held them are not. One page
+     * per populated 512-entry span, which nothing reclaimed before
+     * because nothing ever destroyed an address space. */
+    free_user_page_tables(mm->ttbr0);
     kfree(mm);
 }
 
-/* First-fit scan through the gaps between consecutive VMAs (plus the
- * gap before the first one and after the last one, up to heap_end).
- * Free space is never itself a tracked object, so there's no separate
- * free-list to keep in sync — the gap a removed VMA leaves behind is
- * just automatically visible here on the next call. */
+/*
+ * First-fit over the free space inside [heap_start, heap_end).
+ *
+ * The VMA list now describes the WHOLE user address space — the ELF
+ * image at 0x400000, the stack at 0x500000, the framebuffer up at
+ * 0x50000000 — and not merely the regions this allocator handed out,
+ * because fork() has to clone what it can't otherwise see and execve()
+ * has to free it. So the scan can no longer assume every node sits
+ * inside the window, which the original could: a node below heap_start
+ * made `cur->base - cursor` underflow to a ~16EB "gap" that it happily
+ * accepted, then linked the new node ahead of it and left the list
+ * unsorted. Nodes behind the cursor are skipped, never subtracted.
+ *
+ * Free space is still never itself a tracked object — it's just
+ * whatever falls between consecutive VMAs — so removing a VMA merges
+ * its space back into the surrounding gap with no coalescing logic.
+ *
+ * Returns the base of a gap big enough for `span`, or 0. On success
+ * *out_prev is the node the new one should be linked after (NULL =
+ * list head). Caller holds mm->lock.
+ */
+static virt_addr_t find_gap_locked(struct vm_space *mm, size_t span,
+                                   struct vma **out_prev) {
+    virt_addr_t cursor = mm->heap_start;
+    struct vma *prev = NULL;
+    struct vma *cur  = mm->vmas;
+
+    while (cur) {
+        virt_addr_t end = cur->base + cur->size;
+        if (end <= cursor) {              /* entirely behind the cursor */
+            prev = cur;
+            cur  = cur->next;
+            continue;
+        }
+        if (cur->base >= cursor && cur->base - cursor >= span)
+            break;                        /* the gap in front of it fits */
+        if (end > cursor)
+            cursor = end;                 /* overlaps the cursor: step past */
+        prev = cur;
+        cur  = cur->next;
+    }
+
+    if (cursor >= mm->heap_end || mm->heap_end - cursor < span)
+        return 0;
+
+    *out_prev = prev;
+    return cursor;
+}
+
+/*
+ * Record a mapping somebody else created, so the address space knows
+ * about it.
+ *
+ * Everything outside this allocator's window is established directly
+ * with map_page(): the ELF loader's PT_LOAD segments, exec.c's user
+ * stack, the framebuffer and the keystroke ring. Until fork/execve
+ * those were invisible by consequence rather than by design — nothing
+ * cloned or tore down an address space, so nothing ever needed to
+ * enumerate it. Both now do.
+ */
+int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
+                     bool owns_pages) {
+    if (!mm || size == 0)
+        return -1;
+    if (base + size < base)
+        return -1;                        /* wraps */
+
+    virt_addr_t end = align_up(base + size, PAGE_SIZE);
+    base = align_down(base, PAGE_SIZE);
+    if (end <= base)
+        return -1;
+
+    irq_spin_lock(&mm->lock);
+
+    /* Absorb every node this range genuinely OVERLAPS into a single
+     * one. Two PT_LOAD segments routinely share a page — text ending
+     * partway through the page data begins in — so the loader really
+     * does hand over overlapping spans. Inserted as two nodes, that
+     * shared page would be described twice, and fork() would try to
+     * copy it twice: the second map_page_raw() returns -2 and the clone
+     * fails for a reason that has nothing to do with the fork.
+     *
+     * Abutting is NOT overlapping, and the difference is load-bearing.
+     * The framebuffer descriptor page ends exactly where the
+     * framebuffer itself begins (USER_FB_INFO_VA + PAGE_SIZE ==
+     * USER_FB_VA), and the two have opposite ownership — the
+     * descriptor is a page allocated per process, the framebuffer is
+     * VideoCore memory. Treating "ends where the next begins" as an
+     * overlap made that pair collide on the ownership check below and
+     * refused to map the display at all. */
+    struct vma *prev = NULL;
+    struct vma *cur  = mm->vmas;
+    while (cur) {
+        if (cur->base + cur->size <= base) { prev = cur; cur = cur->next; continue; }
+        if (cur->base >= end)
+            break;
+        /* Merging only makes sense if both halves agree on ownership: a
+         * node covering both a shared view and an owned allocation
+         * could not be torn down correctly either way round. */
+        if (cur->owns_pages != owns_pages) {
+            irq_spin_unlock(&mm->lock);
+            return -1;
+        }
+        if (cur->base < base) base = cur->base;
+        if (cur->base + cur->size > end) end = cur->base + cur->size;
+
+        struct vma *dead = cur;
+        cur = cur->next;
+        if (prev) prev->next = cur; else mm->vmas = cur;
+        kfree(dead);
+    }
+
+    struct vma *node = kmalloc(sizeof(struct vma));
+    if (!node) {
+        irq_spin_unlock(&mm->lock);
+        return -1;
+    }
+    node->base       = base;
+    node->size       = end - base;
+    node->owns_pages = owns_pages;
+    node->next       = cur;
+    if (prev) prev->next = node; else mm->vmas = node;
+
+    irq_spin_unlock(&mm->lock);
+    return 0;
+}
+
 virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags) {
     if (!mm || size == 0)
         return 0;
@@ -66,22 +193,13 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags) {
     size = align_up(size, PAGE_SIZE);
     irq_spin_lock(&mm->lock);
 
-    virt_addr_t cursor = mm->heap_start;
     struct vma *prev = NULL;
-    struct vma *cur = mm->vmas;
-
-    while (cur) {
-        if (cur->base - cursor >= size)
-            break;
-        cursor = cur->base + cur->size;
-        prev = cur;
-        cur = cur->next;
-    }
-
-    if (mm->heap_end - cursor < size) {
+    virt_addr_t cursor = find_gap_locked(mm, size, &prev);
+    if (!cursor) {
         irq_spin_unlock(&mm->lock);
         return 0; /* no gap big enough */
     }
+    struct vma *cur = prev ? prev->next : mm->vmas;
 
     uint64_t pflags = arch_translate_vm_flags(flags);
     size_t mapped = 0;
@@ -208,22 +326,13 @@ virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, in
 
     irq_spin_lock(&mm->lock);
 
-    virt_addr_t cursor = mm->heap_start;
     struct vma *prev = NULL;
-    struct vma *cur = mm->vmas;
-
-    while (cur) {
-        if (cur->base - cursor >= span)
-            break;
-        cursor = cur->base + cur->size;
-        prev = cur;
-        cur = cur->next;
-    }
-
-    if (mm->heap_end - cursor < span) {
+    virt_addr_t cursor = find_gap_locked(mm, span, &prev);
+    if (!cursor) {
         irq_spin_unlock(&mm->lock);
         return 0;
     }
+    struct vma *cur = prev ? prev->next : mm->vmas;
 
     uint64_t pflags = arch_translate_vm_flags(flags);
     size_t mapped = 0;
@@ -256,4 +365,107 @@ virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, in
 
     irq_spin_unlock(&mm->lock);
     return cursor + page_off;
+}
+
+/*
+ * Duplicate an address space: fork()'s half of the work.
+ *
+ * Every VMA is reproduced in the child. What happens to the pages
+ * underneath depends on owns_pages, and that distinction is the whole
+ * reason this walks the VMA list instead of walking the parent's page
+ * tables directly:
+ *
+ *  - owned pages (ELF image, stack, heap) are COPIED. The child gets
+ *    its own frame with the same contents, so the two processes diverge
+ *    from the instant they return.
+ *  - views (an initrd file, the framebuffer, the keystroke ring) are
+ *    SHARED — the same physical page is mapped again. Copying them
+ *    would be wrong twice over: the child would draw into a private
+ *    buffer nothing scans out, and a multi-megabyte WAD would be
+ *    duplicated per fork for no reason.
+ *
+ * A page table has no idea which of those a given frame is. The VMA
+ * list does.
+ *
+ * Permissions come from the parent's own descriptors via pte_lookup()
+ * rather than being re-derived from flags, so read-only text stays
+ * read-only text and the framebuffer's Normal-NC memory type survives —
+ * see map_page_raw() in kernel/mm/paging.c.
+ *
+ * Not copy-on-write. Every private page is copied eagerly, which is
+ * honest about what it costs: fork+exec pays for an image it is about
+ * to discard. COW is a later refinement and the reason paging.h already
+ * reserves PAGE_CUSTOM_COW.
+ */
+struct vm_space *vm_space_clone(struct vm_space *parent) {
+    if (!parent)
+        return NULL;
+
+    phys_addr_t child_ttbr0 = create_user_pml4();
+    if (!child_ttbr0)
+        return NULL;
+
+    struct vm_space *child = vm_space_create(child_ttbr0);
+    if (!child) {
+        free_user_page_tables(child_ttbr0);
+        return NULL;
+    }
+    child->heap_start = parent->heap_start;
+    child->heap_end   = parent->heap_end;
+
+    irq_spin_lock(&parent->lock);
+
+    /* Appended in order — the parent's list is already sorted, so the
+     * child's is too, with no scanning. */
+    struct vma *tail = NULL;
+
+    for (struct vma *v = parent->vmas; v; v = v->next) {
+        struct vma *node = kmalloc(sizeof(struct vma));
+        if (!node)
+            goto fail;
+        node->base       = v->base;
+        node->size       = v->size;
+        node->owns_pages = v->owns_pages;
+        node->next       = NULL;
+        if (tail) tail->next = node; else child->vmas = node;
+        tail = node;
+
+        for (size_t off = 0; off < v->size; off += PAGE_SIZE) {
+            virt_addr_t va  = v->base + off;
+            uint64_t    pte = pte_lookup(parent->ttbr0, va);
+            /* A VMA may legitimately contain unmapped pages: two
+             * PT_LOADs merged into one node can leave a gap between
+             * them. Skip rather than fabricating a mapping. */
+            if (!pte)
+                continue;
+
+            phys_addr_t src = (phys_addr_t)(pte & PAGE_ADDR_MASK);
+            phys_addr_t dst = src;
+
+            if (v->owns_pages) {
+                dst = (phys_addr_t)pmm_alloc_page();
+                if (!dst)
+                    goto fail;
+                memcpy(phys_to_virt_hhdm(dst), phys_to_virt_hhdm(src), PAGE_SIZE);
+            }
+
+            if (map_page_raw(child->ttbr0, va, dst, pte) != 0) {
+                if (v->owns_pages)
+                    pmm_free_page((void *)dst);
+                goto fail;
+            }
+        }
+    }
+
+    irq_spin_unlock(&parent->lock);
+    return child;
+
+fail:
+    irq_spin_unlock(&parent->lock);
+    /* The child is a well-formed but incomplete address space at this
+     * point — some VMAs fully mapped, the last one partly. Its own
+     * teardown already tolerates that: unmapped pages inside a VMA are
+     * skipped, exactly as above. */
+    vm_space_destroy(child);
+    return NULL;
 }

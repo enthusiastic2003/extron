@@ -168,6 +168,32 @@ int vmm_free_page(virt_addr_t v) {
     return vmm_free_pages(v, 1);
 }
 
+/*
+ * Release the bitmap reservation on a page that is deliberately NOT
+ * mapped, without touching the page tables or the PMM.
+ *
+ * Exists for one caller: a process's kernel-stack guard page
+ * (proc_init(), kernel/proc/proc.c). That page is allocated so nothing
+ * else claims the VA, then immediately unmapped so a stack overflow
+ * takes a clean Data Abort — its physical frame went back to the PMM at
+ * that moment. Handing the whole span to vmm_free_pages() when the proc
+ * is reaped would hit the guard first and panic on "never mapped",
+ * which is the right reaction to a genuine double-free and the wrong
+ * one here. Without this the VA stays reserved forever: 4KB of kernel
+ * address space leaked per process created.
+ */
+int vmm_free_unmapped_page(virt_addr_t v) {
+    if (v < KERNEL_HEAP_START || v + PAGE_SIZE > KERNEL_HEAP_START + KERNEL_HEAP_SIZE)
+        return -1;
+    if (kvirt_to_phys(v))
+        panic("VMM: vmm_free_unmapped_page() on a MAPPED page: %p\n", (void *)v);
+
+    spin_lock(&vmm_lock);
+    bitmap_clear((v - KERNEL_HEAP_START) / PAGE_SIZE);
+    spin_unlock(&vmm_lock);
+    return 0;
+}
+
 /* ---- stack ---- */
 
 virt_addr_t vmm_setup_stack() {

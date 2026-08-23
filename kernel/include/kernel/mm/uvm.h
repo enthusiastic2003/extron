@@ -47,7 +47,26 @@ struct vm_space {
 };
 
 struct vm_space *vm_space_create(phys_addr_t ttbr0);
+
+/* Unmaps and frees everything the process owned, frees the page tables
+ * themselves, then the vm_space. Must not run on the address space
+ * TTBR0_EL1 is currently pointed at. */
 void              vm_space_destroy(struct vm_space *mm);
+
+/* fork(): a new address space with its own page tables, every VMA
+ * reproduced — owned pages copied, views re-mapped to the same physical
+ * memory. Returns NULL on OOM, having freed whatever it built. */
+struct vm_space *vm_space_clone(struct vm_space *parent);
+
+/* Record a mapping established directly with map_page() — the ELF
+ * loader's segments, the user stack, the framebuffer. Without this the
+ * VMA list describes only what vm_allocate_region()/vm_map_region()
+ * handed out, and fork() cannot clone (nor execve() free) the parts of
+ * the address space it never hears about. Overlapping and abutting
+ * ranges of the same ownership coalesce; overlap with the opposite
+ * ownership is an error. Returns 0 on success, -1 otherwise. */
+int               vm_insert_region(struct vm_space *mm, virt_addr_t base,
+                                   size_t size, bool owns_pages);
 
 /* First-fit over the gaps between allocated regions. Maps and zeroes
  * `size` (rounded up to PAGE_SIZE) worth of anonymous memory with

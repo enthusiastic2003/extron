@@ -182,6 +182,37 @@ void get_bitmap_location(uint64_t mb2_addr){
 
 }
 
+/*
+ * Free pages, as a number rather than as a printout.
+ *
+ * Exists to make leaks measurable. Address-space teardown has a lot of
+ * pieces that each have to hand memory back — ELF segments, stack,
+ * heap, the page tables underneath all three — and every one of them
+ * fails silently when it forgets: the system keeps working perfectly
+ * and just has less memory than it did. Comparing this across a
+ * fork/exec/wait cycle turns that into something a test can assert on.
+ */
+uint64_t pmm_free_pages(void) {
+    spin_lock(&pmm_lock);
+
+    uint64_t max_pages = addr_to_idx(global_phys_mem_info.total_mem);
+    uint64_t* bmp64 = (uint64_t*)global_phys_mem_info.bmp_phys;
+
+    uint64_t used_pages = 0;
+    uint64_t full_words = max_pages / 64;
+    uint64_t leftover_bits = max_pages % 64;
+
+    for (uint64_t i = 0; i < full_words; i++)
+        used_pages += __builtin_popcountll(bmp64[i]);
+    if (leftover_bits) {
+        uint64_t mask = (1ULL << leftover_bits) - 1;
+        used_pages += __builtin_popcountll(bmp64[full_words] & mask);
+    }
+
+    spin_unlock(&pmm_lock);
+    return max_pages - used_pages;
+}
+
 void pmm_print_stats(void) {
     spin_lock(&pmm_lock);
 

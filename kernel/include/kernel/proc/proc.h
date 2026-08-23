@@ -2,6 +2,7 @@
 #define KERNEL_PROC_PROC_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/sync/spinlock.h>
@@ -98,6 +99,21 @@ struct proc {
     void                *chan;               /* wait channel, valid while PROC_SLEEPING */
     uint64_t            sleep_until;         /* wake when timer_ticks() >= this; 0 = not timed */
     struct vm_space     *mm;                 /* user address-space allocator (kernel/mm/uvm.c) */
+
+    /* argc/argv for the process's first instruction, passed in x0/x1 by
+     * proc_bootstrap_trampoline() the same way any AAPCS64 caller would
+     * pass them. Only meaningful up to first launch; execve() rewrites
+     * the trap frame directly rather than going through here. Before
+     * this existed, main() received whatever happened to be in x0/x1 —
+     * usr/lib/crt0.S zeroed them itself to paper over it. */
+    uint64_t            user_argc;
+    virt_addr_t         user_argv;
+
+    /* Who gets to wait() for this one, and what it left behind. NULL
+     * parent = created by the kernel at boot, so nothing will ever reap
+     * it — see sys_wait() on why that is a leak and not a crash. */
+    struct proc         *parent;
+    int                 exit_status;
 };
 
 /* Size of the per-process kernel stack (interrupts land here). Was 4
@@ -124,6 +140,19 @@ struct proc {
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
                 virt_addr_t user_sp, phys_addr_t ttbr0);
 
+/* Releases everything proc_init() acquired plus the address space, and
+ * removes the proc from the table. Must not run on the currently
+ * executing proc — it frees the kernel stack underfoot and the page
+ * tables TTBR0_EL1 points at. sys_wait() calls it from the PARENT's
+ * context for exactly that reason. */
+void proc_destroy(struct proc *p);
+
+/* fork(): a duplicate of `parent` that resumes from the trap frame `f`
+ * with x0 == 0, already on the run queue. NULL on failure, having
+ * changed nothing about the parent. kernel/proc/proc_fork.c. */
+struct aarch64_frame;
+struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f);
+
 /* ---------------------------------------------------------------
  * Process table — every proc from proc_table_add() until
  * proc_table_remove(). Ported from x86's kernel/proc/proc.c
@@ -139,6 +168,11 @@ void          proc_table_remove(struct proc *p);
 struct proc  *proc_lookup(uint64_t pid);
 void          proc_for_each(void (*fn)(struct proc *, void *), void *arg);
 void          proc_dump_table(void);
+
+/* sys_wait()'s scan: a reapable (ZOMBIE) child of `parent`, or NULL.
+ * *out_any_children reports whether it has any children at all, which
+ * is how wait() tells "not yet" from "never". */
+struct proc  *proc_find_zombie_child(struct proc *parent, bool *out_any_children);
 
 /* ---------------------------------------------------------------
  * State helpers

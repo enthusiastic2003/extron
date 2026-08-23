@@ -6,6 +6,7 @@
 #include<stdbool.h>
 #include<kernel/klibc/string.h>
 #include<kernel/console.h>
+#include<kernel/mm/uvm.h>
 
 Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
     if (!buffer)
@@ -71,7 +72,8 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
 int parse_and_load_binary(virt_addr_t binary_mem_loc,
                           size_t buffer_size,
                           pml4_t user_pml4,
-                          virt_addr_t *out_entry_point) {
+                          virt_addr_t *out_entry_point,
+                          struct vm_space *mm) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)binary_mem_loc;
 
     /* Validate ELF */
@@ -208,6 +210,16 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
                 phys,
                 page_flags
             );
+        }
+
+        /* Tell the address space this segment exists. Segments commonly
+         * share a page at their boundary (text ending partway into the
+         * page data begins in), so these spans overlap — vm_insert_region()
+         * coalesces rather than describing that page twice. */
+        if (mm && vm_insert_region(mm, aligned_vaddr,
+                                   total_pages * PAGE_SIZE, true) != 0) {
+            kprintf("[LOADER] could not record segment at 0x%llx\n", aligned_vaddr);
+            return -2;
         }
     }
 

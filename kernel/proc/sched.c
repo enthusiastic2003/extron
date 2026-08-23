@@ -55,24 +55,71 @@ void sched_init(void) {
  */
 void proc_bootstrap_trampoline(void) {
     struct proc *p = current_proc;
-    register uint64_t elr    __asm__("x0") = p->entry;
-    register uint64_t spsr   __asm__("x1") = 0x0;   /* EL0t, all masks clear */
-    register uint64_t sp_el0 __asm__("x2") = p->user_sp;
+    /* argc/argv land in x0/x1, where AAPCS64 puts main()'s first two
+     * arguments — so entering _start is an ordinary call as far as the
+     * process can tell. Before this, x0/x1 held whatever the kernel had
+     * last left in them, and usr/lib/crt0.S zeroed them itself to hide
+     * it; it now passes them straight through. */
+    register uint64_t argc   __asm__("x0") = p->user_argc;
+    register uint64_t argv   __asm__("x1") = p->user_argv;
+    register uint64_t elr    __asm__("x2") = p->entry;
+    register uint64_t spsr   __asm__("x3") = 0x0;   /* EL0t, all masks clear */
+    register uint64_t sp_el0 __asm__("x4") = p->user_sp;
     __asm__ volatile (
-        "msr elr_el1, %0\n\t"
-        "msr spsr_el1, %1\n\t"
-        "msr sp_el0, %2\n\t"
+        "msr elr_el1, %2\n\t"
+        "msr spsr_el1, %3\n\t"
+        "msr sp_el0, %4\n\t"
         "eret"
-        :: "r"(elr), "r"(spsr), "r"(sp_el0)
+        :: "r"(argc), "r"(argv), "r"(elr), "r"(spsr), "r"(sp_el0)
         : "memory"
     );
     __builtin_unreachable();
 }
 
-/* Common to schedule() and sched_start(): make `next` the current proc,
+/*
+ * Common to schedule() and sched_start(): make `next` the current proc,
  * swapping TTBR0_EL1 if the address space actually changed (aarch64
- * counterpart to x86's proc_install()'s conditional load_cr3). */
+ * counterpart to x86's proc_install()'s conditional load_cr3).
+ *
+ * Runs with IRQs masked, and that is not a formality.
+ *
+ * `current_proc = next` happens here, but SP_EL1 does not change until
+ * context_switch's `mov sp, x9` several instructions later. In between,
+ * the kernel is running on the OUTGOING proc's stack while my_proc()
+ * already answers with the incoming one. A timer IRQ landing in that
+ * window calls schedule(), which takes `old = current_proc` — i.e.
+ * `next` — and context-switches away, saving the stack pointer it is
+ * standing on into `next`'s saved context. `next` is thereby given the
+ * previous proc's kernel stack, permanently, and the two then run
+ * nested on the same stack until it is corrupted.
+ *
+ * That is not hypothetical. sched_start() reaches here from
+ * kernel_stage2() with IRQs already enabled and SP on the BOOT stack
+ * (kernel/mm/vmm.c's vmm_setup_stack()), so the very first process was
+ * being handed a stack that nothing owns and that never unwinds — it
+ * showed up as a Data Abort inside RESTORE_CONTEXT reading past the top
+ * of 0xFFFFD000_00401000, in a proc whose own kernel stack was
+ * somewhere in 0xFFFFC000_.... Intermittent, because it needed a tick
+ * to land inside a handful of instructions.
+ *
+ * Every other caller already arrives masked (schedule() is only ever
+ * reached from an exception handler, and sched_idle_wait() restores the
+ * caller's mask before returning), so this closes the one path that
+ * did not — while making the requirement explicit rather than inherited
+ * from whoever happened to call.
+ *
+ * The restore only runs when context_switch RETURNS, which means `next`
+ * was a previously-running proc resuming here — and the value restored
+ * is the one that proc itself saved on its own stack when it switched
+ * away, which is exactly right. A brand-new proc never returns here at
+ * all: proc_bootstrap_trampoline()/proc_fork_trampoline() eret instead,
+ * and eret takes DAIF from SPSR_EL1.
+ */
 static void install_and_switch(struct proc *old, struct proc *next) {
+    uint64_t daif;
+    __asm__ volatile ("mrs %0, daif" : "=r"(daif));
+    __asm__ volatile ("msr daifset, #3" ::: "memory");
+
     next->state  = PROC_RUNNING;
     current_proc = next;
 
@@ -86,6 +133,8 @@ static void install_and_switch(struct proc *old, struct proc *next) {
      * that call never returns anyway. */
     struct cpu_context scratch = {0};
     context_switch(old ? &old->context : &scratch, &next->context);
+
+    __asm__ volatile ("msr daif, %0" :: "r"(daif) : "memory");
 }
 
 /*

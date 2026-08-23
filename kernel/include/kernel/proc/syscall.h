@@ -27,6 +27,7 @@
  * for why this can't just report tick_count. */
 #define SYS_UPTIME_MS   10
 #define SYS_MAP_INITRD  11  /* map an initrd file read-only into the caller */
+#define SYS_WAIT        12  /* block until a child exits, then reap it */
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

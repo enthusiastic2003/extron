@@ -283,45 +283,68 @@ void kernel_stage2(uint64_t mb2_addr) {
      * sched_policy_add(fbuser);
      */
 
-    /* DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
+    /* fork/execve/wait — Phase 3. Run alone, deliberately: its PMM
+     * free-page numbers are only a valid leak measurement in isolation,
+     * since DOOM/fib/key_monitor allocating underneath would move that
+     * count for reasons unrelated to what is being tested. Restore the
+     * commented-out trio below once this has a clean run. */
+    struct proc *forktest = proc_create_from_binary("fork_test.elf", 0);
+    if (!forktest) {
+        panic("kernel_stage2: failed to create the fork test proc");
+    }
+    sched_policy_add(forktest);
+
+    /*
+     * DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
      * ring at creation, so its frame loop makes no syscall to draw and
      * none to poll input — only SYS_SLEEP to pace itself and
      * SYS_UPTIME_MS for its clock. The WAD comes out of the initrd via
-     * SYS_MAP_INITRD, mapped rather than copied. */
-    struct proc *doom = proc_create_from_binary("doom.elf",
-                                                PROC_MAP_FRAMEBUFFER);
-    if (!doom) {
-        panic("kernel_stage2: failed to create the DOOM proc");
-    }
-    sched_policy_add(doom);
-
-    /* Runs concurrently with DOOM, and is the actual demonstration that
+     * SYS_MAP_INITRD, mapped rather than copied.
+     *
+     * Skipped, not fatal, when there is no display: the firmware
+     * refuses ALLOCATE_BUFFER with no HDMI sink attached (config.txt
+     * has no hdmi_force_hotplug), and panicking on that used to take
+     * the whole boot down, including every process that never wanted a
+     * framebuffer. A headless board is a normal way to run this kernel.
+     *
+     * struct proc *doom = proc_create_from_binary("doom.elf",
+     *                                             PROC_MAP_FRAMEBUFFER);
+     * if (doom) {
+     *     sched_policy_add(doom);
+     * } else {
+     *     kprintf("[BOOT] no framebuffer — skipping DOOM, continuing headless\n");
+     * }
+     *
+     * Runs concurrently with DOOM, and is the actual demonstration that
      * this is a multitasking system rather than a program loader: DOOM
      * is CPU-bound and renders continuously, this one sleeps through
      * almost its whole life and wakes on a timer, and neither knows the
      * other exists. Its elapsed-time column is the measurement — if the
      * scheduler starved it behind DOOM's render loop, or SYS_SLEEP
-     * drifted, the wall clock and the sleep count would separate. */
-    struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
-    if (!fib) {
-        panic("kernel_stage2: failed to create the fibonacci proc");
-    }
-    sched_policy_add(fib);
-
-    /* Third proc, on the input path DOOM does NOT use: it blocks in
+     * drifted, the wall clock and the sleep count would separate.
+     *
+     * struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
+     * if (!fib) {
+     *     panic("kernel_stage2: failed to create the fibonacci proc");
+     * }
+     * sched_policy_add(fib);
+     *
+     * Third proc, on the input path DOOM does NOT use: it blocks in
      * SYS_READ (kbd_getc -> sleep(&kbuf)) while DOOM polls the mapped
      * ring. The ISR feeds both, so the same keystroke moves the player
      * and prints here — the two consumers are independent, not
      * exclusive. This is also the only thing currently exercising the
      * channel-based sleep/wake that hung the kernel earlier in this
-     * port. */
-    struct proc *keymon = proc_create_from_binary("key_monitor.elf", 0);
-    if (!keymon) {
-        panic("kernel_stage2: failed to create the key monitor proc");
-    }
-    sched_policy_add(keymon);
+     * port.
+     *
+     * struct proc *keymon = proc_create_from_binary("key_monitor.elf", 0);
+     * if (!keymon) {
+     *     panic("kernel_stage2: failed to create the key monitor proc");
+     * }
+     * sched_policy_add(keymon);
+     */
 
-    kprintf("Starting scheduler — type on the console to echo.\n");
+    kprintf("Starting scheduler — fork_test running alone.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

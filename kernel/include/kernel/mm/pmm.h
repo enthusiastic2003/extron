@@ -36,6 +36,8 @@ static inline uint64_t align_down(uint64_t x, uint64_t a) {
 void pmm_reserve_boot_region(uint64_t start, uint64_t size);
 
 void pmm_print_stats(void);
+/* Free page count, for leak checks across address-space teardown. */
+uint64_t pmm_free_pages(void);
 void scan_mb2_header(uint64_t );
 void init_pmm(uint64_t);
 void pmm_free_page(void*);

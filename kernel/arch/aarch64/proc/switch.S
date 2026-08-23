@@ -102,3 +102,47 @@ context_switch:
     ldp q30, q31, [x1, #0x260]
 
     ret
+
+// void cpu_context_save_fpsimd(struct cpu_context *c);
+//                              x0
+//
+// Snapshot the FP/SIMD registers, FPCR/FPSR and TPIDR_EL0 that are LIVE
+// in the hardware right now into `c`. The save half of context_switch,
+// on its own.
+//
+// fork() needs this because the parent's struct cpu_context is stale by
+// definition: it holds whatever was saved at its last switch-OUT, and
+// the parent has been running ever since. The current values are in the
+// registers, not in the struct — the kernel is -mgeneral-regs-only, so
+// nothing between the `svc` and here has disturbed them. Writing them
+// straight into the CHILD's context is what makes a forked process
+// inherit the FP and TLS state a fork is supposed to preserve.
+//
+// Same offsets as context_switch above, and they are checked by the
+// _Static_asserts in kernel/proc/proc.c.
+.global cpu_context_save_fpsimd
+cpu_context_save_fpsimd:
+    mrs x10, fpcr
+    mrs x11, fpsr
+    stp x10, x11, [x0, #0x68]
+
+    mrs x12, tpidr_el0
+    str x12,      [x0, #0x78]
+
+    stp q0,  q1,  [x0, #0x080]
+    stp q2,  q3,  [x0, #0x0A0]
+    stp q4,  q5,  [x0, #0x0C0]
+    stp q6,  q7,  [x0, #0x0E0]
+    stp q8,  q9,  [x0, #0x100]
+    stp q10, q11, [x0, #0x120]
+    stp q12, q13, [x0, #0x140]
+    stp q14, q15, [x0, #0x160]
+    stp q16, q17, [x0, #0x180]
+    stp q18, q19, [x0, #0x1A0]
+    stp q20, q21, [x0, #0x1C0]
+    stp q22, q23, [x0, #0x1E0]
+    stp q24, q25, [x0, #0x200]
+    stp q26, q27, [x0, #0x220]
+    stp q28, q29, [x0, #0x240]
+    stp q30, q31, [x0, #0x260]
+    ret

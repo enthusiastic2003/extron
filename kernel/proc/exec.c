@@ -1,5 +1,6 @@
 #include <kernel/proc/exec.h>
 #include <kernel/proc/elf_loader.h>
+#include <kernel/proc/sched.h>
 #include <kernel/fs/tar.h>
 #include <kernel/mm/paging.h>
 #include <kernel/mm/pmm.h>
@@ -12,7 +13,7 @@
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
  * has its own independent TTBR0 (see kernel/arch/aarch64/proc.c's
- * proc_init(), which this calls). One page for now; no argv/envp. */
+ * proc_init(), which this calls). */
 #define USER_STACK_VA 0x500000
 
 /* One page was enough while every payload was hand-written assembly with
@@ -22,6 +23,7 @@
  * rather than faulting. 128KB is cheap per process and leaves room for
  * the DOOM port's call depth. */
 #define USER_STACK_PAGES 32
+#define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
 
 /* Where a PROC_MAP_FRAMEBUFFER process finds the display.
  *
@@ -57,9 +59,16 @@ struct user_fb_info {
     uint32_t size;
 };
 
-/* Maps the framebuffer and its descriptor into `pml4`. Returns 0 on
- * success, -1 if there is no framebuffer or a mapping fails. */
-static int map_framebuffer_into(phys_addr_t pml4, const char *binary_path) {
+/* Maps the framebuffer and its descriptor into `mm`. Returns 0 on
+ * success, -1 if there is no framebuffer or a mapping fails.
+ *
+ * Every mapping made here is also registered with vm_insert_region().
+ * The framebuffer and the input ring are registered NOT-owned: they are
+ * VideoCore memory and a kernel-side ring respectively, so fork() must
+ * share them rather than copy, and teardown must unmap without handing
+ * either back to the PMM. The descriptor page IS owned — it's a page
+ * allocated right here, per process. */
+static int map_framebuffer_into(struct vm_space *mm, const char *binary_path) {
     const struct framebuffer *fb = fb_get();
     if (!fb) {
         kprintf("[EXEC] %s wants the framebuffer but none is initialised\n",
@@ -87,10 +96,28 @@ static int map_framebuffer_into(phys_addr_t pml4, const char *binary_path) {
     info->rgb_order = fb->rgb_order;
     info->size      = fb->size;
 
-    if (map_page(pml4, USER_FB_INFO_VA, info_phys,
+    if (map_page(mm->ttbr0, USER_FB_INFO_VA, info_phys,
                  PAGE_PRESENT | PAGE_USER | PAGE_NX) != 0) {
         pmm_free_page((void *)info_phys);
         return -1;
+    }
+    if (vm_insert_region(mm, USER_FB_INFO_VA, PAGE_SIZE, true) != 0) {
+        /* Unrecorded, so teardown would not find it — hand it back here
+         * rather than leaking a page on the way out of a failure. */
+        unmap_page(mm->ttbr0, USER_FB_INFO_VA);
+        pmm_free_page((void *)info_phys);
+        return -1;
+    }
+
+    phys_addr_t ring = kbd_ring_phys();
+    if (ring) {
+        if (map_page(mm->ttbr0, USER_INPUT_VA, ring,
+                     PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
+            kprintf("[EXEC] failed mapping the input ring for %s\n", binary_path);
+            return -1;
+        }
+        if (vm_insert_region(mm, USER_INPUT_VA, PAGE_SIZE, false) != 0)
+            return -1;
     }
 
     /* PAGE_NORMAL_NC for the same reason the kernel's own mapping uses
@@ -98,52 +125,145 @@ static int map_framebuffer_into(phys_addr_t pml4, const char *binary_path) {
      * continuously so it must not sit dirty in a cache, but Device
      * memory would forbid the unaligned accesses a memcpy emits — and
      * DG_DrawFrame is precisely a memcpy. */
-    phys_addr_t ring = kbd_ring_phys();
-    if (ring && map_page(pml4, USER_INPUT_VA, ring,
-                         PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
-        kprintf("[EXEC] failed mapping the input ring for %s\n", binary_path);
-        return -1;
-    }
-
     for (uint32_t off = 0; off < fb->size; off += PAGE_SIZE) {
-        if (map_page(pml4, USER_FB_VA + off, fb->phys + off,
+        if (map_page(mm->ttbr0, USER_FB_VA + off, fb->phys + off,
                      PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX
                      | PAGE_NORMAL_NC) != 0) {
             kprintf("[EXEC] failed mapping framebuffer for %s\n", binary_path);
             return -1;
         }
     }
+    if (vm_insert_region(mm, USER_FB_VA, fb->size, false) != 0)
+        return -1;
+
     return 0;
 }
 
-struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
+/* The whole argument block has to fit in the single page it is written
+ * into, or build_arg_stack() would run off the bottom of that page and
+ * corrupt the stack page below it. Sized so it cannot: worst case is
+ * every argument present, every byte used, plus the pointer array and
+ * its NULL terminator, plus 16 bytes of alignment slack. */
+_Static_assert(EXEC_ARG_BYTES + (EXEC_MAX_ARGS + 1) * sizeof(uint64_t) + 16
+               < PAGE_SIZE, "exec argument block must fit one stack page");
+
+/*
+ * Lay argc/argv out on the top page of the new stack.
+ *
+ * The strings and the pointer array both live ABOVE the returned stack
+ * pointer, so the first thing the process does — establishing its own
+ * frame below sp — can't tread on them. argc and argv reach main() in
+ * x0/x1 (usr/lib/crt0.S passes them straight through), so nothing needs
+ * to be readable at sp itself the way the Linux ELF ABI requires.
+ *
+ * `top_phys` is the physical page backing [USER_STACK_TOP-PAGE_SIZE,
+ * USER_STACK_TOP). Writing through the HHDM is what lets this run
+ * before the address space is ever installed — during execve the
+ * process is still executing out of the image about to be replaced, so
+ * the new stack simply isn't reachable by its own VA yet.
+ */
+static virt_addr_t build_arg_stack(phys_addr_t top_phys,
+                                   const char *const *args, int argc,
+                                   virt_addr_t *out_argv_va) {
+    uint8_t     *page    = (uint8_t *)phys_to_virt_hhdm(top_phys);
+    virt_addr_t  page_va = USER_STACK_TOP - PAGE_SIZE;
+    virt_addr_t  str_va[EXEC_MAX_ARGS];
+    size_t       off = PAGE_SIZE;
+
+    /* Strings first, from the top down, so the pointer array below them
+     * can be filled in with addresses that are already final. */
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen(args[i]) + 1;
+        off -= len;
+        memcpy(page + off, args[i], len);
+        str_va[i] = page_va + off;
+    }
+
+    off &= ~(size_t)7;
+    off -= (size_t)(argc + 1) * sizeof(uint64_t);
+    off &= ~(size_t)15;             /* AAPCS64: sp must be 16-byte aligned */
+
+    uint64_t *argv = (uint64_t *)(page + off);
+    for (int i = 0; i < argc; i++)
+        argv[i] = str_va[i];
+    argv[argc] = 0;                 /* argv[argc] == NULL, as C requires */
+
+    *out_argv_va = page_va + off;
+    return page_va + off;
+}
+
+/*
+ * Build a complete, ready-to-run address space for `binary_path`.
+ *
+ * Everything a process needs and nothing that belongs to whoever asked:
+ * the caller's own address space is never touched, so a failure here
+ * costs the memory this released on its way out and nothing else. That
+ * property is what makes execve() safe to attempt — the old image is
+ * only discarded once there is definitely a new one to replace it with.
+ */
+static int exec_image_build(const char *binary_path, unsigned flags,
+                            const char *const *args, int argc,
+                            struct exec_image *out) {
     struct tar_file f;
     if (!tar_open(binary_path, &f)) {
         kprintf("[EXEC] %s not found in initrd\n", binary_path);
-        return NULL;
+        return -1;
+    }
+    if (argc < 1 || argc > EXEC_MAX_ARGS)
+        return -1;
+
+    out->mm = NULL;
+
+    phys_addr_t ttbr0 = create_user_pml4();
+    if (!ttbr0) {
+        kprintf("[EXEC] out of memory creating page table for %s\n", binary_path);
+        return -1;
     }
 
-    phys_addr_t pml4 = create_user_pml4();
-    virt_addr_t entry;
-    if (parse_and_load_binary((virt_addr_t)f.data, f.size, pml4, &entry) != 0) {
+    struct vm_space *mm = vm_space_create(ttbr0);
+    if (!mm) {
+        kprintf("[EXEC] out of memory allocating vm_space for %s\n", binary_path);
+        free_user_page_tables(ttbr0);
+        return -1;
+    }
+    out->mm    = mm;
+    out->ttbr0 = ttbr0;
+
+    if (parse_and_load_binary((virt_addr_t)f.data, f.size, ttbr0,
+                              &out->entry, mm) != 0) {
         kprintf("[EXEC] ELF load failed for %s\n", binary_path);
-        return NULL;
+        goto fail;
     }
 
+    phys_addr_t top_phys = 0;
     for (size_t i = 0; i < USER_STACK_PAGES; i++) {
         phys_addr_t stack_phys = (phys_addr_t)pmm_alloc_page();
         if (!stack_phys) {
             kprintf("[EXEC] out of memory allocating stack for %s\n", binary_path);
-            return NULL;
+            goto fail;
         }
-        map_page(pml4, USER_STACK_VA + i * PAGE_SIZE, stack_phys,
-                 PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX);
+        /* Zeroed for the same reason vm_allocate_region() zeroes: a
+         * fresh stack must not hand the new process whatever the
+         * previous owner of that frame left in it. */
+        memset(phys_to_virt_hhdm(stack_phys), 0, PAGE_SIZE);
+        if (map_page(ttbr0, USER_STACK_VA + i * PAGE_SIZE, stack_phys,
+                     PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
+            pmm_free_page((void *)stack_phys);
+            goto fail;
+        }
+        if (i == USER_STACK_PAGES - 1)
+            top_phys = stack_phys;
     }
+    if (vm_insert_region(mm, USER_STACK_VA,
+                         USER_STACK_PAGES * PAGE_SIZE, true) != 0)
+        goto fail;
+
+    out->user_sp = build_arg_stack(top_phys, args, argc, &out->argv);
+    out->argc    = (uint64_t)argc;
 
     if (flags & PROC_MAP_FRAMEBUFFER) {
-        if (map_framebuffer_into(pml4, binary_path) != 0) {
-            return NULL;
-        }
+        if (map_framebuffer_into(mm, binary_path) != 0)
+            goto fail;
     }
 
     /* No MMIO mapping here any more. The UART used to be identity-mapped
@@ -151,11 +271,31 @@ struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
      * TTBR0 swap — uart.c now reaches it through the kernel's own
      * high-half Device mapping (serial_remap_to_hhdm(), called by
      * init_paging()), so a user table contains only what that process
-     * actually owns: its ELF segments and its stack. */
+     * actually owns. */
+    return 0;
+
+fail:
+    /* vm_space_destroy() unwinds whatever got as far as being recorded —
+     * segments, stack pages, the page tables themselves — and leaves
+     * nothing behind for the caller to clean up. */
+    vm_space_destroy(mm);
+    out->mm = NULL;
+    return -1;
+}
+
+struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
+    /* argv[0] is the path it was loaded from, which is the only honest
+     * answer available and matches what execve() would produce. */
+    const char *args[1] = { binary_path };
+    struct exec_image img;
+
+    if (exec_image_build(binary_path, flags, args, 1, &img) != 0)
+        return NULL;
 
     struct proc *p = kmalloc(sizeof(struct proc));
     if (!p) {
         kprintf("[EXEC] out of memory allocating struct proc for %s\n", binary_path);
+        vm_space_destroy(img.mm);
         return NULL;
     }
 
@@ -164,15 +304,39 @@ struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
      * in — proc_init() is what actually writes p->pid, so it must run
      * with the pid proc_table_add() hands back, not before. */
     uint64_t pid = proc_table_add(p);
-    proc_init(p, pid, entry, USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE, pml4);
+    proc_init(p, pid, img.entry, img.user_sp, img.ttbr0);
 
-    p->mm = vm_space_create(pml4);
-    if (!p->mm) {
-        kprintf("[EXEC] out of memory allocating vm_space for %s\n", binary_path);
-        proc_table_remove(p);
-        kfree(p);
-        return NULL;
-    }
-
+    p->mm        = img.mm;
+    p->user_argc = img.argc;
+    p->user_argv = img.argv;
     return p;
+}
+
+int proc_exec_replace(struct proc *p, const char *binary_path,
+                      const char *const *args, int argc,
+                      struct exec_image *out) {
+    if (!p)
+        return -1;
+    if (exec_image_build(binary_path, 0, args, argc, out) != 0)
+        return -1;
+
+    struct vm_space *old = p->mm;
+
+    /* Install first, tear down second. vm_space_destroy() frees the
+     * page tables it walks, so running it against the address space
+     * TTBR0_EL1 still points at would be freeing the tables the MMU is
+     * using — and the PMM would then hand those frames out to somebody
+     * else while a stale TLB entry still refers to them. */
+    p->mm      = out->mm;
+    p->ttbr0   = out->ttbr0;
+    p->entry   = out->entry;
+    p->user_sp = out->user_sp;
+    p->user_argc = out->argc;
+    p->user_argv = out->argv;
+
+    __asm__ volatile ("msr ttbr0_el1, %0" :: "r"(p->ttbr0) : "memory");
+    flush_tlb();
+
+    vm_space_destroy(old);
+    return 0;
 }

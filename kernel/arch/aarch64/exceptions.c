@@ -3,6 +3,7 @@
 #include <kernel/console.h>
 #include <kernel/panic.h>
 #include <kernel/proc/syscall.h>
+#include <kernel/proc/sched.h>
 
 /*
  * exception_dispatch() — the aarch64 counterpart to x86's isr_handler()
@@ -136,12 +137,30 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
         return;
     }
 
+    /* Which process, and whether it is standing on its own kernel
+     * stack. `frame` is the stack pointer at the moment of the fault
+     * (SAVE_CONTEXT builds the frame at SP), so a frame outside
+     * [kernel_stack_base, kernel_stack_top) says the proc is running on
+     * somebody else's stack — which is a completely different bug from
+     * whatever the faulting instruction appears to be doing, and is
+     * invisible without printing both.
+     *
+     * Added after exactly that: a Data Abort inside RESTORE_CONTEXT
+     * that read as memory corruption, and was really the first process
+     * having been handed the boot stack by the race
+     * install_and_switch() now masks against. The ELR/ESR/FAR triple
+     * alone pointed at the wrong file. */
+    struct proc *cur = my_proc();
     panic("SYNCHRONOUS EXCEPTION\n"
+          "pid=%ld frame=%p kstack=[%p,%p)\n"
           "class=%s\n"
           "ELR=%p\n"
           "SPSR=%p (mode=%s)\n"
           "ESR=%p\n"
           "FAR=%p\n",
+          cur ? (long)cur->pid : -1, (void *)f,
+          cur ? (void *)cur->kernel_stack_base : 0,
+          cur ? (void *)cur->kernel_stack_top : 0,
           ec_name(ec), (void *)f->elr_el1, (void *)f->spsr_el1,
           (f->spsr_el1 & 0xF) == 0x0 ? "EL0t" : (f->spsr_el1 & 0xF) == 0x5 ? "EL1h" : "other",
           (void *)f->esr_el1, (void *)f->far_el1);

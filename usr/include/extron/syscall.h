@@ -20,6 +20,7 @@
 #define SYS_EXECVE      9
 #define SYS_UPTIME_MS   10
 #define SYS_MAP_INITRD  11
+#define SYS_WAIT        12
 
 /* x8 = number, x0-x2 = args, result in x0 — the AAPCS64/Linux
  * convention the kernel's syscall.h documents. "memory" clobber so the
@@ -52,5 +53,16 @@ void    *sys_anon_alloc(size_t size);
  * is what lets a multi-megabyte WAD be opened without a stdio layer. */
 const void *sys_map_initrd(const char *name, size_t *out_size);
 long     sys_anon_free(void *addr, size_t size);
+
+/* Returns 0 in the child and the child's pid in the parent — one call,
+ * two returns, because the kernel hands the child a copy of this exact
+ * trap frame with x0 zeroed. -1 on failure. */
+long     sys_fork(void);
+/* Replaces this program. Returns only on failure. envp is accepted for
+ * ABI shape and currently ignored: there is no environment yet. */
+long     sys_execve(const char *path, char *const argv[], char *const envp[]);
+/* Blocks until a child exits, reaps it, returns its pid; -1 when there
+ * are no children left. *status gets the exit status unless NULL. */
+long     sys_wait(int *status);
 
 #endif

@@ -27,6 +27,9 @@ virt_addr_t vmm_alloc_page();
 virt_addr_t vmm_alloc_pages(size_t num_pages);
 int vmm_free_page(virt_addr_t v);
 int vmm_free_pages(virt_addr_t v, size_t num_pages);
+/* Bitmap-only release for a deliberately unmapped page — the kernel
+ * stack guard page, and nothing else. See its comment in vmm.c. */
+int vmm_free_unmapped_page(virt_addr_t v);
 
 virt_addr_t vmm_setup_stack();
 

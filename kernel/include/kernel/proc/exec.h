@@ -26,6 +26,43 @@
  */
 #define PROC_MAP_FRAMEBUFFER (1u << 0)
 
+/* Bounds on what execve() will carry across. Small on purpose: the
+ * whole argument block is laid out inside the single top page of the
+ * new stack, so it cannot spill into the stack the process is about to
+ * start using. */
+#define EXEC_MAX_ARGS  32
+#define EXEC_ARG_BYTES 1024   /* total bytes of argv strings */
+
+/* A fully built, not-yet-installed user address space. execve()'s whole
+ * safety argument is that this can be constructed and thrown away
+ * without the caller's own address space ever being touched. */
+struct exec_image {
+    struct vm_space *mm;
+    phys_addr_t      ttbr0;
+    virt_addr_t      entry;
+    virt_addr_t      user_sp;
+    uint64_t         argc;
+    virt_addr_t      argv;      /* user VA of the argv[] array */
+};
+
 struct proc *proc_create_from_binary(const char *binary_path, unsigned flags);
+
+/*
+ * execve()'s address-space half: build `binary_path` into a new image
+ * and swap it in for `p`'s current one, freeing the old.
+ *
+ * Returns 0 with *out describing where the process must resume (entry,
+ * stack pointer, argc/argv), or -1 having changed nothing at all — the
+ * failed-exec case where the caller must keep running its existing
+ * program, which is exactly why the new image is built to completion
+ * before the old one is disturbed.
+ *
+ * Only rewrites the address space. Getting the process to actually
+ * resume at the new entry point is the caller's job (sys_execve()
+ * rewrites the trap frame; see kernel/proc/syscall.c).
+ */
+int proc_exec_replace(struct proc *p, const char *binary_path,
+                      const char *const *args, int argc,
+                      struct exec_image *out);
 
 #endif

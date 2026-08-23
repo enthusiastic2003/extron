@@ -186,3 +186,27 @@ common_exception_entry:
     bl  exception_dispatch
     RESTORE_CONTEXT
     eret
+
+// --- fork() return path ---
+//
+// Where a freshly forked child starts executing. Never called: it is
+// reached only by context_switch's `ret` landing on a saved context.lr,
+// exactly like proc_bootstrap_trampoline() — but where that one
+// synthesizes a first entry into EL0 from an entry point and a stack
+// pointer, this one resumes a FULL register state that already exists.
+//
+// proc_fork() (kernel/proc/proc_fork.c) copies the parent's trap frame
+// to the top of the child's kernel stack, sets x0 to 0 in the copy, and
+// points the child's context.sp at it. So by the time this runs, sp is
+// already the frame pointer RESTORE_CONTEXT expects, and the child
+// returns from its `svc #0` at the same instruction the parent does,
+// with the same registers, on its own copy of the same stack — the only
+// difference being the return value.
+//
+// This is the same landing pad common_exception_entry uses after
+// exception_dispatch(); the child simply joins it partway through,
+// skipping the dispatch it never made.
+.global proc_fork_trampoline
+proc_fork_trampoline:
+    RESTORE_CONTEXT
+    eret

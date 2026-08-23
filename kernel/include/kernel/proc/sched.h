@@ -30,7 +30,20 @@ struct proc  *my_proc(void);
  * pre-populate a new proc's context. */
 void          proc_bootstrap_trampoline(void);
 
+/* The same idea for a forked child, in kernel/arch/aarch64/
+ * exception_vectors.S: reached only via a saved context.lr, with
+ * context.sp already pointing at a copy of the parent's trap frame, so
+ * it restores a full register state instead of synthesizing a first
+ * entry into EL0. See proc_fork() (kernel/proc/proc_fork.c). */
+void          proc_fork_trampoline(void);
+
 /* kernel/arch/aarch64/proc/switch.S */
 extern void   context_switch(struct cpu_context *old, struct cpu_context *new_ctx);
+
+/* context_switch's save half alone: captures the FP/SIMD registers,
+ * FPCR/FPSR and TPIDR_EL0 that are live in the hardware right now.
+ * fork() needs it because the parent's own saved context is stale — the
+ * current values are in the registers, not in the struct. */
+extern void   cpu_context_save_fpsimd(struct cpu_context *c);
 
 #endif
