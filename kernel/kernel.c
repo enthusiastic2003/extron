@@ -9,7 +9,7 @@
 #include <kernel/drivers/serial.h>
 #include <kernel/drivers/timer.h>
 #include <kernel/fs/tar.h>
-#include <kernel/fs/ramfs.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
@@ -129,7 +129,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * fdt_get_initrd_region() (aarch64-specific) -> a real or synthesized
      * multiboot2 MODULE tag -> tar_init(). */
     tar_init(mb2_addr);
-    ramfs_init();
+    vfs_init();
     tar_list();
     struct tar_file f;
     if (tar_open("hello.txt", &f)) {

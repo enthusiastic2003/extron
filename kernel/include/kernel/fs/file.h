@@ -4,17 +4,17 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <kernel/sync/spinlock.h>
+#include <kernel/fs/vfs.h>
 
 #define PROC_MAX_FDS 32
 
 struct proc;
-struct ramfs_node;
 struct pipe_buffer;
 
 enum open_file_kind {
     FILE_CONSOLE_IN,
     FILE_CONSOLE_OUT,
-    FILE_RAMFS,
+    FILE_VNODE,
     FILE_PIPE_READER,
     FILE_PIPE_WRITER,
 };
@@ -27,7 +27,7 @@ struct open_file {
     unsigned refs;
     enum open_file_kind kind;
     union {
-        struct ramfs_node *node;
+        struct vfs_node *node;
         struct pipe_buffer *pipe;
     } object;
     size_t offset;
@@ -52,7 +52,7 @@ long    file_write(struct proc *p, int fd, const void *buffer, size_t count);
 long    file_seek(struct proc *p, int fd, int64_t offset, int whence);
 int     file_close(struct proc *p, int fd);
 long    file_readdir(struct proc *p, int fd, void *buffer, size_t size);
-int     file_info(struct proc *p, int fd, size_t *size, int *directory);
+int     file_info(struct proc *p, int fd, struct vfs_attr *attr);
 int     file_is_tty(struct proc *p, int fd);
 int     file_poll(struct proc *p, int fd, short events, short *revents);
 

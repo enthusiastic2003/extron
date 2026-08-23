@@ -26,9 +26,30 @@ int main(void) {
     }
     check("missing file reports failure", fopen("missing", "rb") == NULL);
 
+    struct stat path_info, fd_info;
+    FILE *metadata_file = fopen("hello.txt", "rb");
+    int metadata_fd = metadata_file ? fileno(metadata_file) : -1;
+    int path_stat = stat("hello.txt", &path_info);
+    int path_metadata_ok = path_stat == 0 && S_ISREG(path_info.st_mode)
+                         && path_info.st_size == 22 && path_info.st_ino != 0;
+    if (!path_metadata_ok)
+        printf("[file_test] seeded metadata: rc=%d mode=%lo size=%ld ino=%lu\n",
+               path_stat, (unsigned long)path_info.st_mode,
+               (long)path_info.st_size, (unsigned long)path_info.st_ino);
+    check("stat returns VFS metadata for a seeded file", path_metadata_ok);
+    check("fstat identifies the same VFS inode",
+          metadata_fd >= 0 && fstat(metadata_fd, &fd_info) == 0
+          && fd_info.st_ino == path_info.st_ino
+          && fd_info.st_size == path_info.st_size);
+    if (metadata_file)
+        fclose(metadata_file);
+
     char test_directory[32];
     snprintf(test_directory, sizeof(test_directory), "file-test-%ld", (long)getpid());
     check("mkdir creates a ramfs directory", mkdir(test_directory, 0755) == 0);
+    check("stat reports VFS directory type and mode",
+          stat(test_directory, &path_info) == 0 && S_ISDIR(path_info.st_mode)
+          && (path_info.st_mode & 0777) == 0755);
     FILE *created = fopen("default.cfg", "wb");
     check("fopen creates writable ramfs file", created != NULL);
     if (created) {

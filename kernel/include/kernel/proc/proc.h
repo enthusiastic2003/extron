@@ -117,7 +117,7 @@ struct proc {
     int                 exit_status;
     struct open_file    *files[PROC_MAX_FDS];
     uint8_t             fd_flags[PROC_MAX_FDS];
-    char                cwd[101]; /* canonical path relative to ramfs root */
+    char                cwd[VFS_PATH_MAX + 1]; /* canonical path relative to VFS root */
 };
 
 /* Size of the per-process kernel stack (interrupts land here). Was 4

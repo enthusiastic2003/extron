@@ -1,5 +1,5 @@
 #include <kernel/fs/file.h>
-#include <kernel/fs/ramfs.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/proc/proc.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/keyboard.h>
@@ -159,17 +159,22 @@ int file_open(struct proc *p, const char *path, int flags) {
     struct open_file *f = kmalloc(sizeof(*f));
     if (!f)
         return -1;
-    struct ramfs_node *node;
-    if (ramfs_open(p->cwd, path, flags, &node) != 0) {
+    struct vfs_node *node;
+    if (vfs_open(p->cwd, path, flags, &node) != 0) {
         kfree(f);
         return -1;
     }
     memset(f, 0, sizeof(*f));
     f->lock = (spinlock_t)SPINLOCK_INIT;
     f->refs = 1;
-    f->kind = FILE_RAMFS;
+    f->kind = FILE_VNODE;
     f->object.node = node;
-    f->offset = (flags & O_APPEND) ? ramfs_size(node) : 0;
+    struct vfs_attr attr;
+    if (vfs_getattr(node, &attr) != 0) {
+        kfree(f);
+        return -1;
+    }
+    f->offset = (flags & O_APPEND) ? attr.size : 0;
     f->flags = flags;
     p->files[fd] = f;
     p->fd_flags[fd] = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
@@ -291,18 +296,23 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
     if (!descriptor_ok(p, fd) || size < sizeof(struct extron_dirent))
         return -1;
     struct open_file *f = p->files[fd];
-    if (f->kind != FILE_RAMFS)
+    if (f->kind != FILE_VNODE)
         return -1;
     irq_spin_lock(&f->lock);
     struct extron_dirent *entry = buffer;
-    unsigned char type;
-    int result = ramfs_readdir(f->object.node, f->offset, entry->name,
-                               sizeof(entry->name), &type);
+    struct vfs_dirent ventry;
+    int result = vfs_readdir(f->object.node, f->offset, &ventry);
     if (result > 0) {
-        entry->ino = f->offset + 1;
+        entry->ino = ventry.ino;
         entry->off = (int64_t)(f->offset + 1);
         entry->reclen = sizeof(*entry);
-        entry->type = type;
+        entry->type = ventry.type == VFS_NODE_DIRECTORY ? 4 : 8;
+        size_t name_length = strlen(ventry.name) + 1;
+        if (name_length > sizeof(entry->name)) {
+            irq_spin_unlock(&f->lock);
+            return -1;
+        }
+        memcpy(entry->name, ventry.name, name_length);
         f->offset++;
         result = sizeof(*entry);
     }
@@ -310,17 +320,17 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
     return result;
 }
 
-int file_info(struct proc *p, int fd, size_t *size, int *directory) {
-    if (!descriptor_ok(p, fd))
+int file_info(struct proc *p, int fd, struct vfs_attr *attr) {
+    if (!descriptor_ok(p, fd) || !attr)
         return -1;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_RAMFS) {
-        if (size) *size = ramfs_size(f->object.node);
-        if (directory) *directory = f->object.node->directory;
-    } else {
-        if (size) *size = 0;
-        if (directory) *directory = 0;
-    }
+    if (f->kind == FILE_VNODE)
+        return vfs_getattr(f->object.node, attr);
+    memset(attr, 0, sizeof(*attr));
+    attr->ino = (uint64_t)fd + 1;
+    attr->type = VFS_NODE_REGULAR;
+    attr->mode = 0644;
+    attr->nlink = 1;
     return 0;
 }
 
@@ -396,14 +406,14 @@ long file_read(struct proc *p, int fd, void *buffer, size_t count) {
         return tty_read(buffer, count);
     if (f->kind == FILE_PIPE_READER)
         return pipe_read(f, buffer, count);
-    if (f->kind != FILE_RAMFS)
+    if (f->kind != FILE_VNODE)
         return -1;
     irq_spin_lock(&f->lock);
     if ((f->flags & O_ACCMODE) == O_WRONLY) {
         irq_spin_unlock(&f->lock);
         return -1;
     }
-    long result = ramfs_read(f->object.node, f->offset, buffer, count);
+    long result = vfs_read(f->object.node, f->offset, buffer, count);
     if (result > 0) f->offset += (size_t)result;
     irq_spin_unlock(&f->lock);
     return result;
@@ -417,16 +427,22 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
         return tty_write(buffer, count);
     if (f->kind == FILE_PIPE_WRITER)
         return pipe_write(f, buffer, count);
-    if (f->kind != FILE_RAMFS)
+    if (f->kind != FILE_VNODE)
         return -1;
     irq_spin_lock(&f->lock);
     if ((f->flags & O_ACCMODE) == 0) {
         irq_spin_unlock(&f->lock);
         return -1;
     }
-    if (f->flags & O_APPEND)
-        f->offset = ramfs_size(f->object.node);
-    long result = ramfs_write(f->object.node, f->offset, buffer, count);
+    if (f->flags & O_APPEND) {
+        struct vfs_attr attr;
+        if (vfs_getattr(f->object.node, &attr) != 0) {
+            irq_spin_unlock(&f->lock);
+            return -1;
+        }
+        f->offset = attr.size;
+    }
+    long result = vfs_write(f->object.node, f->offset, buffer, count);
     if (result > 0) f->offset += (size_t)result;
     irq_spin_unlock(&f->lock);
     return result;
@@ -436,11 +452,16 @@ long file_seek(struct proc *p, int fd, int64_t offset, int whence) {
     if (!descriptor_ok(p, fd))
         return -1;
     struct open_file *f = p->files[fd];
-    if (f->kind != FILE_RAMFS)
+    if (f->kind != FILE_VNODE)
         return -1;
     irq_spin_lock(&f->lock);
+    struct vfs_attr attr;
+    if (vfs_getattr(f->object.node, &attr) != 0) {
+        irq_spin_unlock(&f->lock);
+        return -1;
+    }
     int64_t base = whence == 0 ? 0 : whence == 1 ? (int64_t)f->offset
-                                                    : whence == 2 ? (int64_t)ramfs_size(f->object.node) : -1;
+                                                    : whence == 2 ? (int64_t)attr.size : -1;
     if (base < 0 || offset < -base) {
         irq_spin_unlock(&f->lock);
         return -1;
@@ -478,10 +499,10 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
     if (f->kind == FILE_CONSOLE_IN) {
         if ((events & POLLIN) && kbd_input_ready())
             *revents |= POLLIN;
-    } else if (f->kind == FILE_CONSOLE_OUT || f->kind == FILE_RAMFS) {
+    } else if (f->kind == FILE_CONSOLE_OUT || f->kind == FILE_VNODE) {
         if (events & POLLOUT)
             *revents |= POLLOUT;
-        if (f->kind == FILE_RAMFS && (events & POLLIN))
+        if (f->kind == FILE_VNODE && (events & POLLIN))
             *revents |= POLLIN;
     } else {
         struct pipe_buffer *pipe = f->object.pipe;

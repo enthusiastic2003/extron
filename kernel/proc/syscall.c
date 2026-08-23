@@ -10,7 +10,7 @@
 #include <kernel/fs/tar.h>
 #include <kernel/proc/exec.h>
 #include <kernel/fs/file.h>
-#include <kernel/fs/ramfs.h>
+#include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
 #include <stdbool.h>
 
@@ -496,11 +496,11 @@ static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
 
 static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
                           struct aarch64_frame *f) {
-    (void)mode; (void)c; (void)f;
+    (void)c; (void)f;
     char path[101];
     if (copy_user_string(my_proc(), path_addr, path, sizeof(path)) < 0)
         return (uint64_t)-1;
-    return (uint64_t)ramfs_mkdir(my_proc()->cwd, path);
+    return (uint64_t)vfs_mkdir(my_proc()->cwd, path, (uint32_t)mode);
 }
 
 static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
@@ -532,10 +532,11 @@ static uint64_t sys_getcwd(uint64_t buffer, uint64_t size, uint64_t c,
 static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
                           struct aarch64_frame *f) {
     (void)b; (void)c; (void)f;
-    char path[101], resolved[101];
+    char path[VFS_PATH_MAX + 1], resolved[VFS_PATH_MAX + 1];
     struct proc *p = my_proc();
     if (copy_user_string(p, path_addr, path, sizeof(path)) < 0
-            || ramfs_chdir(p->cwd, path, resolved, sizeof(resolved)) != 0)
+            || vfs_resolve_directory(p->cwd, path, resolved,
+                                     sizeof(resolved)) != 0)
         return (uint64_t)-1;
     memcpy(p->cwd, resolved, strlen(resolved) + 1);
     return 0;
@@ -550,7 +551,9 @@ static uint64_t sys_readdir(uint64_t fd, uint64_t buffer, uint64_t size,
 
 struct extron_stat {
     uint64_t dev, ino;
-    uint32_t mode, nlink, uid, gid;
+    uint32_t mode;
+    uint64_t nlink;
+    uint32_t uid, gid;
     uint64_t rdev, pad1;
     int64_t size, blksize;
     int32_t pad2;
@@ -559,36 +562,42 @@ struct extron_stat {
     int32_t pad3[2];
 };
 
+/* Must match mlibc's AArch64 abi-bits/stat.h. In particular nlink_t is
+ * 64-bit, so st_size begins at 56 rather than 48. */
+_Static_assert(offsetof(struct extron_stat, size) == 56,
+               "mlibc AArch64 stat: st_size offset");
+_Static_assert(sizeof(struct extron_stat) == 144,
+               "mlibc AArch64 stat: struct size");
+
 static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
                          struct aarch64_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, stat_addr, sizeof(struct extron_stat)))
         return (uint64_t)-1;
-    size_t size = 0;
-    int directory = 0;
+    struct vfs_attr attr;
     if (target == 0) {
-        char path[101];
-        struct ramfs_node *node;
+        char path[VFS_PATH_MAX + 1];
         if (copy_user_string(p, value, path, sizeof(path)) < 0
-                || ramfs_lookup(p->cwd, path, &node) != 0)
+                || vfs_stat(p->cwd, path, &attr) != 0)
             return (uint64_t)-1;
-        size = ramfs_size(node);
-        directory = node->directory;
     } else if (target == 1) {
-        if (file_info(p, (int)value, &size, &directory) != 0)
+        if (file_info(p, (int)value, &attr) != 0)
             return (uint64_t)-1;
     } else {
         return (uint64_t)-1;
     }
     struct extron_stat *st = (struct extron_stat *)stat_addr;
     memset(st, 0, sizeof(*st));
-    st->ino = target == 1 ? value + 1 : 1;
-    st->mode = (directory ? 0040000 : 0100000) | (directory ? 0755 : 0644);
-    st->nlink = 1;
-    st->size = (int64_t)size;
+    st->ino = attr.ino;
+    st->mode = (attr.type == VFS_NODE_DIRECTORY ? 0040000 : 0100000)
+             | attr.mode;
+    st->nlink = attr.nlink;
+    st->uid = attr.uid;
+    st->gid = attr.gid;
+    st->size = (int64_t)attr.size;
     st->blksize = 4096;
-    st->blocks = (int64_t)((size + 511) / 512);
+    st->blocks = (int64_t)((attr.size + 511) / 512);
     return 0;
 }
 
