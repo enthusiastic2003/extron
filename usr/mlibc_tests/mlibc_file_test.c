@@ -323,6 +323,134 @@ int main(void) {
     errno = 0;
     check("rmdir root reports EBUSY", rmdir("/") == -1 && errno == EBUSY);
 
+    char symlink_path[96], relative_link[96], hardlink_path[96];
+    snprintf(symlink_path, sizeof(symlink_path), "%s/hello-link", test_directory);
+    snprintf(relative_link, sizeof(relative_link), "%s/relative-link", nested_a);
+    snprintf(hardlink_path, sizeof(hardlink_path), "%s/hard-link", test_directory);
+    check("symlink creates a symbolic link",
+          symlink("/hello.txt", symlink_path) == 0);
+    char link_buffer[64] = {0};
+    check("readlink returns the stored target without a terminator",
+          readlink(symlink_path, link_buffer, sizeof(link_buffer)) == 10
+          && !memcmp(link_buffer, "/hello.txt", 10));
+    check("lstat identifies the symlink itself",
+          lstat(symlink_path, &path_info) == 0 && S_ISLNK(path_info.st_mode)
+          && path_info.st_size == 10);
+    check("stat follows the symlink",
+          stat(symlink_path, &path_info) == 0 && S_ISREG(path_info.st_mode)
+          && path_info.st_size == 22);
+    errno = 0;
+    raw_fd = open(symlink_path, O_RDONLY | O_NOFOLLOW);
+    check("O_NOFOLLOW rejects a final symbolic link with ELOOP",
+          raw_fd == -1 && errno == ELOOP);
+    if (raw_fd >= 0)
+        close(raw_fd);
+    char symlink_slash[104];
+    snprintf(symlink_slash, sizeof(symlink_slash), "%s/", symlink_path);
+    errno = 0;
+    check("trailing slash follows a symlink and requires a directory",
+          lstat(symlink_slash, &path_info) == -1 && errno == ENOTDIR);
+    check("relative symlink target is based at link parent",
+          symlink("../../hello.txt", relative_link) == 0
+          && stat(relative_link, &path_info) == 0 && path_info.st_size == 22);
+    check("hard link creates another name for one inode",
+          link(rename_target, hardlink_path) == 0
+          && stat(rename_target, &path_info) == 0
+          && stat(hardlink_path, &fd_info) == 0
+          && path_info.st_ino == fd_info.st_ino && path_info.st_nlink == 2);
+    check("hard link survives unlink of the original name",
+          unlink(rename_target) == 0
+          && stat(hardlink_path, &path_info) == 0 && path_info.st_nlink == 1);
+    errno = 0;
+    check("hard-linking a directory reports EPERM",
+          link(nested_a, victim) == -1 && errno == EPERM);
+    char loop_a[96], loop_b[96];
+    snprintf(loop_a, sizeof(loop_a), "%s/loop-a", test_directory);
+    snprintf(loop_b, sizeof(loop_b), "%s/loop-b", test_directory);
+    check("create a symbolic-link loop",
+          symlink("loop-b", loop_a) == 0 && symlink("loop-a", loop_b) == 0);
+    errno = 0;
+    check("symlink loop reports ELOOP",
+          stat(loop_a, &path_info) == -1 && errno == ELOOP);
+
+    char at_source[128], at_empty[128];
+    snprintf(at_source, sizeof(at_source), "%s/at-source", nested_a);
+    snprintf(at_empty, sizeof(at_empty), "%s/at-empty", nested_a);
+    int directory_fd = open(nested_a, O_RDONLY | O_DIRECTORY);
+    check("open directory fd for *at operations", directory_fd >= 0);
+    int at_source_fd = open(at_source, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    check("create source for directory-fd operations", at_source_fd >= 0);
+    if (at_source_fd >= 0)
+        close(at_source_fd);
+    check("renameat resolves both relative paths from directory fds",
+          directory_fd >= 0
+          && renameat(directory_fd, "at-source",
+                      directory_fd, "at-renamed") == 0);
+    check("symlinkat stores a relative target under a directory fd",
+          directory_fd >= 0
+          && symlinkat("../../hello.txt", directory_fd, "at-symlink") == 0);
+    memset(link_buffer, 0, sizeof(link_buffer));
+    check("readlinkat resolves a relative path from a directory fd",
+          directory_fd >= 0
+          && readlinkat(directory_fd, "at-symlink", link_buffer,
+                        sizeof(link_buffer)) == 15
+          && !memcmp(link_buffer, "../../hello.txt", 15));
+    check("fstatat can inspect rather than follow a symbolic link",
+          directory_fd >= 0
+          && fstatat(directory_fd, "at-symlink", &path_info,
+                     AT_SYMLINK_NOFOLLOW) == 0
+          && S_ISLNK(path_info.st_mode));
+    check("fstatat follows symbolic links by default",
+          directory_fd >= 0
+          && fstatat(directory_fd, "at-symlink", &path_info, 0) == 0
+          && S_ISREG(path_info.st_mode) && path_info.st_size == 22);
+    check("linkat creates a hard link relative to directory fds",
+          directory_fd >= 0
+          && linkat(directory_fd, "at-renamed",
+                    directory_fd, "at-hard", 0) == 0
+          && fstatat(directory_fd, "at-renamed", &path_info, 0) == 0
+          && fstatat(directory_fd, "at-hard", &fd_info, 0) == 0
+          && path_info.st_ino == fd_info.st_ino && path_info.st_nlink == 2);
+    check("linkat without AT_SYMLINK_FOLLOW links the symlink itself",
+          directory_fd >= 0
+          && linkat(directory_fd, "at-symlink",
+                    directory_fd, "at-link-to-link", 0) == 0
+          && fstatat(directory_fd, "at-link-to-link", &path_info,
+                     AT_SYMLINK_NOFOLLOW) == 0
+          && S_ISLNK(path_info.st_mode));
+    check("linkat with AT_SYMLINK_FOLLOW links the symlink target",
+          directory_fd >= 0
+          && linkat(directory_fd, "at-symlink",
+                    directory_fd, "at-link-to-target",
+                    AT_SYMLINK_FOLLOW) == 0
+          && fstatat(directory_fd, "at-link-to-target", &path_info,
+                     AT_SYMLINK_NOFOLLOW) == 0
+          && S_ISREG(path_info.st_mode));
+    check("unlinkat removes a file relative to a directory fd",
+          directory_fd >= 0
+          && unlinkat(directory_fd, "at-renamed", 0) == 0);
+    check("create empty directory for unlinkat AT_REMOVEDIR",
+          mkdir(at_empty, 0755) == 0);
+    check("unlinkat AT_REMOVEDIR removes a relative directory",
+          directory_fd >= 0
+          && unlinkat(directory_fd, "at-empty", AT_REMOVEDIR) == 0);
+    check("absolute *at paths ignore the supplied directory fd",
+          fstatat(-999, "/hello.txt", &path_info, 0) == 0
+          && S_ISREG(path_info.st_mode));
+    int nondirectory_fd = open(regular_path, O_RDONLY);
+    errno = 0;
+    check("relative *at path with a non-directory fd reports ENOTDIR",
+          nondirectory_fd >= 0
+          && fstatat(nondirectory_fd, "child", &path_info, 0) == -1
+          && errno == ENOTDIR);
+    if (nondirectory_fd >= 0)
+        close(nondirectory_fd);
+    errno = 0;
+    check("relative *at path with an invalid fd reports EBADF",
+          fstatat(-999, "child", &path_info, 0) == -1 && errno == EBADF);
+    if (directory_fd >= 0)
+        close(directory_fd);
+
     FILE *created = fopen("default.cfg", "wb");
     check("fopen creates writable ramfs file", created != NULL);
     if (created) {

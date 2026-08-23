@@ -61,6 +61,10 @@
 #define SYS_UNLINK      43
 #define SYS_RMDIR       44
 #define SYS_RENAME      45
+#define SYS_LINK        46
+#define SYS_SYMLINK     47
+#define SYS_READLINK    48
+#define SYS_PATH_AT     49
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

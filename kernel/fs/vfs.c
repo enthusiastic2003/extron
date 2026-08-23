@@ -1,6 +1,7 @@
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/ramfs.h>
 #include <kernel/errno.h>
+#include <kernel/mm/kheap.h>
 #include <kernel/klibc/string.h>
 #include <arch/irq_spinlock.h>
 #include <stdbool.h>
@@ -12,6 +13,7 @@
 #define O_EXCL     0200
 #define O_TRUNC    01000
 #define O_DIRECTORY 0200000
+#define O_NOFOLLOW 0400000
 
 static struct vfs_mount mounts[VFS_MAX_MOUNTS];
 static size_t mount_count;
@@ -159,7 +161,8 @@ static int step_parent(struct vfs_path *path) {
     return 0;
 }
 
-static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
+static int walk_depth(const struct vfs_path *cwd, const char *path,
+                bool parent_only, bool follow_final, unsigned depth,
                 struct vfs_path *out, char leaf[VFS_NAME_MAX + 1]) {
     if (!path || !out)
         return -EINVAL;
@@ -168,6 +171,7 @@ static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
         return -ENOENT;
     if (path_length > VFS_PATH_MAX)
         return -ENAMETOOLONG;
+    bool trailing_slash = path_length > 1 && path[path_length - 1] == '/';
 
     struct vfs_path current = {0};
     int result;
@@ -189,6 +193,11 @@ static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
                 vfs_path_release(&current);
                 return -EINVAL;
             }
+            if (trailing_slash
+                    && current.dentry->node->type != VFS_NODE_DIRECTORY) {
+                vfs_path_release(&current);
+                return -ENOTDIR;
+            }
             *out = current;
             return 0;
         }
@@ -200,6 +209,7 @@ static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
             return -ENAMETOOLONG;
         }
         const char *after = cursor;
+        bool followed_by_slash = *cursor == '/';
         while (*after == '/') after++;
         bool final = !*after;
 
@@ -240,11 +250,71 @@ static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
             return result;
         }
         child->owner_mount = current.mount;
+        if (child->node->type == VFS_NODE_SYMLINK
+                && (!final || follow_final || followed_by_slash)) {
+            if (depth >= VFS_SYMLINK_MAX || !child->node->ops->readlink) {
+                vfs_dentry_release(child);
+                vfs_path_release(&current);
+                return -ELOOP;
+            }
+            char *target = kmalloc(VFS_PATH_MAX + 1);
+            char *combined = kmalloc(VFS_PATH_MAX + 1);
+            if (!target || !combined) {
+                if (target) kfree(target);
+                if (combined) kfree(combined);
+                vfs_dentry_release(child);
+                vfs_path_release(&current);
+                return -ENOMEM;
+            }
+            long target_length = child->node->ops->readlink(
+                child->node, target, VFS_PATH_MAX);
+            vfs_dentry_release(child);
+            if (target_length < 0) {
+                kfree(combined);
+                kfree(target);
+                vfs_path_release(&current);
+                return (int)target_length;
+            }
+            target[target_length] = '\0';
+            size_t remaining = strlen(after);
+            size_t suffix = remaining ? remaining + 1
+                                      : (followed_by_slash ? 1 : 0);
+            if ((size_t)target_length + suffix
+                    > VFS_PATH_MAX) {
+                kfree(combined);
+                kfree(target);
+                vfs_path_release(&current);
+                return -ENAMETOOLONG;
+            }
+            memcpy(combined, target, (size_t)target_length);
+            size_t combined_length = (size_t)target_length;
+            if (remaining) {
+                if (combined_length && combined[combined_length - 1] != '/')
+                    combined[combined_length++] = '/';
+                memcpy(combined + combined_length, after, remaining + 1);
+            } else if (followed_by_slash) {
+                combined[combined_length++] = '/';
+                combined[combined_length] = '\0';
+            } else {
+                combined[combined_length] = '\0';
+            }
+            result = walk_depth(&current, combined, parent_only, follow_final,
+                                depth + 1, out, leaf);
+            kfree(combined);
+            kfree(target);
+            vfs_path_release(&current);
+            return result;
+        }
         vfs_dentry_release(current.dentry);
         current.dentry = child; /* lookup_child returned a retained dentry */
         follow_mount(&current);
         cursor = after;
     }
+}
+
+static int walk(const struct vfs_path *cwd, const char *path, bool parent_only,
+                struct vfs_path *out, char leaf[VFS_NAME_MAX + 1]) {
+    return walk_depth(cwd, path, parent_only, true, 0, out, leaf);
 }
 
 int vfs_lookup_path(const struct vfs_path *cwd, const char *path,
@@ -259,6 +329,11 @@ int vfs_lookup_path(const struct vfs_path *cwd, const char *path,
         return -ENOTDIR;
     }
     return 0;
+}
+
+int vfs_lookup_path_nofollow(const struct vfs_path *cwd, const char *path,
+                             struct vfs_path *out) {
+    return walk_depth(cwd, path, false, false, 0, out, NULL);
 }
 
 int vfs_mount_at(const struct vfs_path *cwd, const char *path,
@@ -334,17 +409,21 @@ int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size) {
 }
 
 int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
-             uint32_t mode, struct vfs_node **out) {
-    if (!path || !out)
+             uint32_t mode, struct vfs_node **out, struct vfs_path *opened_path) {
+    if (!path || !out || !opened_path)
         return -EINVAL;
     int access = flags & O_ACCMODE;
     if (access != 0 && access != O_WRONLY && access != O_RDWR)
         return -EINVAL;
     struct vfs_path found;
-    int result = vfs_lookup_path(cwd, path, &found);
+    int result = flags & O_NOFOLLOW
+        ? vfs_lookup_path_nofollow(cwd, path, &found)
+        : vfs_lookup_path(cwd, path, &found);
     if (result == 0) {
         struct vfs_node *node = found.dentry->node;
-        if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL))
+        if ((flags & O_NOFOLLOW) && node->type == VFS_NODE_SYMLINK)
+            result = -ELOOP;
+        else if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL))
             result = -EEXIST;
         else if ((flags & O_DIRECTORY) && node->type != VFS_NODE_DIRECTORY)
             result = -ENOTDIR;
@@ -357,8 +436,10 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
         if (result == 0) {
             vfs_node_retain(node);
             *out = node;
+            *opened_path = found;
+        } else {
+            vfs_path_release(&found);
         }
-        vfs_path_release(&found);
         return result;
     }
     if (result != -ENOENT || !(flags & O_CREAT))
@@ -383,7 +464,8 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
         created->owner_mount = parent.mount;
         vfs_node_retain(created->node);
         *out = created->node;
-        vfs_dentry_release(created);
+        opened_path->mount = parent.mount;
+        opened_path->dentry = created;
     }
     vfs_path_release(&parent);
     return result;
@@ -464,18 +546,18 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory) {
     return result;
 }
 
-int vfs_rename(const struct vfs_path *cwd, const char *old_path,
-               const char *new_path) {
+int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
+                  const struct vfs_path *new_base, const char *new_path) {
     if (!old_path || !new_path)
         return -EINVAL;
     if (path_is_root_syntax(old_path) || path_is_root_syntax(new_path))
         return -EBUSY;
     struct vfs_path old_parent, new_parent;
     char old_leaf[VFS_NAME_MAX + 1], new_leaf[VFS_NAME_MAX + 1];
-    int result = walk(cwd, old_path, true, &old_parent, old_leaf);
+    int result = walk(old_base, old_path, true, &old_parent, old_leaf);
     if (result < 0)
         return result;
-    result = walk(cwd, new_path, true, &new_parent, new_leaf);
+    result = walk(new_base, new_path, true, &new_parent, new_leaf);
     if (result < 0) {
         vfs_path_release(&old_parent);
         return result;
@@ -538,12 +620,104 @@ out:
     return result;
 }
 
+int vfs_rename(const struct vfs_path *cwd, const char *old_path,
+               const char *new_path) {
+    return vfs_rename_at(cwd, old_path, cwd, new_path);
+}
+
+int vfs_link(const struct vfs_path *old_base, const char *old_path,
+             const struct vfs_path *new_base, const char *new_path,
+             int follow_source) {
+    struct vfs_path source, parent;
+    int result = follow_source
+        ? vfs_lookup_path(old_base, old_path, &source)
+        : vfs_lookup_path_nofollow(old_base, old_path, &source);
+    if (result < 0)
+        return result;
+    char leaf[VFS_NAME_MAX + 1];
+    result = walk(new_base, new_path, true, &parent, leaf);
+    if (result < 0) {
+        vfs_path_release(&source);
+        return result;
+    }
+    if (source.mount != parent.mount)
+        result = -EXDEV;
+    else if (source.dentry->node->type == VFS_NODE_DIRECTORY)
+        result = -EPERM;
+    else if (!parent.mount->ops->link)
+        result = -EROFS;
+    else {
+        struct vfs_dentry *created = NULL;
+        result = parent.mount->ops->link(parent.mount, source.dentry->node,
+                                          parent.dentry, leaf, &created);
+        if (result == 0) {
+            created->owner_mount = parent.mount;
+            vfs_dentry_release(created);
+        }
+    }
+    vfs_path_release(&parent);
+    vfs_path_release(&source);
+    return result;
+}
+
+int vfs_symlink(const struct vfs_path *cwd, const char *target,
+                const char *link_path) {
+    if (!target || strlen(target) > VFS_PATH_MAX)
+        return -ENAMETOOLONG;
+    struct vfs_path parent;
+    char leaf[VFS_NAME_MAX + 1];
+    int result = walk(cwd, link_path, true, &parent, leaf);
+    if (result < 0)
+        return result;
+    if (!parent.mount->ops->symlink)
+        result = -EROFS;
+    else {
+        struct vfs_dentry *created = NULL;
+        result = parent.mount->ops->symlink(parent.mount, parent.dentry,
+                                             leaf, target, &created);
+        if (result == 0) {
+            created->owner_mount = parent.mount;
+            vfs_dentry_release(created);
+        }
+    }
+    vfs_path_release(&parent);
+    return result;
+}
+
+long vfs_readlink(const struct vfs_path *cwd, const char *path,
+                  void *buffer, size_t size) {
+    struct vfs_path found;
+    int result = vfs_lookup_path_nofollow(cwd, path, &found);
+    if (result < 0)
+        return result;
+    if (found.dentry->node->type != VFS_NODE_SYMLINK)
+        result = -EINVAL;
+    else if (!found.dentry->node->ops->readlink)
+        result = -EINVAL;
+    else
+        result = (int)found.dentry->node->ops->readlink(
+            found.dentry->node, buffer, size);
+    vfs_path_release(&found);
+    return result;
+}
+
 int vfs_stat(const struct vfs_path *cwd, const char *path,
              struct vfs_attr *attr) {
     if (!attr)
         return -EINVAL;
     struct vfs_path found;
     int result = vfs_lookup_path(cwd, path, &found);
+    if (result < 0)
+        return result;
+    result = vfs_getattr(found.dentry->node, attr);
+    vfs_path_release(&found);
+    return result;
+}
+
+int vfs_lstat(const struct vfs_path *cwd, const char *path,
+              struct vfs_attr *attr) {
+    struct vfs_path found;
+    int result = vfs_lookup_path_nofollow(cwd, path, &found);
     if (result < 0)
         return result;
     result = vfs_getattr(found.dentry->node, attr);

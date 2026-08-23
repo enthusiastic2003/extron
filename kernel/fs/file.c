@@ -85,6 +85,7 @@ static void file_release(struct open_file *f) {
         if (free_pipe)
             kfree(pipe);
     } else if (f->kind == FILE_VNODE) {
+        vfs_path_release(&f->path);
         vfs_node_release(f->object.node);
     }
     kfree(f);
@@ -163,25 +164,26 @@ int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
     struct open_file *f = kmalloc(sizeof(*f));
     if (!f)
         return -ENOMEM;
+    memset(f, 0, sizeof(*f));
     struct vfs_node *node;
     struct vfs_path cwd;
     if (proc_cwd_snapshot(p, &cwd) < 0) {
         kfree(f);
         return -EIO;
     }
-    int result = vfs_open(&cwd, path, flags, mode, &node);
+    int result = vfs_open(&cwd, path, flags, mode, &node, &f->path);
     vfs_path_release(&cwd);
     if (result < 0) {
         kfree(f);
         return result;
     }
-    memset(f, 0, sizeof(*f));
     f->lock = (spinlock_t)SPINLOCK_INIT;
     f->refs = 1;
     f->kind = FILE_VNODE;
     f->object.node = node;
     struct vfs_attr attr;
     if (vfs_getattr(node, &attr) != 0) {
+        vfs_path_release(&f->path);
         vfs_node_release(node);
         kfree(f);
         return -EIO;
@@ -343,6 +345,16 @@ int file_info(struct proc *p, int fd, struct vfs_attr *attr) {
     attr->type = VFS_NODE_REGULAR;
     attr->mode = 0644;
     attr->nlink = 1;
+    return 0;
+}
+
+int file_get_path(struct proc *p, int fd, struct vfs_path *out) {
+    if (!descriptor_ok(p, fd)) return -EBADF;
+    struct open_file *f = p->files[fd];
+    if (f->kind != FILE_VNODE || !f->path.dentry) return -ENOTDIR;
+    if (f->path.dentry->node->type != VFS_NODE_DIRECTORY) return -ENOTDIR;
+    *out = f->path;
+    vfs_path_retain(out);
     return 0;
 }
 

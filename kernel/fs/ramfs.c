@@ -33,6 +33,8 @@ static struct ramfs_dentry root_dentry;
 static spinlock_t tree_lock = SPINLOCK_INIT;
 static uint64_t next_ino;
 static const struct vfs_fs_ops ramfs_fs_ops;
+static struct ramfs_dentry **child_link_locked(struct ramfs_dentry *,
+                                                struct ramfs_dentry *);
 
 static struct ramfs_inode *inode_of(struct vfs_node *node) {
     return node ? node->private : NULL;
@@ -47,6 +49,7 @@ static long ramfs_node_write(struct vfs_node *, size_t, const void *, size_t);
 static int ramfs_node_truncate(struct vfs_node *, size_t);
 static int ramfs_node_readdir(struct vfs_node *, size_t, struct vfs_dirent *);
 static int ramfs_node_getattr(struct vfs_node *, struct vfs_attr *);
+static long ramfs_node_readlink(struct vfs_node *, void *, size_t);
 static void ramfs_node_destroy(struct vfs_node *);
 
 static const struct vfs_node_ops ramfs_node_ops = {
@@ -55,6 +58,7 @@ static const struct vfs_node_ops ramfs_node_ops = {
     .truncate = ramfs_node_truncate,
     .readdir = ramfs_node_readdir,
     .getattr = ramfs_node_getattr,
+    .readlink = ramfs_node_readlink,
     .destroy = ramfs_node_destroy,
 };
 
@@ -156,6 +160,74 @@ static int ramfs_create(struct vfs_mount *mount,
         return -EINVAL;
     irq_spin_lock(&tree_lock);
     int result = create_locked(parent, name, type, mode, out);
+    irq_spin_unlock(&tree_lock);
+    return result;
+}
+
+static int ramfs_link(struct vfs_mount *mount, struct vfs_node *node,
+                      struct vfs_dentry *parent_entry, const char *name,
+                      struct vfs_dentry **out) {
+    (void)mount;
+    if (!node || node->type == VFS_NODE_DIRECTORY)
+        return -EPERM;
+    struct ramfs_dentry *parent = dentry_of(parent_entry);
+    irq_spin_lock(&tree_lock);
+    if (find_child_locked(parent, name)) {
+        irq_spin_unlock(&tree_lock);
+        return -EEXIST;
+    }
+    struct ramfs_dentry *entry = kmalloc(sizeof(*entry));
+    if (!entry) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOMEM;
+    }
+    memset(entry, 0, sizeof(*entry));
+    int result = vfs_dentry_init(&entry->dentry, node, parent_entry,
+                                  name, entry);
+    if (result == 0) {
+        struct ramfs_inode *parent_inode = inode_of(parent_entry->node);
+        entry->next_sibling = parent_inode->children;
+        parent_inode->children = entry;
+        inode_of(node)->nlink++;
+        vfs_dentry_retain(&entry->dentry);
+        *out = &entry->dentry;
+    } else {
+        kfree(entry);
+    }
+    irq_spin_unlock(&tree_lock);
+    return result;
+}
+
+static int ramfs_symlink(struct vfs_mount *mount,
+                         struct vfs_dentry *parent_entry, const char *name,
+                         const char *target, struct vfs_dentry **out) {
+    (void)mount;
+    size_t length = strlen(target);
+    if (length > VFS_PATH_MAX)
+        return -ENAMETOOLONG;
+    struct ramfs_dentry *parent = dentry_of(parent_entry);
+    irq_spin_lock(&tree_lock);
+    struct vfs_dentry *created = NULL;
+    int result = create_locked(parent, name, VFS_NODE_SYMLINK, 0777, &created);
+    if (result == 0) {
+        struct ramfs_inode *inode = inode_of(created->node);
+        inode->data = length ? kmalloc(length) : NULL;
+        if (length && !inode->data) {
+            /* Creation rollback is not observable while tree_lock is held. */
+            struct ramfs_dentry *entry = dentry_of(created);
+            struct ramfs_dentry **link = child_link_locked(parent, entry);
+            *link = entry->next_sibling;
+            entry->dentry.linked = 0;
+            vfs_dentry_release(created);
+            vfs_dentry_release(&entry->dentry);
+            result = -ENOMEM;
+        } else {
+            if (length) memcpy(inode->data, target, length);
+            inode->size = inode->capacity = length;
+            inode->owns_data = true;
+            *out = created;
+        }
+    }
     irq_spin_unlock(&tree_lock);
     return result;
 }
@@ -486,6 +558,18 @@ static int ramfs_node_getattr(struct vfs_node *vnode, struct vfs_attr *attr) {
     return 0;
 }
 
+static long ramfs_node_readlink(struct vfs_node *vnode, void *buffer,
+                                size_t size) {
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode || vnode->type != VFS_NODE_SYMLINK)
+        return -EINVAL;
+    irq_spin_lock(&inode->lock);
+    if (size > inode->size) size = inode->size;
+    if (size) memcpy(buffer, inode->data, size);
+    irq_spin_unlock(&inode->lock);
+    return (long)size;
+}
+
 static void ramfs_node_destroy(struct vfs_node *vnode) {
     struct ramfs_inode *inode = inode_of(vnode);
     if (!inode || inode == &root_inode) return;
@@ -505,5 +589,7 @@ static const struct vfs_fs_ops ramfs_fs_ops = {
     .create = ramfs_create,
     .remove = ramfs_remove,
     .rename = ramfs_rename,
+    .link = ramfs_link,
+    .symlink = ramfs_symlink,
     .destroy_dentry = ramfs_destroy_dentry,
 };

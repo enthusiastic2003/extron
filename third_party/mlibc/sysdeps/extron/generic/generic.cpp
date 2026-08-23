@@ -69,9 +69,24 @@
 #define SYS_UNLINK      43
 #define SYS_RMDIR       44
 #define SYS_RENAME      45
+#define SYS_LINK        46
+#define SYS_SYMLINK     47
+#define SYS_READLINK    48
+#define SYS_PATH_AT     49
 
 
 using main_fn = int (*)(int, char **);
+
+struct path_at_request {
+    uint64_t op;
+    int64_t dirfd1;
+    uint64_t path1;
+    int64_t dirfd2;
+    uint64_t path2;
+    uint64_t buffer;
+    uint64_t size;
+    uint64_t flags;
+};
 
 /*
  * __dso_handle: __cxa_finalize()'s per-module handle, used by
@@ -183,6 +198,10 @@ static inline long syscall3(long n, long a1, long a2, long a3) {
     return x0;
 }
 
+static long path_at(path_at_request &request) {
+    return syscall1(SYS_PATH_AT, (long)&request);
+}
+
 extern "C" long __mlibc_do_asm_cp_syscall(long, long, long, long);
 
 static inline long cp_syscall3(long n, long a1, long a2, long a3) {
@@ -235,14 +254,21 @@ int sys_read_entries(int handle, void *buffer, size_t max_size,
     return 0;
 }
 
-int sys_stat(fsfd_target target, int fd, const char *path, int,
+int sys_stat(fsfd_target target, int fd, const char *path, int flags,
              struct stat *statbuf) {
     long ret;
     if (target == fsfd_target::fd)
         ret = syscall3(SYS_STAT, 1, fd, (long)statbuf);
     else if (target == fsfd_target::path
             || (target == fsfd_target::fd_path && fd == AT_FDCWD))
-        ret = syscall3(SYS_STAT, 0, (long)path, (long)statbuf);
+        ret = syscall3(SYS_STAT, flags & AT_SYMLINK_NOFOLLOW ? 2 : 0,
+                       (long)path, (long)statbuf);
+    else if (target == fsfd_target::fd_path) {
+        path_at_request request{6, fd, (uint64_t)path, 0, 0,
+                                (uint64_t)statbuf, sizeof(*statbuf),
+                                (uint64_t)flags};
+        ret = path_at(request);
+    }
     else
         return ENOTSUP;
     return ret < 0 ? -ret : 0;
@@ -524,12 +550,11 @@ int sys_mkdir(const char *path, mode_t mode) {
 }
 
 int sys_unlinkat(int dirfd, const char *path, int flags) {
-    if (dirfd != AT_FDCWD)
-        return ENOTSUP;
     if (flags & ~AT_REMOVEDIR)
         return EINVAL;
-    long ret = syscall1(flags & AT_REMOVEDIR ? SYS_RMDIR : SYS_UNLINK,
-                        (long)path);
+    path_at_request request{1, dirfd, (uint64_t)path, 0, 0, 0, 0,
+                            (uint64_t)flags};
+    long ret = path_at(request);
     return ret < 0 ? -ret : 0;
 }
 
@@ -545,9 +570,54 @@ int sys_rename(const char *old_path, const char *new_path) {
 
 int sys_renameat(int olddirfd, const char *old_path, int newdirfd,
                  const char *new_path) {
-    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD)
-        return ENOTSUP;
-    return sys_rename(old_path, new_path);
+    path_at_request request{2, olddirfd, (uint64_t)old_path, newdirfd,
+                            (uint64_t)new_path, 0, 0, 0};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_link(const char *old_path, const char *new_path) {
+    long ret = syscall3(SYS_LINK, (long)old_path, (long)new_path, 0);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_linkat(int olddirfd, const char *old_path, int newdirfd,
+               const char *new_path, int flags) {
+    if (flags & ~AT_SYMLINK_FOLLOW)
+        return EINVAL;
+    path_at_request request{3, olddirfd, (uint64_t)old_path, newdirfd,
+                            (uint64_t)new_path, 0, 0, (uint64_t)flags};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_symlink(const char *target, const char *link_path) {
+    long ret = syscall2(SYS_SYMLINK, (long)target, (long)link_path);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_symlinkat(const char *target, int dirfd, const char *link_path) {
+    path_at_request request{4, 0, (uint64_t)target, dirfd,
+                            (uint64_t)link_path, 0, 0, 0};
+    long ret = path_at(request);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_readlink(const char *path, void *buffer, size_t size, ssize_t *length) {
+    long ret = syscall3(SYS_READLINK, (long)path, (long)buffer, size);
+    if (ret < 0) return -ret;
+    *length = ret;
+    return 0;
+}
+
+int sys_readlinkat(int dirfd, const char *path, void *buffer, size_t size,
+                   ssize_t *length) {
+    path_at_request request{5, dirfd, (uint64_t)path, 0, 0,
+                            (uint64_t)buffer, size, 0};
+    long ret = path_at(request);
+    if (ret < 0) return -ret;
+    *length = ret;
+    return 0;
 }
 
 int sys_pipe(int *fds, int flags) {

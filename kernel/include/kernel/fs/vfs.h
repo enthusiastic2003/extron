@@ -8,10 +8,12 @@
 #define VFS_NAME_MAX 255
 #define VFS_PATH_MAX 1024
 #define VFS_MAX_MOUNTS 8
+#define VFS_SYMLINK_MAX 40
 
 enum vfs_node_type {
     VFS_NODE_REGULAR,
     VFS_NODE_DIRECTORY,
+    VFS_NODE_SYMLINK,
 };
 
 struct vfs_attr {
@@ -40,6 +42,7 @@ struct vfs_node_ops {
     int (*truncate)(struct vfs_node *, size_t);
     int (*readdir)(struct vfs_node *, size_t, struct vfs_dirent *);
     int (*getattr)(struct vfs_node *, struct vfs_attr *);
+    long (*readlink)(struct vfs_node *, void *, size_t);
     void (*destroy)(struct vfs_node *);
 };
 
@@ -80,6 +83,10 @@ struct vfs_fs_ops {
     int (*remove)(struct vfs_mount *, struct vfs_dentry *, const char *, int);
     int (*rename)(struct vfs_mount *, struct vfs_dentry *, const char *,
                   struct vfs_dentry *, const char *);
+    int (*link)(struct vfs_mount *, struct vfs_node *, struct vfs_dentry *,
+                const char *, struct vfs_dentry **);
+    int (*symlink)(struct vfs_mount *, struct vfs_dentry *, const char *,
+                   const char *, struct vfs_dentry **);
     void (*destroy_dentry)(struct vfs_dentry *);
 };
 
@@ -109,16 +116,29 @@ int vfs_mount_at(const struct vfs_path *cwd, const char *path,
 int vfs_root_path(struct vfs_path *out);
 int vfs_lookup_path(const struct vfs_path *cwd, const char *path,
                     struct vfs_path *out);
+int vfs_lookup_path_nofollow(const struct vfs_path *cwd, const char *path,
+                             struct vfs_path *out);
 int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size);
 
 int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
-             uint32_t mode, struct vfs_node **out);
+             uint32_t mode, struct vfs_node **out, struct vfs_path *opened_path);
 int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode);
 int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory);
 int vfs_rename(const struct vfs_path *cwd, const char *old_path,
                const char *new_path);
+int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
+                  const struct vfs_path *new_base, const char *new_path);
+int vfs_link(const struct vfs_path *old_base, const char *old_path,
+             const struct vfs_path *new_base, const char *new_path,
+             int follow_source);
+int vfs_symlink(const struct vfs_path *cwd, const char *target,
+                const char *link_path);
+long vfs_readlink(const struct vfs_path *cwd, const char *path,
+                  void *buffer, size_t size);
 int vfs_stat(const struct vfs_path *cwd, const char *path,
              struct vfs_attr *attr);
+int vfs_lstat(const struct vfs_path *cwd, const char *path,
+              struct vfs_attr *attr);
 
 long vfs_read(struct vfs_node *node, size_t offset, void *buffer, size_t count);
 long vfs_write(struct vfs_node *node, size_t offset,

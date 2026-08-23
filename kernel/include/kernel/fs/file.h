@@ -30,6 +30,7 @@ struct open_file {
         struct vfs_node *node;
         struct pipe_buffer *pipe;
     } object;
+    struct vfs_path path; /* retained location; used by directory-relative *at */
     size_t offset;
     int flags;
 };
@@ -55,5 +56,6 @@ long    file_readdir(struct proc *p, int fd, void *buffer, size_t size);
 int     file_info(struct proc *p, int fd, struct vfs_attr *attr);
 int     file_is_tty(struct proc *p, int fd);
 int     file_poll(struct proc *p, int fd, short events, short *revents);
+int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
 
 #endif

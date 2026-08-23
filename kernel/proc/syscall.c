@@ -759,6 +759,53 @@ static uint64_t sys_rename(uint64_t old_addr, uint64_t new_addr, uint64_t c,
     return (uint64_t)result;
 }
 
+static uint64_t sys_link(uint64_t old_addr, uint64_t new_addr, uint64_t flags,
+                         struct aarch64_frame *f) {
+    (void)f;
+    char old_path[VFS_PATH_MAX + 1], new_path[VFS_PATH_MAX + 1];
+    struct proc *p = my_proc();
+    long result = copy_user_string(p, old_addr, old_path, sizeof(old_path));
+    if (result < 0) return (uint64_t)result;
+    result = copy_user_string(p, new_addr, new_path, sizeof(new_path));
+    if (result < 0) return (uint64_t)result;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0) return (uint64_t)-EIO;
+    result = vfs_link(&cwd, old_path, &cwd, new_path, !!flags);
+    vfs_path_release(&cwd);
+    return (uint64_t)result;
+}
+
+static uint64_t sys_symlink(uint64_t target_addr, uint64_t link_addr, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)c; (void)f;
+    char target[VFS_PATH_MAX + 1], link_path[VFS_PATH_MAX + 1];
+    struct proc *p = my_proc();
+    long result = copy_user_string(p, target_addr, target, sizeof(target));
+    if (result < 0) return (uint64_t)result;
+    result = copy_user_string(p, link_addr, link_path, sizeof(link_path));
+    if (result < 0) return (uint64_t)result;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0) return (uint64_t)-EIO;
+    result = vfs_symlink(&cwd, target, link_path);
+    vfs_path_release(&cwd);
+    return (uint64_t)result;
+}
+
+static uint64_t sys_readlink(uint64_t path_addr, uint64_t buffer,
+                             uint64_t size, struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, buffer, size)) return (uint64_t)-EFAULT;
+    char path[VFS_PATH_MAX + 1];
+    long result = copy_user_string(p, path_addr, path, sizeof(path));
+    if (result < 0) return (uint64_t)result;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0) return (uint64_t)-EIO;
+    result = vfs_readlink(&cwd, path, (void *)buffer, size);
+    vfs_path_release(&cwd);
+    return (uint64_t)result;
+}
+
 static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
                            struct aarch64_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
@@ -868,6 +915,31 @@ struct extron_stat {
     int32_t pad3[2];
 };
 
+struct path_at_request {
+    uint64_t op;
+    int64_t dirfd1;
+    uint64_t path1;
+    int64_t dirfd2;
+    uint64_t path2;
+    uint64_t buffer;
+    uint64_t size;
+    uint64_t flags;
+};
+
+#define AT_FDCWD_KERNEL      (-100)
+#define AT_SYMLINK_NOFOLLOW_KERNEL 0x100
+#define AT_REMOVEDIR_KERNEL  0x200
+#define AT_SYMLINK_FOLLOW_KERNEL   0x400
+
+static int path_at_base(struct proc *p, int64_t dirfd, const char *path,
+                        struct vfs_path *out) {
+    if (path[0] == '/')
+        return vfs_root_path(out);
+    if (dirfd == AT_FDCWD_KERNEL)
+        return proc_cwd_snapshot(p, out) < 0 ? -EIO : 0;
+    return file_get_path(p, (int)dirfd, out);
+}
+
 /* Must match mlibc's AArch64 abi-bits/stat.h. In particular nlink_t is
  * 64-bit, so st_size begins at 56 rather than 48. */
 _Static_assert(offsetof(struct extron_stat, size) == 56,
@@ -882,7 +954,7 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     if (!user_buffer_ok(p, stat_addr, sizeof(struct extron_stat)))
         return (uint64_t)-EFAULT;
     struct vfs_attr attr;
-    if (target == 0) {
+    if (target == 0 || target == 2) {
         char path[VFS_PATH_MAX + 1];
         long copied = copy_user_string(p, value, path, sizeof(path));
         if (copied < 0)
@@ -890,7 +962,8 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
         struct vfs_path cwd;
         if (proc_cwd_snapshot(p, &cwd) < 0)
             return (uint64_t)-EIO;
-        int result = vfs_stat(&cwd, path, &attr);
+        int result = target == 2 ? vfs_lstat(&cwd, path, &attr)
+                                 : vfs_stat(&cwd, path, &attr);
         vfs_path_release(&cwd);
         if (result < 0)
             return (uint64_t)result;
@@ -903,7 +976,8 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     struct extron_stat *st = (struct extron_stat *)stat_addr;
     memset(st, 0, sizeof(*st));
     st->ino = attr.ino;
-    st->mode = (attr.type == VFS_NODE_DIRECTORY ? 0040000 : 0100000)
+    st->mode = (attr.type == VFS_NODE_DIRECTORY ? 0040000
+              : attr.type == VFS_NODE_SYMLINK ? 0120000 : 0100000)
              | attr.mode;
     st->nlink = attr.nlink;
     st->uid = attr.uid;
@@ -912,6 +986,99 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     st->blksize = 4096;
     st->blocks = (int64_t)((attr.size + 511) / 512);
     return 0;
+}
+
+static void store_extron_stat(struct extron_stat *st,
+                              const struct vfs_attr *attr) {
+    memset(st, 0, sizeof(*st));
+    st->ino = attr->ino;
+    st->mode = (attr->type == VFS_NODE_DIRECTORY ? 0040000
+              : attr->type == VFS_NODE_SYMLINK ? 0120000 : 0100000)
+             | attr->mode;
+    st->nlink = attr->nlink;
+    st->uid = attr->uid;
+    st->gid = attr->gid;
+    st->size = (int64_t)attr->size;
+    st->blksize = 4096;
+    st->blocks = (int64_t)((attr->size + 511) / 512);
+}
+
+static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_addr, sizeof(struct path_at_request)))
+        return (uint64_t)-EFAULT;
+    struct path_at_request request = *(struct path_at_request *)request_addr;
+    char path1[VFS_PATH_MAX + 1], path2[VFS_PATH_MAX + 1];
+    long result = copy_user_string(p, request.path1, path1, sizeof(path1));
+    if (result < 0) return (uint64_t)result;
+    if (request.op == 2 || request.op == 3 || request.op == 4) {
+        result = copy_user_string(p, request.path2, path2, sizeof(path2));
+        if (result < 0) return (uint64_t)result;
+    }
+
+    struct vfs_path base1 = {0}, base2 = {0};
+    if (request.op != 4) {
+        result = path_at_base(p, request.dirfd1, path1, &base1);
+        if (result < 0) return (uint64_t)result;
+    }
+    if (request.op == 2 || request.op == 3 || request.op == 4) {
+        result = path_at_base(p, request.dirfd2, path2, &base2);
+        if (result < 0) {
+            vfs_path_release(&base1);
+            return (uint64_t)result;
+        }
+    }
+
+    switch (request.op) {
+        case 1:
+            if (request.flags & ~AT_REMOVEDIR_KERNEL) result = -EINVAL;
+            else result = vfs_unlink(&base1, path1,
+                !!(request.flags & AT_REMOVEDIR_KERNEL));
+            break;
+        case 2:
+            if (request.flags) result = -EINVAL;
+            else result = vfs_rename_at(&base1, path1, &base2, path2);
+            break;
+        case 3:
+            if (request.flags & ~AT_SYMLINK_FOLLOW_KERNEL) result = -EINVAL;
+            else result = vfs_link(&base1, path1, &base2, path2,
+                !!(request.flags & AT_SYMLINK_FOLLOW_KERNEL));
+            break;
+        case 4:
+            if (request.flags) result = -EINVAL;
+            else result = vfs_symlink(&base2, path1, path2);
+            break;
+        case 5:
+            if (request.flags || !user_buffer_ok(p, request.buffer, request.size))
+                result = request.flags ? -EINVAL : -EFAULT;
+            else result = vfs_readlink(&base1, path1,
+                (void *)request.buffer, request.size);
+            break;
+        case 6: {
+            if (request.flags & ~AT_SYMLINK_NOFOLLOW_KERNEL)
+                result = -EINVAL;
+            else if (!user_buffer_ok(p, request.buffer,
+                                      sizeof(struct extron_stat)))
+                result = -EFAULT;
+            else {
+                struct vfs_attr attr;
+                result = request.flags & AT_SYMLINK_NOFOLLOW_KERNEL
+                    ? vfs_lstat(&base1, path1, &attr)
+                    : vfs_stat(&base1, path1, &attr);
+                if (result == 0)
+                    store_extron_stat((struct extron_stat *)request.buffer,
+                                      &attr);
+            }
+            break;
+        }
+        default:
+            result = -EINVAL;
+    }
+    vfs_path_release(&base2);
+    vfs_path_release(&base1);
+    return (uint64_t)result;
 }
 
 /*
@@ -1146,6 +1313,10 @@ static const syscall_fn syscall_table[] = {
     [SYS_UNLINK] = sys_unlink,
     [SYS_RMDIR] = sys_rmdir,
     [SYS_RENAME] = sys_rename,
+    [SYS_LINK] = sys_link,
+    [SYS_SYMLINK] = sys_symlink,
+    [SYS_READLINK] = sys_readlink,
+    [SYS_PATH_AT] = sys_path_at,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

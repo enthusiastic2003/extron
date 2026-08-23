@@ -54,6 +54,10 @@
 #define SYS_UNLINK      43
 #define SYS_RMDIR       44
 #define SYS_RENAME      45
+#define SYS_LINK        46
+#define SYS_SYMLINK     47
+#define SYS_READLINK    48
+#define SYS_PATH_AT     49
 
 struct extron_thread_create_args {
     uintptr_t entry;

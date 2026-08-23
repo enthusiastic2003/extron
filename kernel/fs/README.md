@@ -56,16 +56,40 @@ enabled in the BusyBox shell, including recursive removal.
 object as accessible. This matches the current lack of permission enforcement
 and is intentionally temporary rather than a claim that mode bits are active.
 
+## Stage 3 links and directory-relative operations
+
+The common pathname walker now expands absolute and parent-relative symbolic
+link targets, limits expansion to 40 links, and reports `ELOOP` for cycles.
+Final-component no-follow lookup backs `lstat()`, `readlink()`, and
+`AT_SYMLINK_NOFOLLOW`; ordinary lookup follows the final link. `open()` also
+honors `O_NOFOLLOW`, while a trailing slash follows a link and requires the
+result to be a directory.
+
+Ramfs supports symbolic links and hard links to non-directory inodes. Hard
+links share inode number, contents, and link count, and unlinking one name does
+not disturb the others. Cross-mount links report `EXDEV`, and directory hard
+links report `EPERM`.
+
+Open vnode descriptions retain the exact `vfs_path` they opened. This makes a
+directory descriptor a stable lookup base even if its pathname is subsequently
+renamed or removed. The Extron syscall and mlibc layers use that base for
+`unlinkat()`, `renameat()`, `linkat()`, `symlinkat()`, `readlinkat()`, and
+`fstatat()`. Absolute paths correctly ignore the supplied descriptor; relative
+paths distinguish `EBADF` from `ENOTDIR`. BusyBox `ln` and `readlink` are now
+enabled.
+
 ## Deliberately deferred
 
-- hard links, symlinks, readlink, and no-follow lookup rules;
 - timestamps, umask, ownership changes, and permission enforcement;
+- the remaining directory-relative calls such as `openat()` and `mkdirat()`;
 - devfs and VFS-backed console/TTY device nodes;
 - VFS-based executable loading (exec still reads an initrd image directly);
 - persistent/block-backed storage and an unmount protocol.
 
-`usr/mlibc_tests/mlibc_file_test.c` exercises both stages end to end:
+`usr/mlibc_tests/mlibc_file_test.c` exercises all three stages end to end:
 nested lookup and creation, `.`/`..`, cwd reconstruction and fork inheritance,
 long paths, creation modes, seeded-file COW behavior, shared open-file offsets,
 open-after-unlink lifetime, detached cwd recovery, atomic rename replacement,
-subtree moves, cycle rejection, and distinct POSIX failures through mlibc.
+subtree moves, hard-link lifetimes, relative and absolute symlink expansion,
+loop rejection, final-component following rules, real directory-fd `*at()`
+operations, and distinct POSIX failures through mlibc.
