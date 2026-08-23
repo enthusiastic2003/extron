@@ -12,7 +12,7 @@
  * changed, context switch. See arch/sched.h's comment on the seam.
  */
 
-static struct proc *current_proc = NULL;
+static struct thread *current_thread = NULL;
 
 /* Set only while sched_idle_wait() below is parked in its wfi loop.
  * Interrupts are deliberately unmasked there, so the timer IRQ's own
@@ -21,23 +21,27 @@ static struct proc *current_proc = NULL;
  * out from under the idle loop, or the idling proc's saved context
  * would point back into the loop instead of into the sleep() call it
  * actually needs to resume, and it would never return to userland. The
- * IRQ still does the part that matters (proc_wakeup_expired() making
+ * IRQ still does the part that matters (thread_wakeup_expired() making
  * things runnable); the idle loop picks the result up itself. */
 static volatile int in_idle = 0;
 
+struct thread *my_thread(void) {
+    return current_thread;
+}
+
 struct proc *my_proc(void) {
-    return current_proc;
+    return current_thread ? current_thread->process : NULL;
 }
 
 void sched_init(void) {
     sched_policy_init();
-    current_proc = NULL;
+    current_thread = NULL;
     kprintf("[SCHED] Scheduler initialized\n");
 }
 
 /*
  * Reached only via context_switch's `ret` landing on context.lr — never
- * called directly. A brand-new proc's context is pre-populated
+ * called directly. A brand-new main thread's context is pre-populated
  * (proc_init(), kernel/proc/proc.c) as if it had already been
  * switched out once, with lr pointing here instead of a real return
  * address, and sp at a fresh, empty kernel stack. This makes every
@@ -54,7 +58,8 @@ void sched_init(void) {
  * see below — so nothing address-space-related needs doing here.
  */
 void proc_bootstrap_trampoline(void) {
-    struct proc *p = current_proc;
+    struct thread *t = current_thread;
+    struct proc *p = t->process;
     /* argc/argv land in x0/x1, where AAPCS64 puts main()'s first two
      * arguments — so entering _start is an ordinary call as far as the
      * process can tell. Before this, x0/x1 held whatever the kernel had
@@ -62,9 +67,9 @@ void proc_bootstrap_trampoline(void) {
      * it; it now passes them straight through. */
     register uint64_t argc   __asm__("x0") = p->user_argc;
     register uint64_t argv   __asm__("x1") = p->user_argv;
-    register uint64_t elr    __asm__("x2") = p->entry;
+    register uint64_t elr    __asm__("x2") = t->entry;
     register uint64_t spsr   __asm__("x3") = 0x0;   /* EL0t, all masks clear */
-    register uint64_t sp_el0 __asm__("x4") = p->user_sp;
+    register uint64_t sp_el0 __asm__("x4") = t->user_sp;
     __asm__ volatile (
         "msr elr_el1, %2\n\t"
         "msr spsr_el1, %3\n\t"
@@ -77,17 +82,17 @@ void proc_bootstrap_trampoline(void) {
 }
 
 /*
- * Common to schedule() and sched_start(): make `next` the current proc,
+ * Common to schedule() and sched_start(): make `next` the current thread,
  * swapping TTBR0_EL1 if the address space actually changed (aarch64
  * counterpart to x86's proc_install()'s conditional load_cr3).
  *
  * Runs with IRQs masked, and that is not a formality.
  *
- * `current_proc = next` happens here, but SP_EL1 does not change until
+ * `current_thread = next` happens here, but SP_EL1 does not change until
  * context_switch's `mov sp, x9` several instructions later. In between,
  * the kernel is running on the OUTGOING proc's stack while my_proc()
  * already answers with the incoming one. A timer IRQ landing in that
- * window calls schedule(), which takes `old = current_proc` — i.e.
+ * window calls schedule(), which takes `old = current_thread` — i.e.
  * `next` — and context-switches away, saving the stack pointer it is
  * standing on into `next`'s saved context. `next` is thereby given the
  * previous proc's kernel stack, permanently, and the two then run
@@ -115,16 +120,17 @@ void proc_bootstrap_trampoline(void) {
  * all: proc_bootstrap_trampoline()/proc_fork_trampoline() eret instead,
  * and eret takes DAIF from SPSR_EL1.
  */
-static void install_and_switch(struct proc *old, struct proc *next) {
+static void install_and_switch(struct thread *old, struct thread *next) {
     uint64_t daif;
     __asm__ volatile ("mrs %0, daif" : "=r"(daif));
     __asm__ volatile ("msr daifset, #3" ::: "memory");
 
-    next->state  = PROC_RUNNING;
-    current_proc = next;
+    next->state = THREAD_RUNNING;
+    current_thread = next;
 
-    if (!old || old->ttbr0 != next->ttbr0) {
-        __asm__ volatile ("msr ttbr0_el1, %0" :: "r"(next->ttbr0) : "memory");
+    if (!old || old->process->ttbr0 != next->process->ttbr0) {
+        __asm__ volatile ("msr ttbr0_el1, %0"
+                          :: "r"(next->process->ttbr0) : "memory");
         flush_tlb();
     }
 
@@ -142,10 +148,10 @@ static void install_and_switch(struct proc *old, struct proc *next) {
  * when the caller has already marked itself non-runnable and the run
  * queue is empty — i.e. the whole system is genuinely idle and the only
  * thing that can change that is an interrupt (timer expiry via
- * proc_wakeup_expired(), or a keystroke via kbd_irq_handler()'s
+ * thread_wakeup_expired(), or a keystroke via kbd_irq_handler()'s
  * wakeup()).
  *
- * Runs on the idling proc's own kernel stack rather than a dedicated
+ * Runs on the idling thread's own kernel stack rather than a dedicated
  * scheduler stack (xv6-style per-CPU scheduler context would be the
  * bigger, cleaner refactor; this is the minimal correct version).
  * IRQs must be unmasked across the wfi or the handler that ends the
@@ -153,7 +159,7 @@ static void install_and_switch(struct proc *old, struct proc *next) {
  * exception handler with DAIF masked, so the original mask is saved
  * and restored around each wait rather than assumed.
  */
-static struct proc *sched_idle_wait(void) {
+static struct thread *sched_idle_wait(void) {
     uint64_t daif;
     __asm__ volatile ("mrs %0, daif" : "=r"(daif));
 
@@ -163,7 +169,7 @@ static struct proc *sched_idle_wait(void) {
         __asm__ volatile ("wfi");
         __asm__ volatile ("msr daif, %0" :: "r"(daif) : "memory");
 
-        struct proc *next = sched_policy_pick_next();
+        struct thread *next = sched_policy_pick_next();
         if (next) {
             in_idle = 0;
             return next;
@@ -172,13 +178,13 @@ static struct proc *sched_idle_wait(void) {
 }
 
 /*
- * schedule — pick the next runnable proc and context-switch to it.
+ * schedule — pick the next runnable thread and context-switch to it.
  * Called from the timer IRQ path (kernel/drivers/timer.c) — unconditional
  * round robin, one tick = one timeslice — and from procs voluntarily
  * giving up the CPU (sys_sleep, sleep(), sys_exit).
  */
 void schedule(void) {
-    struct proc *old = current_proc;
+    struct thread *old = current_thread;
     if (!old)
         return;
 
@@ -189,10 +195,10 @@ void schedule(void) {
     if (in_idle)
         return;
 
-    struct proc *next = sched_policy_pick_next();
+    struct thread *next = sched_policy_pick_next();
 
     if (!next) {
-        if (old->state == PROC_RUNNING) {
+        if (old->state == THREAD_RUNNING) {
             /* Transient gap — nothing else is queued, but `old` is still
              * perfectly resumable, so just keep running it. This is the
              * only case where returning without switching is correct. */
@@ -202,7 +208,7 @@ void schedule(void) {
          * would resume a proc that believes it isn't running — which is
          * exactly what made SYS_SLEEP a no-op whenever the only other
          * proc was blocked in SYS_READ (heartbeat spun at full speed
-         * while flagged PROC_SLEEPING, and proc_wakeup_expired() then
+         * while flagged THREAD_SLEEPING, and thread_wakeup_expired() then
          * kept re-queuing it, producing duplicate run-queue entries and
          * self-switches). Wait for a real wakeup instead. */
         next = sched_idle_wait();
@@ -213,12 +219,12 @@ void schedule(void) {
          * own sleep expired, or its channel was signalled). We ARE old:
          * no context switch, no address-space swap — just drop the
          * SLEEPING flag and let the caller unwind back to userland. */
-        old->state = PROC_RUNNING;
+        old->state = THREAD_RUNNING;
         return;
     }
 
-    if (old->state == PROC_RUNNING) {
-        old->state = PROC_RUNNABLE;
+    if (old->state == THREAD_RUNNING) {
+        old->state = THREAD_RUNNABLE;
         sched_policy_add(old);
     }
 
@@ -233,13 +239,14 @@ void schedule(void) {
  * never returns anyway.
  */
 void sched_start(void) {
-    struct proc *first = sched_policy_pick_next();
+    struct thread *first = sched_policy_pick_next();
     if (!first) {
         panic("aarch64 sched_start: no process to start");
     }
 
-    kprintf("[SCHED] Launching PID %lu (entry=%p)\n",
-            (unsigned long)first->pid, (void *)first->entry);
+    kprintf("[SCHED] Launching PID %lu TID %lu (entry=%p)\n",
+            (unsigned long)first->process->pid,
+            (unsigned long)first->tid, (void *)first->entry);
 
     install_and_switch(NULL, first);
 

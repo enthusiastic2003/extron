@@ -14,7 +14,7 @@
 
 #define RUN_QUEUE_CAPACITY 256
 
-static struct proc *run_queue[RUN_QUEUE_CAPACITY];
+static struct thread *run_queue[RUN_QUEUE_CAPACITY];
 static size_t       run_queue_count = 0;
 static spinlock_t   run_queue_lock  = SPINLOCK_INIT;
 
@@ -26,23 +26,24 @@ void sched_policy_init(void) {
     irq_spin_unlock(&run_queue_lock);
 }
 
-void sched_policy_add(struct proc *p) {
-    if (!p)
+void sched_policy_add(struct thread *t) {
+    if (!t)
         return;
 
-    p->state = PROC_RUNNABLE;
+    t->state = THREAD_RUNNABLE;
 
     irq_spin_lock(&run_queue_lock);
     if (run_queue_count >= RUN_QUEUE_CAPACITY) {
         irq_spin_unlock(&run_queue_lock);
-        kprintf("[SCHED] Run queue full, cannot add PID %lu\n", (unsigned long)p->pid);
+        kprintf("[SCHED] Run queue full, cannot add TID %lu\n",
+                (unsigned long)t->tid);
         return;
     }
-    run_queue[run_queue_count++] = p;
+    run_queue[run_queue_count++] = t;
     irq_spin_unlock(&run_queue_lock);
 }
 
-struct proc *sched_policy_pick_next(void) {
+struct thread *sched_policy_pick_next(void) {
     irq_spin_lock(&run_queue_lock);
 
     if (run_queue_count == 0) {
@@ -50,7 +51,7 @@ struct proc *sched_policy_pick_next(void) {
         return NULL;
     }
 
-    struct proc *next = run_queue[0];
+    struct thread *next = run_queue[0];
     for (size_t j = 0; j + 1 < run_queue_count; j++)
         run_queue[j] = run_queue[j + 1];
     run_queue_count--;

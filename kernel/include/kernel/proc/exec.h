@@ -9,7 +9,7 @@
  * failure (binary not found in the initrd, or a bad ELF). Mirrors
  * x86's proc_create_from_binary() (kernel/proc/exec.c on that side) —
  * same role, same name, simplified for now: no argv/envp/fork parent
- * (no syscalls, no fork yet), one execution context per proc.
+ * The returned process initially owns one schedulable main thread.
  *
  * PROC_MAP_FRAMEBUFFER maps the display into the new process, at a
  * fixed VA with a descriptor page alongside it (see USER_FB_* in

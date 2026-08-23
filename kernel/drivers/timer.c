@@ -93,7 +93,7 @@ static void timer_irq_handler(struct aarch64_frame *f) {
     (void)f;
     write_tval(ticks_per_period); /* re-arm for the next period */
     tick_count++;
-    proc_wakeup_expired(tick_count);
+    thread_wakeup_expired(tick_count);
 
     if (watch_counter_a && watch_counter_b && (tick_count % 20) == 0) {
         uint64_t a = *(volatile uint64_t *)phys_to_virt_hhdm(watch_counter_a);

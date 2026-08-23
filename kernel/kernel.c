@@ -218,7 +218,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     struct proc *shell = proc_create_from_binary("sh", 0);
     if (!shell)
         panic("kernel_stage2: failed to create BusyBox ash");
-    sched_policy_add(shell);
+    sched_policy_add(&shell->main_thread);
 
     /* The earlier concurrent demonstrations remain handy as optional
      * scheduler tests:
@@ -227,13 +227,13 @@ void kernel_stage2(uint64_t mb2_addr) {
      * if (!fib) {
      *     panic("kernel_stage2: failed to create the fibonacci proc");
      * }
-     * sched_policy_add(fib);
+     * sched_policy_add(&fib->main_thread);
      *
      * struct proc *keymon = proc_create_from_binary("key_monitor.elf", 0);
      * if (!keymon) {
      *     panic("kernel_stage2: failed to create the key monitor proc");
      * }
-     * sched_policy_add(keymon);
+     * sched_policy_add(&keymon->main_thread);
      */
 
     kprintf("Starting scheduler — BusyBox ash.\n");

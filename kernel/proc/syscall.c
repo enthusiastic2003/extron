@@ -119,10 +119,9 @@ static uint64_t sys_tcb_set(uint64_t addr, uint64_t arg2, uint64_t arg3,
  * them. proc_destroy() therefore runs later, in the PARENT's context,
  * out of sys_wait().
  *
- * Setting state away from PROC_RUNNING is what keeps it out of the
+ * Setting the calling thread away from THREAD_RUNNING keeps it out of the
  * rotation permanently: schedule() only re-enqueues `old` if it is
- * still PROC_RUNNING when called, so no separate sched_policy_remove()
- * is needed — a running proc was never in the run queue to begin with.
+ * still THREAD_RUNNING when called, so no separate queue removal is needed.
  */
 static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
                          struct aarch64_frame *f) {
@@ -137,7 +136,8 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
         /* Descriptor lifetime ends at exit, not when the parent eventually
          * reaps the zombie. In particular this publishes pipe EOF now. */
         file_table_close_all(p);
-        proc_set_zombie(p);
+        proc_mark_exited(p);
+        thread_set_exited(my_thread());
         /* The parent may be blocked in sys_wait() on its own address as
          * a channel. Safe to signal before we stop running: this whole
          * path is DAIF-masked, so the parent cannot actually be
@@ -148,7 +148,7 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
     schedule();
     /* schedule() only returns here if nothing else was runnable at this
      * exact instant — a real, reachable outcome (the last other proc
-     * exits while a third is legitimately PROC_SLEEPING and not yet due
+     * exits while a third is legitimately THREAD_SLEEPING and not yet due
      * to wake), which is why this isn't __builtin_unreachable(). When
      * it happens, this now-ZOMBIE proc's own EL0 code just spins in
      * place until the next timer tick's schedule() sees it is no longer
@@ -319,20 +319,20 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t request, uint64_t arg,
  * version. Runs fully DAIF-masked (this whole handler is inside the
  * SVC exception path, which masks DAIF on entry same as any other
  * exception) so setting sleep_until/chan/state here needs no lock —
- * proc_wakeup_expired() (kernel/drivers/timer.c's IRQ handler) simply
+ * thread_wakeup_expired() (kernel/drivers/timer.c's IRQ handler) simply
  * can't run concurrently with this. */
 static uint64_t sys_sleep(uint64_t seconds, uint64_t nanos, uint64_t arg3,
                           struct aarch64_frame *f) {
     (void)arg3;
     (void)f;
-    struct proc *p = my_proc();
+    struct thread *t = my_thread();
     unsigned hz = timer_ticks_per_second();
     uint64_t ticks = seconds * hz + (nanos * hz) / 1000000000ULL;
     if (ticks == 0)
         ticks = 1;
-    p->chan = NULL;
-    p->sleep_until = timer_ticks() + ticks;
-    proc_set_sleeping(p);
+    t->chan = NULL;
+    t->sleep_until = timer_ticks() + ticks;
+    thread_set_sleeping(t);
     schedule();
     return 0;
 }
@@ -761,12 +761,13 @@ static uint64_t sys_wait(uint64_t status_addr, uint64_t b, uint64_t c,
          * cannot exit in the window between the scan above and the state
          * change here — nothing else runs at all until schedule().
          *
-         * chan must be non-NULL, or proc_wakeup_expired() (the timer's
+         * chan must be non-NULL, or thread_wakeup_expired() (the timer's
          * handler) would treat this as a timed sleep whose deadline of 0
          * has long passed and wake it every tick. */
-        p->chan        = p;
-        p->sleep_until = 0;
-        proc_set_sleeping(p);
+        struct thread *t = my_thread();
+        t->chan        = p;
+        t->sleep_until = 0;
+        thread_set_sleeping(t);
         schedule();
     }
 }

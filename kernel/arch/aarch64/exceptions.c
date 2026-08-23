@@ -151,6 +151,7 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
      * install_and_switch() now masks against. The ELR/ESR/FAR triple
      * alone pointed at the wrong file. */
     struct proc *cur = my_proc();
+    struct thread *thread = my_thread();
     panic("SYNCHRONOUS EXCEPTION\n"
           "pid=%ld frame=%p kstack=[%p,%p)\n"
           "class=%s\n"
@@ -159,8 +160,8 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
           "ESR=%p\n"
           "FAR=%p\n",
           cur ? (long)cur->pid : -1, (void *)f,
-          cur ? (void *)cur->kernel_stack_base : 0,
-          cur ? (void *)cur->kernel_stack_top : 0,
+          thread ? (void *)thread->kernel_stack_base : 0,
+          thread ? (void *)thread->kernel_stack_top : 0,
           ec_name(ec), (void *)f->elr_el1, (void *)f->spsr_el1,
           (f->spsr_el1 & 0xF) == 0x0 ? "EL0t" : (f->spsr_el1 & 0xF) == 0x5 ? "EL1h" : "other",
           (void *)f->esr_el1, (void *)f->far_el1);

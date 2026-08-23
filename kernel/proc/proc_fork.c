@@ -42,6 +42,9 @@
 struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
     if (!parent || !parent->mm)
         return NULL;
+    struct thread *caller = my_thread();
+    if (!caller || caller->process != parent)
+        return NULL;
 
     struct vm_space *mm = vm_space_clone(parent->mm);
     if (!mm) {
@@ -58,8 +61,8 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
         return NULL;
     }
 
-    uint64_t pid = proc_table_add(child);
-    proc_init(child, pid, parent->entry, parent->user_sp, mm->ttbr0);
+    uint64_t pid = proc_alloc_pid();
+    proc_init(child, pid, caller->entry, caller->user_sp, mm->ttbr0);
 
     child->mm        = mm;
     child->parent    = parent;
@@ -74,18 +77,20 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
      * bytes below it, and context.sp moves down to match — which is
      * precisely the state RESTORE_CONTEXT expects to find. */
     struct aarch64_frame *cf =
-        (struct aarch64_frame *)(child->kernel_stack_top - sizeof(struct aarch64_frame));
+        (struct aarch64_frame *)(child->main_thread.kernel_stack_top
+                                 - sizeof(struct aarch64_frame));
     *cf = *f;
     cf->x[0] = 0;                       /* fork() returns 0 in the child */
 
-    child->context.sp = (uint64_t)cf;
-    child->context.lr = (uint64_t)proc_fork_trampoline;
+    child->main_thread.context.sp = (uint64_t)cf;
+    child->main_thread.context.lr = (uint64_t)proc_fork_trampoline;
 
     /* Live FP/SIMD + TPIDR_EL0, straight out of the hardware. Must come
      * after proc_init(), which zeroes the whole context. */
-    cpu_context_save_fpsimd(&child->context);
+    cpu_context_save_fpsimd(&child->main_thread.context);
 
-    sched_policy_add(child);            /* marks it PROC_RUNNABLE itself */
+    proc_table_add(child);
+    sched_policy_add(&child->main_thread);
     return child;
 }
 

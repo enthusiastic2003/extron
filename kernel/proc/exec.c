@@ -329,16 +329,15 @@ struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flag
         return NULL;
     }
 
-    /* proc_table_add() needs `p` to already exist (it stores the
-     * pointer) but assigns the pid before proc_init() fills the struct
-     * in — proc_init() is what actually writes p->pid, so it must run
-     * with the pid proc_table_add() hands back, not before. */
-    uint64_t pid = proc_table_add(p);
+    /* Reserve identity first, initialize privately, then publish. Timer
+     * wakeup scans must never observe a half-initialized thread list. */
+    uint64_t pid = proc_alloc_pid();
     proc_init(p, pid, img.entry, img.user_sp, img.ttbr0);
 
     p->mm        = img.mm;
     p->user_argc = img.argc;
     p->user_argv = img.argv;
+    proc_table_add(p);
     return p;
 }
 
@@ -350,7 +349,8 @@ struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
 int proc_exec_replace(struct proc *p, const char *binary_path,
                       const char *const *args, int argc,
                       struct exec_image *out) {
-    if (!p)
+    struct thread *t = my_thread();
+    if (!p || !t || t->process != p)
         return -1;
     if (exec_image_build(binary_path, 0, args, argc, out) != 0)
         return -1;
@@ -364,8 +364,8 @@ int proc_exec_replace(struct proc *p, const char *binary_path,
      * else while a stale TLB entry still refers to them. */
     p->mm      = out->mm;
     p->ttbr0   = out->ttbr0;
-    p->entry   = out->entry;
-    p->user_sp = out->user_sp;
+    t->entry   = out->entry;
+    t->user_sp = out->user_sp;
     p->user_argc = out->argc;
     p->user_argv = out->argv;
 

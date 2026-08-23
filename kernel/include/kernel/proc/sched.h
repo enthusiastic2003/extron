@@ -12,8 +12,8 @@
  * kernel/proc/sched.c.
  * --------------------------------------------------------------- */
 void          sched_policy_init(void);
-void          sched_policy_add(struct proc *p);      /* mark runnable / re-enqueue */
-struct proc  *sched_policy_pick_next(void);            /* pop next to run, or NULL */
+void           sched_policy_add(struct thread *t);    /* mark runnable / re-enqueue */
+struct thread *sched_policy_pick_next(void);          /* pop next to run, or NULL */
 
 /* ---------------------------------------------------------------
  * Scheduler mechanism
@@ -22,7 +22,8 @@ void          sched_init(void);
 void          schedule(void);       /* pick next + context switch; called from timer IRQ */
 void          sched_start(void);    /* launch the first process; never returns */
 
-struct proc  *my_proc(void);
+struct thread *my_thread(void);
+struct proc   *my_proc(void);
 
 /* Defined in sched.c, reached only via a saved context.lr (never called
  * directly) — see its comment for the forkret-style first-launch trick.

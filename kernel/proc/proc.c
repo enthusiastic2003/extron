@@ -26,20 +26,25 @@ _Static_assert(sizeof(((struct cpu_context *)0)->v) == 32 * 16, "switch.S: v[] c
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
                 virt_addr_t user_sp, phys_addr_t ttbr0) {
     p->pid   = pid;
-    p->state = PROC_UNUSED;
     p->ttbr0 = ttbr0;
-    p->entry = entry;
-    p->user_sp = user_sp;
-    p->next  = NULL;
-    p->chan  = NULL;
-    p->sleep_until = 0;
     p->mm    = NULL;
     p->user_argc = 0;
     p->user_argv = 0;
     p->parent = NULL;
     p->exit_status = 0;
+    p->exited = false;
     p->cwd[0] = '\0';
     file_table_init(p);
+
+    struct thread *t = &p->main_thread;
+    *t = (struct thread){0};
+    t->tid = pid;
+    t->state = THREAD_UNUSED;
+    t->process = p;
+    t->entry = entry;
+    t->user_sp = user_sp;
+    p->threads = t;
+    p->thread_count = 1;
 
     /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
      * have a guard page. kmalloc hands back byte-granularity memory from
@@ -51,7 +56,7 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
      * bit stays set, so nothing else claims that VA, and the stack now
      * has an unmapped page directly beneath it: overflow takes a Data
      * Abort naming the address instead of corrupting a neighbour. */
-    virt_addr_t region = vmm_alloc_pages(PROC_KERNEL_STACK_PAGES + 1);
+    virt_addr_t region = vmm_alloc_pages(THREAD_KERNEL_STACK_PAGES + 1);
     if (!region)
         panic("aarch64 proc_init: kernel stack allocation failed");
 
@@ -60,11 +65,12 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     if (guard_phys)
         pmm_free_page((void *)guard_phys);
 
-    p->kernel_stack_base = region + PAGE_SIZE;
-    p->kernel_stack_top  = region + (PROC_KERNEL_STACK_PAGES + 1) * PAGE_SIZE;
-    kprintf("[PROC] PID %lu kernel stack: %p - %p (guard page at %p)\n",
-            (unsigned long)pid, (void *)p->kernel_stack_base,
-            (void *)p->kernel_stack_top, (void *)region);
+    t->kernel_stack_base = region + PAGE_SIZE;
+    t->kernel_stack_top  = region + (THREAD_KERNEL_STACK_PAGES + 1) * PAGE_SIZE;
+    kprintf("[THREAD] PID %lu TID %lu kernel stack: %p - %p (guard page at %p)\n",
+            (unsigned long)pid, (unsigned long)t->tid,
+            (void *)t->kernel_stack_base, (void *)t->kernel_stack_top,
+            (void *)region);
 
     /* forkret-style bootstrap: pre-populate the saved context as if this
      * proc had already been switched out once, with lr pointing at the
@@ -72,9 +78,9 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
      * empty stack. schedule()'s first switch to this proc is then the
      * exact same context_switch() call as every other switch — see
      * proc_bootstrap_trampoline()'s comment in sched.c. */
-    p->context = (struct cpu_context){0};
-    p->context.lr = (uint64_t)proc_bootstrap_trampoline;
-    p->context.sp = p->kernel_stack_top;
+    t->context = (struct cpu_context){0};
+    t->context.lr = (uint64_t)proc_bootstrap_trampoline;
+    t->context.sp = t->kernel_stack_top;
 }
 
 /*
@@ -100,11 +106,17 @@ void proc_destroy(struct proc *p) {
         p->ttbr0 = 0;
     }
 
-    /* The guard page sits one page below the base and is unmapped by
-     * construction, so it can't go through vmm_free_pages(). */
-    virt_addr_t guard = p->kernel_stack_base - PAGE_SIZE;
-    vmm_free_pages(p->kernel_stack_base, PROC_KERNEL_STACK_PAGES);
-    vmm_free_unmapped_page(guard);
+    for (struct thread *t = p->threads; t;) {
+        struct thread *next = t->next_in_process;
+        /* The guard page sits one page below the base and is unmapped by
+         * construction, so it can't go through vmm_free_pages(). */
+        virt_addr_t guard = t->kernel_stack_base - PAGE_SIZE;
+        vmm_free_pages(t->kernel_stack_base, THREAD_KERNEL_STACK_PAGES);
+        vmm_free_unmapped_page(guard);
+        if (t != &p->main_thread)
+            kfree(t);
+        t = next;
+    }
 
     proc_table_remove(p);
     kfree(p);
@@ -158,15 +170,22 @@ static void proc_table_remove_locked(struct proc *p) {
     }
 }
 
-uint64_t proc_table_add(struct proc *p) {
+uint64_t proc_alloc_pid(void) {
+    irq_spin_lock(&proc_table_lock);
+    uint64_t pid = next_pid++;
+    irq_spin_unlock(&proc_table_lock);
+    return pid;
+}
+
+void proc_table_add(struct proc *p) {
+    if (!p)
+        panic("proc_table_add: null process");
     irq_spin_lock(&proc_table_lock);
     if (!proc_table_add_locked(p)) {
         irq_spin_unlock(&proc_table_lock);
         panic("proc_table_add: process table full");
     }
-    uint64_t pid = next_pid++;
     irq_spin_unlock(&proc_table_lock);
-    return pid;
 }
 
 void proc_table_remove(struct proc *p) {
@@ -211,7 +230,7 @@ struct proc *proc_find_zombie_child(struct proc *parent, bool *out_any_children)
         if (!p || p->parent != parent)
             continue;
         any = true;
-        if (p->state == PROC_ZOMBIE) {
+        if (p->exited) {
             found = p;
             break;
         }
@@ -232,14 +251,14 @@ void proc_for_each(void (*fn)(struct proc *, void *), void *arg) {
     irq_spin_unlock(&proc_table_lock);
 }
 
-static const char *proc_state_str(enum proc_state s) {
+static const char *thread_state_str(enum thread_state s) {
     switch (s) {
-        case PROC_UNUSED:   return "UNUSED";
-        case PROC_RUNNABLE: return "RUNNABLE";
-        case PROC_RUNNING:  return "RUNNING";
-        case PROC_SLEEPING: return "SLEEPING";
-        case PROC_ZOMBIE:   return "ZOMBIE";
-        default:            return "UNKNOWN";
+        case THREAD_UNUSED:   return "UNUSED";
+        case THREAD_RUNNABLE: return "RUNNABLE";
+        case THREAD_RUNNING:  return "RUNNING";
+        case THREAD_SLEEPING: return "SLEEPING";
+        case THREAD_EXITED:   return "EXITED";
+        default:              return "UNKNOWN";
     }
 }
 
@@ -247,14 +266,16 @@ void proc_dump_table(void) {
     irq_spin_lock(&proc_table_lock);
 
     kprintf("\n========================================\n");
-    kprintf("PID STATE TTBR0 CHAN\n");
+    kprintf("PID TID STATE TTBR0 CHAN\n");
     kprintf("----------------------------------------\n");
     for (size_t i = 0; i < MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p) continue;
-        kprintf("%lu %s 0x%lx 0x%lx\n",
-                (unsigned long)p->pid, proc_state_str(p->state),
-                (unsigned long)p->ttbr0, (unsigned long)(uint64_t)p->chan);
+        for (struct thread *t = p->threads; t; t = t->next_in_process)
+            kprintf("%lu %lu %s 0x%lx 0x%lx\n",
+                    (unsigned long)p->pid, (unsigned long)t->tid,
+                    thread_state_str(t->state), (unsigned long)p->ttbr0,
+                    (unsigned long)(uint64_t)t->chan);
     }
     kprintf("----------------------------------------\n");
     kprintf("TOTAL: %lu  PMM FREE: %lu pages\n========================================\n",
@@ -267,16 +288,17 @@ void proc_dump_table(void) {
 /* -------------------------------------------------------------
  * State helpers
  * ------------------------------------------------------------- */
-void proc_set_runnable(struct proc *p) { if (p) p->state = PROC_RUNNABLE; }
-void proc_set_running(struct proc *p)  { if (p) p->state = PROC_RUNNING; }
-void proc_set_sleeping(struct proc *p) { if (p) p->state = PROC_SLEEPING; }
-void proc_set_zombie(struct proc *p)   { if (p) p->state = PROC_ZOMBIE; }
+void thread_set_runnable(struct thread *t) { if (t) t->state = THREAD_RUNNABLE; }
+void thread_set_running(struct thread *t)  { if (t) t->state = THREAD_RUNNING; }
+void thread_set_sleeping(struct thread *t) { if (t) t->state = THREAD_SLEEPING; }
+void thread_set_exited(struct thread *t)   { if (t) t->state = THREAD_EXITED; }
+void proc_mark_exited(struct proc *p)      { if (p) p->exited = true; }
 
 /* -------------------------------------------------------------
  * Sleep / wake — same algorithm as x86's proc.c, ported directly.
  *
  * Lost-wakeup safety: proc_table_lock is held across releasing `lk`
- * and marking the caller PROC_SLEEPING. wakeup() also needs
+ * and marking the caller THREAD_SLEEPING. wakeup() also needs
  * proc_table_lock, so it can't run — even from an IRQ, which masks
  * DAIF the same way irq_spin_lock does here — in the window between
  * "no longer holding lk" and "actually marked asleep", which is
@@ -284,13 +306,13 @@ void proc_set_zombie(struct proc *p)   { if (p) p->state = PROC_ZOMBIE; }
  * asleep yet" and silently drop.
  * ------------------------------------------------------------- */
 void sleep(void *chan, spinlock_t *lk) {
-    struct proc *p = my_proc();
+    struct thread *t = my_thread();
 
     irq_spin_lock(&proc_table_lock);
     irq_spin_unlock(lk);
 
-    p->chan = chan;
-    proc_set_sleeping(p);
+    t->chan = chan;
+    thread_set_sleeping(t);
 
     irq_spin_unlock(&proc_table_lock);
     schedule();
@@ -303,25 +325,29 @@ void wakeup(void *chan) {
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
-        if (p && p->state == PROC_SLEEPING && p->chan == chan) {
-            p->chan = NULL;
-            p->sleep_until = 0;
-            sched_policy_add(p); /* sets PROC_RUNNABLE itself */
-        }
+        if (!p) continue;
+        for (struct thread *t = p->threads; t; t = t->next_in_process)
+            if (t->state == THREAD_SLEEPING && t->chan == chan) {
+                t->chan = NULL;
+                t->sleep_until = 0;
+                sched_policy_add(t); /* sets THREAD_RUNNABLE itself */
+            }
     }
     irq_spin_unlock(&proc_table_lock);
 }
 
-void proc_wakeup_expired(uint64_t now) {
+void thread_wakeup_expired(uint64_t now) {
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
-        if (p && p->state == PROC_SLEEPING && p->sleep_until
-                && now >= p->sleep_until) {
-            p->chan = NULL;
-            p->sleep_until = 0;
-            sched_policy_add(p); /* sets PROC_RUNNABLE itself */
-        }
+        if (!p) continue;
+        for (struct thread *t = p->threads; t; t = t->next_in_process)
+            if (t->state == THREAD_SLEEPING && t->sleep_until
+                    && now >= t->sleep_until) {
+                t->chan = NULL;
+                t->sleep_until = 0;
+                sched_policy_add(t); /* sets THREAD_RUNNABLE itself */
+            }
     }
     irq_spin_unlock(&proc_table_lock);
 }

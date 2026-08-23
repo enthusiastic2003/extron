@@ -127,7 +127,7 @@ void init_kbd(void) {
 char kbd_getc(void) {
     irq_spin_lock(&kbuf.lock);
     while (kbuf.head == kbuf.tail) {
-        /* sleep() releases kbuf.lock, marks this proc PROC_SLEEPING on
+        /* sleep() releases kbuf.lock, marks this thread THREAD_SLEEPING on
          * channel &kbuf, and schedule()s away — a real context switch
          * to whatever else is runnable, not a busy wfe. It reacquires
          * kbuf.lock itself once kbd_irq_handler()'s wakeup(&kbuf) (above)
@@ -170,16 +170,16 @@ void kbd_flush_input(void) {
 int kbd_wait_for_input(int timeout_ms) {
     irq_spin_lock(&kbuf.lock);
     if (kbuf.head == kbuf.tail && timeout_ms != 0) {
-        struct proc *p = my_proc();
+        struct thread *t = my_thread();
         if (timeout_ms > 0) {
             uint64_t ticks = ((uint64_t)timeout_ms * timer_ticks_per_second() + 999) / 1000;
             if (!ticks) ticks = 1;
-            p->sleep_until = timer_ticks() + ticks;
+            t->sleep_until = timer_ticks() + ticks;
         } else {
-            p->sleep_until = 0;
+            t->sleep_until = 0;
         }
         sleep(&kbuf, &kbuf.lock);
-        p->sleep_until = 0;
+        t->sleep_until = 0;
     }
     int ready = kbuf.head != kbuf.tail;
     irq_spin_unlock(&kbuf.lock);

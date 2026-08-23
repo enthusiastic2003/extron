@@ -9,12 +9,13 @@
 #include <kernel/fs/file.h>
 
 struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular include */
+struct proc;
 
 /*
- * aarch64 process control block. Deliberately no thread split (yet) —
- * threading is out of scope until fork/syscalls/mlibc integration lands;
- * one struct proc is one address space with exactly one execution
- * context.
+ * A process owns resources shared by its threads; a thread is the unit the
+ * scheduler runs. The first implementation embeds exactly one main thread in
+ * each process, but keeping these objects distinct makes signals, clone(),
+ * join and futexes additive rather than another scheduler rewrite.
  *
  * This aarch64 tree (kernel/) is now a standalone project, backed up
  * from x86's original kernel/ under backup/x86_tree/ — see that
@@ -26,12 +27,12 @@ struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular inc
  * still compiled from the same repo.
  */
 
-enum proc_state {
-    PROC_UNUSED = 0,
-    PROC_RUNNABLE,
-    PROC_RUNNING,
-    PROC_SLEEPING,
-    PROC_ZOMBIE
+enum thread_state {
+    THREAD_UNUSED = 0,
+    THREAD_RUNNABLE,
+    THREAD_RUNNING,
+    THREAD_SLEEPING,
+    THREAD_EXITED,
 };
 
 /*
@@ -70,7 +71,7 @@ struct cpu_context {
     uint64_t fpsr;                                             /* 0x70 */
     /* TPIDR_EL0 — the thread pointer. Architecturally EL0-writable
      * (that's why sys_tcb_set() notes it may never be called), and
-     * per-process by definition, so it belongs here for exactly the same
+     * per-thread by definition, so it belongs here for exactly the same
      * reason the FP registers do: the kernel never touches it, so its
      * value at this point is still the outgoing process's own.
      *
@@ -86,20 +87,27 @@ struct cpu_context {
     uint64_t v[64];                       /* 0x80: v0-v31, 128 bits each */
 } __attribute__((aligned(16)));
 
-struct proc {
-    uint64_t            pid;
-    enum proc_state     state;
-    phys_addr_t         ttbr0;              /* create_user_pml4() */
+struct thread {
+    uint64_t            tid;
+    enum thread_state   state;
+    struct proc         *process;
     struct cpu_context  context;
     virt_addr_t         kernel_stack_base;
     virt_addr_t         kernel_stack_top;
     virt_addr_t         entry;               /* EL0 entry point, used once on first launch */
     virt_addr_t         user_sp;             /* EL0 initial SP_EL0, used once on first launch */
-    struct proc         *next;               /* run-queue link */
-
-    void                *chan;               /* wait channel, valid while PROC_SLEEPING */
+    void                *chan;               /* wait channel, valid while THREAD_SLEEPING */
     uint64_t            sleep_until;         /* wake when timer_ticks() >= this; 0 = not timed */
+    struct thread       *next_in_process;
+};
+
+struct proc {
+    uint64_t            pid;
+    phys_addr_t         ttbr0;              /* create_user_pml4() */
     struct vm_space     *mm;                 /* user address-space allocator (kernel/mm/uvm.c) */
+    struct thread       main_thread;
+    struct thread       *threads;
+    size_t              thread_count;
 
     /* argc/argv for the process's first instruction, passed in x0/x1 by
      * proc_bootstrap_trampoline() the same way any AAPCS64 caller would
@@ -115,12 +123,13 @@ struct proc {
      * it — see sys_wait() on why that is a leak and not a crash. */
     struct proc         *parent;
     int                 exit_status;
+    bool                exited;
     struct open_file    *files[PROC_MAX_FDS];
     uint8_t             fd_flags[PROC_MAX_FDS];
     char                cwd[VFS_PATH_MAX + 1]; /* canonical path relative to VFS root */
 };
 
-/* Size of the per-process kernel stack (interrupts land here). Was 4
+/* Size of a per-thread kernel stack (interrupts land here). Was 4
  * pages on the reasoning that there were "no syscalls/deep kernel call
  * chains yet, just the exception-vector path" — that stopped being true
  * some time ago. Syscalls run on this stack, kbd_getc() sleeps partway
@@ -132,13 +141,13 @@ struct proc {
  * faulting address instead of silently corrupting whatever the
  * allocator happened to place underneath, which is the failure mode
  * that cost real debugging time on the stale-object-file bug. */
-#define PROC_KERNEL_STACK_PAGES 8
+#define THREAD_KERNEL_STACK_PAGES 8
 
 /* Initializes a caller-allocated struct proc in place (no kmalloc/heap
  * dependency yet — this milestone's two test processes are static
  * globals; dynamic allocation is future work alongside fork()).
- * Allocates a kernel stack via vmm_alloc_pages() and pre-populates
- * context.lr/context.sp so schedule()'s first switch to this proc lands
+ * Initializes the embedded main thread, allocates its guarded kernel stack,
+ * and pre-populates context.lr/context.sp so the first switch lands
  * in proc_bootstrap_trampoline() (kernel/proc/sched.c) instead
  * of needing a special case for "never run before". */
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
@@ -163,11 +172,12 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f);
  * (~/extron-x86-backup/): a fixed slot array + a lock + a monotonic
  * PID counter, nothing here touches a register or instruction. Distinct
  * from the scheduler's run queue (kernel/proc/sched_policy_rr.c), which
- * only holds RUNNABLE, off-CPU procs — this table holds everything
- * alive regardless of state.
+ * holds RUNNABLE, off-CPU threads — this table owns every process and
+ * makes each process's thread list discoverable for wakeups.
  * --------------------------------------------------------------- */
 void          proc_table_init(void);
-uint64_t      proc_table_add(struct proc *p);    /* assigns and returns p->pid */
+uint64_t      proc_alloc_pid(void);
+void          proc_table_add(struct proc *p);    /* publishes a fully initialized process */
 void          proc_table_remove(struct proc *p);
 struct proc  *proc_lookup(uint64_t pid);
 void          proc_for_each(void (*fn)(struct proc *, void *), void *arg);
@@ -179,22 +189,23 @@ void          proc_dump_table(void);
 struct proc  *proc_find_zombie_child(struct proc *parent, bool *out_any_children);
 
 /* ---------------------------------------------------------------
- * State helpers
+ * Thread state and process-exit helpers
  * --------------------------------------------------------------- */
-void proc_set_runnable(struct proc *p);
-void proc_set_running(struct proc *p);
-void proc_set_sleeping(struct proc *p);
-void proc_set_zombie(struct proc *p);
+void thread_set_runnable(struct thread *t);
+void thread_set_running(struct thread *t);
+void thread_set_sleeping(struct thread *t);
+void thread_set_exited(struct thread *t);
+void proc_mark_exited(struct proc *p);
 
 /* ---------------------------------------------------------------
  * Sleep / wake — also ported from x86's proc.c, same algorithm
  * (including the lost-wakeup guard: proc_table_lock is held across
- * releasing `lk` and marking the caller PROC_SLEEPING, which is what
+ * releasing `lk` and marking the caller THREAD_SLEEPING, which is what
  * stops a wakeup() racing in via an IRQ during that exact window from
  * finding "not asleep yet" and silently doing nothing).
  * --------------------------------------------------------------- */
 void sleep(void *chan, spinlock_t *lk);   /* caller holds lk; returns with lk re-held */
 void wakeup(void *chan);                   /* wakes every sleeper on chan; IRQ-safe */
-void proc_wakeup_expired(uint64_t now);    /* wakes timed sleepers whose deadline passed */
+void thread_wakeup_expired(uint64_t now);  /* wakes timed sleepers whose deadline passed */
 
 #endif
