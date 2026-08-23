@@ -40,6 +40,12 @@ in the replacement image. Process exit terminates every thread, closes shared
 descriptors once, and leaves a process zombie; `wait()` destroys all remaining
 thread stacks and the shared address space from the parent's context.
 
+An unhandled synchronous exception from EL0 follows that same process-exit
+path. It terminates the faulting process and all of its threads, then wakes only
+the direct parent. The raw kernel status is a negative signal number; Extron's
+mlibc translates it into POSIX wait status so `WIFSIGNALED()` and `WTERMSIG()`
+work. An EL1 exception remains a kernel panic.
+
 PID reservation is separate from process-table publication. A process is
 fully initialized—including its thread list and kernel stack—before timer or
 wakeup code can discover it in the global table.

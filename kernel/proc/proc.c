@@ -422,6 +422,35 @@ void thread_set_sleeping(struct thread *t) { if (t) t->state = THREAD_SLEEPING; 
 void thread_set_exited(struct thread *t)   { if (t) t->state = THREAD_EXITED; }
 void proc_mark_exited(struct proc *p)      { if (p) p->exited = true; }
 
+void proc_exit_current(int status) {
+    struct proc *p = my_proc();
+    struct thread *self = my_thread();
+    if (!p || !self)
+        panic("proc_exit_current: no current process/thread");
+
+    /* A fatal event in one thread kills the process: every sibling shares
+     * the same potentially-corrupted address space and file descriptions. */
+    proc_terminate_other_threads(p, self, false);
+    p->exit_status = status;
+    file_table_close_all(p);
+    proc_mark_exited(p);
+    thread_set_exited(self);
+
+    /* Notify exactly the direct parent. It decides whether and how to handle
+     * the child status through wait(); no ancestor is skipped. */
+    if (p->parent)
+        wakeup(p->parent);
+
+    schedule();
+
+    /* Normally unreachable. If there was a transient scheduler gap, remain
+     * in EL1 and let the next interrupt schedule a real runnable thread;
+     * never restore the dead process's EL0 exception frame. */
+    for (;;) {
+        __asm__ volatile ("msr daifclr, #3\n\twfi" ::: "memory");
+    }
+}
+
 /* -------------------------------------------------------------
  * Sleep / wake — same algorithm as x86's proc.c, ported directly.
  *

@@ -4,6 +4,7 @@
 #include <kernel/panic.h>
 #include <kernel/proc/syscall.h>
 #include <kernel/proc/sched.h>
+#include <stdbool.h>
 
 /*
  * exception_dispatch() — the aarch64 counterpart to x86's isr_handler()
@@ -66,7 +67,25 @@ static const char *ec_name(uint32_t ec) {
         case 0x24: return "Data Abort (lower EL)";
         case 0x25: return "Data Abort (same EL)";
         case 0x26: return "SP alignment fault";
+        case 0x2C: return "Floating-point exception";
+        case 0x3C: return "BRK instruction";
         default:   return "Unhandled exception class";
+    }
+}
+
+static int fault_signal(uint32_t ec) {
+    switch (ec) {
+        case 0x20: /* instruction abort */
+        case 0x22: /* PC alignment */
+        case 0x24: /* data abort */
+        case 0x26: /* SP alignment */
+            return 11; /* SIGSEGV */
+        case 0x2C:
+            return 8;  /* SIGFPE */
+        case 0x3C:
+            return 5;  /* SIGTRAP */
+        default:
+            return 4;  /* SIGILL */
     }
 }
 
@@ -121,7 +140,9 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
      * landed and trapped back, not just that *something* faulted. */
     uint32_t ec = (uint32_t)((f->esr_el1 >> 26) & 0x3F);
 
-    if (ec == 0x15) {
+    bool from_el0 = (f->spsr_el1 & 0xF) == 0x0;
+
+    if (ec == 0x15 && from_el0) {
         /* SVC (AArch64) — a real syscall, not a fault. Dispatch and
          * return normally: ELR_EL1 already points past the svc
          * instruction (set by hardware on exception entry, no manual
@@ -152,6 +173,16 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
      * alone pointed at the wrong file. */
     struct proc *cur = my_proc();
     struct thread *thread = my_thread();
+    if (from_el0 && cur && thread) {
+        int signal = fault_signal(ec);
+        kprintf("\n[USER FAULT] pid=%lu tid=%lu signal=%d (%s)\n"
+                "ELR=%p ESR=%p FAR=%p\n",
+                (unsigned long)cur->pid, (unsigned long)thread->tid,
+                signal, ec_name(ec), (void *)f->elr_el1,
+                (void *)f->esr_el1, (void *)f->far_el1);
+        proc_exit_current(-signal);
+    }
+
     panic("SYNCHRONOUS EXCEPTION\n"
           "pid=%ld frame=%p kstack=[%p,%p)\n"
           "class=%s\n"

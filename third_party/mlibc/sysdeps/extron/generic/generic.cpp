@@ -346,19 +346,19 @@ int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret
     if (reaped < 0)
         return ECHILD; /* the kernel's only failure mode: no children at all */
 
-    /* The kernel's SYS_WAIT hands back the raw value the child passed
-     * to sys_exit() — 42 means literally 42. WIFEXITED/WEXITSTATUS
+    /* The kernel's SYS_WAIT hands back either the raw value the child passed
+     * to sys_exit() (42 means literally 42), or a negative signal number for
+     * a fatal EL0 fault. WIFEXITED/WEXITSTATUS
      * (sysdeps/extron/include/abi-bits/wait.h, same encoding as Linux)
      * expect the POSIX wait-status encoding instead: the low 7 bits
-     * are a termination signal (0 for "exited normally", which is all
-     * this kernel's exit ever means — there's no signal delivery yet),
-     * and the exit code lives in bits 8-15. Encoding it here, once, is
+     * are a termination signal (0 for "exited normally"), and the exit code
+     * lives in bits 8-15. Encoding it here, once, is
      * what WIFEXITED(status) && WEXITSTATUS(status) == N actually
      * needs to see N — found by that exact check failing although the
      * kernel's own [SYSCALL exit] log line confirmed the child really
      * did exit with status 42. */
     if (status)
-        *status = (st & 0xff) << 8;
+        *status = st < 0 ? (-st & 0x7f) : ((st & 0xff) << 8);
     *ret_pid = (pid_t)reaped;
     return 0;
 }

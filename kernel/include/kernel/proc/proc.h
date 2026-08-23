@@ -198,6 +198,11 @@ void thread_set_sleeping(struct thread *t);
 void thread_set_exited(struct thread *t);
 void proc_mark_exited(struct proc *p);
 
+/* Terminate the entire current process, wake only its direct parent, and
+ * schedule away permanently. Non-negative status is a normal exit code;
+ * negative status means termination by the corresponding signal number. */
+void proc_exit_current(int status) __attribute__((noreturn));
+
 /* Create another schedulable thread in p's existing address space. The
  * caller has already validated the userspace entry, stack and TLS values.
  * The returned object is linked into p and queued runnable. */

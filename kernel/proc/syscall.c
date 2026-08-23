@@ -132,30 +132,7 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
     struct proc *p = my_proc();
     kprintf("[SYSCALL exit] pid=%lu status=%lu\n",
             p ? (unsigned long)p->pid : 0, (unsigned long)status);
-    if (p) {
-        proc_terminate_other_threads(p, my_thread(), false);
-        p->exit_status = (int)status;
-        /* Descriptor lifetime ends at exit, not when the parent eventually
-         * reaps the zombie. In particular this publishes pipe EOF now. */
-        file_table_close_all(p);
-        proc_mark_exited(p);
-        thread_set_exited(my_thread());
-        /* The parent may be blocked in sys_wait() on its own address as
-         * a channel. Safe to signal before we stop running: this whole
-         * path is DAIF-masked, so the parent cannot actually be
-         * scheduled until the schedule() below hands the CPU over. */
-        if (p->parent)
-            wakeup(p->parent);
-    }
-    schedule();
-    /* schedule() only returns here if nothing else was runnable at this
-     * exact instant — a real, reachable outcome (the last other proc
-     * exits while a third is legitimately THREAD_SLEEPING and not yet due
-     * to wake), which is why this isn't __builtin_unreachable(). When
-     * it happens, this now-ZOMBIE proc's own EL0 code just spins in
-     * place until the next timer tick's schedule() sees it is no longer
-     * RUNNING and sweeps it away. */
-    return status;
+    proc_exit_current((int)(status & 0xff));
 }
 
 struct user_thread_create_args {
