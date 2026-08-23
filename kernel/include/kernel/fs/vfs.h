@@ -62,6 +62,7 @@ struct vfs_dentry {
     void *private;
     spinlock_t ref_lock;
     size_t refs;
+    int linked;
     char name[VFS_NAME_MAX + 1];
 };
 
@@ -76,6 +77,9 @@ struct vfs_fs_ops {
                         const char *, struct vfs_dentry **);
     int (*create)(struct vfs_mount *, struct vfs_dentry *, const char *,
                   enum vfs_node_type, uint32_t, struct vfs_dentry **);
+    int (*remove)(struct vfs_mount *, struct vfs_dentry *, const char *, int);
+    int (*rename)(struct vfs_mount *, struct vfs_dentry *, const char *,
+                  struct vfs_dentry *, const char *);
     void (*destroy_dentry)(struct vfs_dentry *);
 };
 
@@ -110,6 +114,9 @@ int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size);
 int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
              uint32_t mode, struct vfs_node **out);
 int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode);
+int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory);
+int vfs_rename(const struct vfs_path *cwd, const char *old_path,
+               const char *new_path);
 int vfs_stat(const struct vfs_path *cwd, const char *path,
              struct vfs_attr *attr);
 

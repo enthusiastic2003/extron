@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -150,6 +151,177 @@ int main(void) {
           && mkdir(long_b, 0755) == 0 && chdir(long_b) == 0
           && getcwd(cwd, sizeof(cwd)) != NULL && !strcmp(cwd, expected_long));
     check("restore root after long-path test", chdir("/") == 0);
+
+    char victim[96];
+    snprintf(victim, sizeof(victim), "%s/open-victim", test_directory);
+    raw_fd = open(victim, O_CREAT | O_EXCL | O_RDWR, 0644);
+    check("create file for open-unlink lifetime", raw_fd >= 0);
+    check("write file before unlink",
+          raw_fd >= 0 && write(raw_fd, "kept", 4) == 4
+          && lseek(raw_fd, 0, SEEK_SET) == 0);
+    check("unlink removes a regular pathname", unlink(victim) == 0);
+    errno = 0;
+    check("unlinked pathname reports ENOENT",
+          stat(victim, &path_info) == -1 && errno == ENOENT);
+    memset(buf, 0, sizeof(buf));
+    check("open descriptor survives unlink",
+          raw_fd >= 0 && read(raw_fd, buf, 4) == 4
+          && !memcmp(buf, "kept", 4));
+    check("unlinked open inode reports zero links",
+          raw_fd >= 0 && fstat(raw_fd, &fd_info) == 0 && fd_info.st_nlink == 0);
+    if (raw_fd >= 0)
+        close(raw_fd);
+    errno = 0;
+    check("unlink missing pathname reports ENOENT",
+          unlink(victim) == -1 && errno == ENOENT);
+    errno = 0;
+    check("unlink directory reports EISDIR",
+          unlink(nested_a) == -1 && errno == EISDIR);
+    errno = 0;
+    check("rmdir regular file reports ENOTDIR",
+          rmdir(regular_path) == -1 && errno == ENOTDIR);
+    errno = 0;
+    check("rmdir non-empty directory reports ENOTEMPTY",
+          rmdir(nested_b) == -1 && errno == ENOTEMPTY);
+
+    char empty_dir[96];
+    snprintf(empty_dir, sizeof(empty_dir), "%s/empty", test_directory);
+    check("create empty directory for rmdir", mkdir(empty_dir, 0755) == 0);
+    DIR *open_directory = opendir(empty_dir);
+    check("open directory before rmdir", open_directory != NULL);
+    check("rmdir removes an empty directory", rmdir(empty_dir) == 0);
+    errno = 0;
+    check("removed directory pathname reports ENOENT",
+          stat(empty_dir, &path_info) == -1 && errno == ENOENT);
+    errno = 0;
+    check("open directory descriptor survives rmdir",
+          open_directory && readdir(open_directory) == NULL && errno == 0);
+    if (open_directory)
+        check("close removed directory descriptor", closedir(open_directory) == 0);
+
+    char rename_source[96], rename_target[96];
+    snprintf(rename_source, sizeof(rename_source), "%s/rename-source",
+             test_directory);
+    snprintf(rename_target, sizeof(rename_target), "%s/rename-target",
+             test_directory);
+    int source_fd = open(rename_source, O_CREAT | O_EXCL | O_RDWR, 0644);
+    int old_target_fd = open(rename_target, O_CREAT | O_EXCL | O_RDWR, 0644);
+    check("create files for replacement rename",
+          source_fd >= 0 && old_target_fd >= 0);
+    check("seed both rename generations",
+          source_fd >= 0 && old_target_fd >= 0
+          && write(source_fd, "new", 3) == 3
+          && write(old_target_fd, "old", 3) == 3
+          && lseek(old_target_fd, 0, SEEK_SET) == 0);
+    if (source_fd >= 0)
+        close(source_fd);
+    check("rename atomically replaces a regular target",
+          rename(rename_source, rename_target) == 0);
+    errno = 0;
+    check("renamed source pathname disappears",
+          stat(rename_source, &path_info) == -1 && errno == ENOENT);
+    int renamed_fd = open(rename_target, O_RDONLY);
+    memset(buf, 0, sizeof(buf));
+    check("replacement pathname names source contents",
+          renamed_fd >= 0 && read(renamed_fd, buf, 3) == 3
+          && !memcmp(buf, "new", 3));
+    if (renamed_fd >= 0)
+        close(renamed_fd);
+    memset(buf, 0, sizeof(buf));
+    check("open replaced inode retains old contents",
+          old_target_fd >= 0 && read(old_target_fd, buf, 3) == 3
+          && !memcmp(buf, "old", 3));
+    if (old_target_fd >= 0)
+        close(old_target_fd);
+    check("rename of a pathname to itself is a no-op",
+          rename(rename_target, rename_target) == 0);
+    errno = 0;
+    check("rename missing source reports ENOENT",
+          rename(rename_source, victim) == -1 && errno == ENOENT);
+
+    char type_dir[96];
+    snprintf(type_dir, sizeof(type_dir), "%s/type-dir", test_directory);
+    check("create directory for rename type checks", mkdir(type_dir, 0755) == 0);
+    errno = 0;
+    check("regular file cannot replace a directory",
+          rename(regular_path, type_dir) == -1 && errno == EISDIR);
+    errno = 0;
+    check("directory cannot replace a regular file",
+          rename(type_dir, regular_path) == -1 && errno == ENOTDIR);
+
+    char replace_dir_source[96], replace_dir_target[96];
+    snprintf(replace_dir_source, sizeof(replace_dir_source), "%s/dir-source",
+             test_directory);
+    snprintf(replace_dir_target, sizeof(replace_dir_target), "%s/dir-target",
+             test_directory);
+    check("create empty directories for replacement rename",
+          mkdir(replace_dir_source, 0755) == 0
+          && mkdir(replace_dir_target, 0755) == 0);
+    check("directory rename replaces an empty directory",
+          rename(replace_dir_source, replace_dir_target) == 0);
+
+    char nonempty_source[96], nonempty_target[96], nonempty_child[128];
+    snprintf(nonempty_source, sizeof(nonempty_source), "%s/nonempty-source",
+             test_directory);
+    snprintf(nonempty_target, sizeof(nonempty_target), "%s/nonempty-target",
+             test_directory);
+    snprintf(nonempty_child, sizeof(nonempty_child), "%s/child", nonempty_target);
+    check("create directories for non-empty replacement check",
+          mkdir(nonempty_source, 0755) == 0
+          && mkdir(nonempty_target, 0755) == 0
+          && mkdir(nonempty_child, 0755) == 0);
+    errno = 0;
+    check("rename cannot replace a non-empty directory",
+          rename(nonempty_source, nonempty_target) == -1
+          && errno == ENOTEMPTY);
+
+    char move_source[96], move_child[128], move_target[128];
+    snprintf(move_source, sizeof(move_source), "%s/move-source", test_directory);
+    snprintf(move_child, sizeof(move_child), "%s/child", move_source);
+    snprintf(move_target, sizeof(move_target), "%s/moved", nested_a);
+    check("create directory tree for cross-parent rename",
+          mkdir(move_source, 0755) == 0 && mkdir(move_child, 0755) == 0);
+    check("enter directory before its ancestor is renamed",
+          chdir(move_child) == 0);
+    char absolute_source[128], absolute_target[160], expected_moved[192];
+    snprintf(absolute_source, sizeof(absolute_source), "/%s", move_source);
+    snprintf(absolute_target, sizeof(absolute_target), "/%s", move_target);
+    snprintf(expected_moved, sizeof(expected_moved), "/%s/child", move_target);
+    check("rename moves a populated directory across parents",
+          rename(absolute_source, absolute_target) == 0);
+    check("cwd follows a renamed ancestor",
+          getcwd(cwd, sizeof(cwd)) != NULL && !strcmp(cwd, expected_moved));
+    char descendant_target[224];
+    snprintf(descendant_target, sizeof(descendant_target), "%s/child/inside",
+             absolute_target);
+    errno = 0;
+    check("directory cannot be renamed into its descendant",
+          rename(absolute_target, descendant_target) == -1 && errno == EINVAL);
+    check("return to root after rename tests", chdir("/") == 0);
+
+    char cwd_removed[96];
+    snprintf(cwd_removed, sizeof(cwd_removed), "%s/cwd-removed", test_directory);
+    check("create directory for retained removed cwd",
+          mkdir(cwd_removed, 0755) == 0 && chdir(cwd_removed) == 0);
+    char absolute_removed[128];
+    snprintf(absolute_removed, sizeof(absolute_removed), "/%s", cwd_removed);
+    check("rmdir can detach a directory still used as cwd",
+          rmdir(absolute_removed) == 0);
+    errno = 0;
+    check("getcwd reports detached cwd as ENOENT",
+          getcwd(cwd, sizeof(cwd)) == NULL && errno == ENOENT);
+    check("dot-dot escapes a detached cwd", chdir("..") == 0);
+    snprintf(expected_cwd, sizeof(expected_cwd), "/%s", test_directory);
+    check("cwd recovers at retained parent",
+          getcwd(cwd, sizeof(cwd)) != NULL && !strcmp(cwd, expected_cwd));
+    check("restore root after detached-cwd test", chdir("/") == 0);
+    check("access accepts an existing path while permissions are deferred",
+          access("hello.txt", R_OK | W_OK) == 0);
+    errno = 0;
+    check("access missing path reports ENOENT",
+          access("access-missing", F_OK) == -1 && errno == ENOENT);
+    errno = 0;
+    check("rmdir root reports EBUSY", rmdir("/") == -1 && errno == EBUSY);
 
     FILE *created = fopen("default.cfg", "wb");
     check("fopen creates writable ramfs file", created != NULL);

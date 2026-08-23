@@ -51,6 +51,9 @@
 #define SYS_GETPGID     40
 #define SYS_SETPGID     41
 #define SYS_SETSID      42
+#define SYS_UNLINK      43
+#define SYS_RMDIR       44
+#define SYS_RENAME      45
 
 struct extron_thread_create_args {
     uintptr_t entry;

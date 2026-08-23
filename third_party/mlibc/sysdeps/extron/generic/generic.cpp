@@ -66,6 +66,9 @@
 #define SYS_GETPGID     40
 #define SYS_SETPGID     41
 #define SYS_SETSID      42
+#define SYS_UNLINK      43
+#define SYS_RMDIR       44
+#define SYS_RENAME      45
 
 
 using main_fn = int (*)(int, char **);
@@ -243,6 +246,16 @@ int sys_stat(fsfd_target target, int fd, const char *path, int,
     else
         return ENOTSUP;
     return ret < 0 ? -ret : 0;
+}
+
+int sys_access(const char *path, int mode) {
+    /* Permission enforcement is a later VFS stage. For now every existing
+     * object is accessible; this still gives callers correct ENOENT and
+     * ENOTDIR results from the real pathname walker. */
+    if (mode & ~7)
+        return EINVAL;
+    struct stat info;
+    return sys_stat(fsfd_target::path, AT_FDCWD, path, 0, &info);
 }
 
 extern "C" void __mlibc_signal_restore();
@@ -508,6 +521,33 @@ int sys_seek(int fd, off_t offset, int whence, off_t *new_offset) {
 int sys_mkdir(const char *path, mode_t mode) {
     long ret = syscall2(SYS_MKDIR, (long)path, mode);
     return ret < 0 ? -ret : 0;
+}
+
+int sys_unlinkat(int dirfd, const char *path, int flags) {
+    if (dirfd != AT_FDCWD)
+        return ENOTSUP;
+    if (flags & ~AT_REMOVEDIR)
+        return EINVAL;
+    long ret = syscall1(flags & AT_REMOVEDIR ? SYS_RMDIR : SYS_UNLINK,
+                        (long)path);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_rmdir(const char *path) {
+    long ret = syscall1(SYS_RMDIR, (long)path);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_rename(const char *old_path, const char *new_path) {
+    long ret = syscall2(SYS_RENAME, (long)old_path, (long)new_path);
+    return ret < 0 ? -ret : 0;
+}
+
+int sys_renameat(int olddirfd, const char *old_path, int newdirfd,
+                 const char *new_path) {
+    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD)
+        return ENOTSUP;
+    return sys_rename(old_path, new_path);
 }
 
 int sys_pipe(int *fds, int flags) {

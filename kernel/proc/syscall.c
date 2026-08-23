@@ -714,6 +714,51 @@ static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
     return (uint64_t)result;
 }
 
+static uint64_t sys_unlink_common(uint64_t path_addr, int directory) {
+    char path[VFS_PATH_MAX + 1];
+    struct proc *p = my_proc();
+    long result = copy_user_string(p, path_addr, path, sizeof(path));
+    if (result < 0)
+        return (uint64_t)result;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return (uint64_t)-EIO;
+    result = vfs_unlink(&cwd, path, directory);
+    vfs_path_release(&cwd);
+    return (uint64_t)result;
+}
+
+static uint64_t sys_unlink(uint64_t path_addr, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return sys_unlink_common(path_addr, 0);
+}
+
+static uint64_t sys_rmdir(uint64_t path_addr, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return sys_unlink_common(path_addr, 1);
+}
+
+static uint64_t sys_rename(uint64_t old_addr, uint64_t new_addr, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)c; (void)f;
+    char old_path[VFS_PATH_MAX + 1], new_path[VFS_PATH_MAX + 1];
+    struct proc *p = my_proc();
+    long result = copy_user_string(p, old_addr, old_path, sizeof(old_path));
+    if (result < 0)
+        return (uint64_t)result;
+    result = copy_user_string(p, new_addr, new_path, sizeof(new_path));
+    if (result < 0)
+        return (uint64_t)result;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return (uint64_t)-EIO;
+    result = vfs_rename(&cwd, old_path, new_path);
+    vfs_path_release(&cwd);
+    return (uint64_t)result;
+}
+
 static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
                            struct aarch64_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
@@ -1098,6 +1143,9 @@ static const syscall_fn syscall_table[] = {
     [SYS_SIGPROCMASK] = sys_sigprocmask,
     [SYS_SIGRETURN] = sys_sigreturn,
     [SYS_TGKILL] = sys_tgkill,
+    [SYS_UNLINK] = sys_unlink,
+    [SYS_RMDIR] = sys_rmdir,
+    [SYS_RENAME] = sys_rename,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

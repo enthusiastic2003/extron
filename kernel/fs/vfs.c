@@ -54,8 +54,11 @@ int vfs_dentry_init(struct vfs_dentry *dentry, struct vfs_node *node,
     dentry->private = private;
     dentry->ref_lock = (spinlock_t)SPINLOCK_INIT;
     dentry->refs = 1; /* namespace membership */
+    dentry->linked = 1;
     memcpy(dentry->name, name, length + 1);
     vfs_node_retain(node);
+    if (parent)
+        vfs_dentry_retain(parent);
     return 0;
 }
 
@@ -73,10 +76,12 @@ void vfs_dentry_release(struct vfs_dentry *dentry) {
     irq_spin_unlock(&dentry->ref_lock);
     if (!last) return;
     struct vfs_node *node = dentry->node;
+    struct vfs_dentry *parent = dentry->parent;
     struct vfs_mount *mount = dentry->owner_mount;
     if (mount && mount->ops && mount->ops->destroy_dentry)
         mount->ops->destroy_dentry(dentry);
     vfs_node_release(node);
+    vfs_dentry_release(parent);
 }
 
 void vfs_path_retain(struct vfs_path *path) {
@@ -300,6 +305,8 @@ int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size) {
     struct vfs_dentry *dentry = path->dentry;
 
     while (!(mount == &mounts[0] && dentry == mounts[0].root)) {
+        if (!dentry->linked)
+            return -ENOENT;
         if (dentry == mount->root && mount->has_covered) {
             dentry = mount->covered.dentry;
             mount = mount->covered.mount;
@@ -400,6 +407,134 @@ int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode) {
         vfs_dentry_release(created);
     }
     vfs_path_release(&parent);
+    return result;
+}
+
+static bool vfs_is_mountpoint(struct vfs_mount *mount,
+                              struct vfs_dentry *dentry) {
+    for (size_t i = 1; i < mount_count; i++)
+        if (mounts[i].has_covered
+                && mounts[i].covered.mount == mount
+                && mounts[i].covered.dentry == dentry)
+            return true;
+    return false;
+}
+
+static bool path_is_root_syntax(const char *path) {
+    if (!path || *path != '/')
+        return false;
+    while (*path == '/')
+        path++;
+    return !*path;
+}
+
+int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory) {
+    if (!path)
+        return -EINVAL;
+    if (path_is_root_syntax(path))
+        return directory ? -EBUSY : -EISDIR;
+    struct vfs_path parent;
+    char leaf[VFS_NAME_MAX + 1];
+    int result = walk(cwd, path, true, &parent, leaf);
+    if (result < 0)
+        return result;
+    if (!parent.mount->ops->remove) {
+        vfs_path_release(&parent);
+        return -EROFS;
+    }
+
+    struct vfs_dentry *target = NULL;
+    result = parent.mount->ops->lookup_child(parent.mount, parent.dentry,
+                                              leaf, &target);
+    if (result < 0) {
+        vfs_path_release(&parent);
+        return result;
+    }
+    size_t length = strlen(path);
+    if (length && path[length - 1] == '/'
+            && target->node->type != VFS_NODE_DIRECTORY)
+        result = -ENOTDIR;
+    else if (vfs_is_mountpoint(parent.mount, target))
+        result = -EBUSY;
+    vfs_dentry_release(target);
+    if (result == 0)
+        result = parent.mount->ops->remove(parent.mount, parent.dentry,
+                                            leaf, directory);
+    vfs_path_release(&parent);
+    return result;
+}
+
+int vfs_rename(const struct vfs_path *cwd, const char *old_path,
+               const char *new_path) {
+    if (!old_path || !new_path)
+        return -EINVAL;
+    if (path_is_root_syntax(old_path) || path_is_root_syntax(new_path))
+        return -EBUSY;
+    struct vfs_path old_parent, new_parent;
+    char old_leaf[VFS_NAME_MAX + 1], new_leaf[VFS_NAME_MAX + 1];
+    int result = walk(cwd, old_path, true, &old_parent, old_leaf);
+    if (result < 0)
+        return result;
+    result = walk(cwd, new_path, true, &new_parent, new_leaf);
+    if (result < 0) {
+        vfs_path_release(&old_parent);
+        return result;
+    }
+    if (old_parent.mount != new_parent.mount) {
+        result = -EXDEV;
+        goto out;
+    }
+    if (!old_parent.mount->ops->rename) {
+        result = -EROFS;
+        goto out;
+    }
+
+    struct vfs_dentry *source = NULL;
+    result = old_parent.mount->ops->lookup_child(old_parent.mount,
+                                                  old_parent.dentry,
+                                                  old_leaf, &source);
+    if (result < 0)
+        goto out;
+    enum vfs_node_type source_type = source->node->type;
+    size_t old_length = strlen(old_path);
+    if (old_length && old_path[old_length - 1] == '/'
+            && source->node->type != VFS_NODE_DIRECTORY)
+        result = -ENOTDIR;
+    else if (vfs_is_mountpoint(old_parent.mount, source))
+        result = -EBUSY;
+    vfs_dentry_release(source);
+    if (result < 0)
+        goto out;
+
+    struct vfs_dentry *destination = NULL;
+    int destination_result = new_parent.mount->ops->lookup_child(
+        new_parent.mount, new_parent.dentry, new_leaf, &destination);
+    if (destination_result == 0) {
+        size_t new_length = strlen(new_path);
+        if (new_length && new_path[new_length - 1] == '/'
+                && destination->node->type != VFS_NODE_DIRECTORY)
+            result = -ENOTDIR;
+        else if (vfs_is_mountpoint(new_parent.mount, destination))
+            result = -EBUSY;
+        vfs_dentry_release(destination);
+        if (result < 0)
+            goto out;
+    } else if (destination_result != -ENOENT) {
+        result = destination_result;
+        goto out;
+    } else {
+        size_t new_length = strlen(new_path);
+        if (new_length && new_path[new_length - 1] == '/') {
+            result = source_type == VFS_NODE_DIRECTORY ? -ENOENT : -ENOTDIR;
+            goto out;
+        }
+    }
+    result = old_parent.mount->ops->rename(old_parent.mount,
+        old_parent.dentry, old_leaf, new_parent.dentry, new_leaf);
+
+out:
+    vfs_path_release(&new_parent);
+    vfs_path_release(&old_parent);
     return result;
 }
 

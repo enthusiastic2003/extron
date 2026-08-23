@@ -58,6 +58,9 @@
 #define SYS_GETPGID     40
 #define SYS_SETPGID     41
 #define SYS_SETSID      42
+#define SYS_UNLINK      43
+#define SYS_RMDIR       44
+#define SYS_RENAME      45
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

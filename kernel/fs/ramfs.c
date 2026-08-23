@@ -20,12 +20,11 @@ struct ramfs_inode {
     uint32_t nlink;
     uint32_t uid;
     uint32_t gid;
-    struct ramfs_dentry *directory;
+    struct ramfs_dentry *children;
 };
 
 struct ramfs_dentry {
     struct vfs_dentry dentry;
-    struct ramfs_dentry *children;
     struct ramfs_dentry *next_sibling;
 };
 
@@ -61,7 +60,8 @@ static const struct vfs_node_ops ramfs_node_ops = {
 
 static struct ramfs_dentry *find_child_locked(struct ramfs_dentry *parent,
                                                const char *name) {
-    for (struct ramfs_dentry *child = parent->children;
+    struct ramfs_inode *parent_inode = inode_of(parent->dentry.node);
+    for (struct ramfs_dentry *child = parent_inode->children;
          child; child = child->next_sibling)
         if (strcmp(child->dentry.name, name) == 0)
             return child;
@@ -105,11 +105,11 @@ static int create_locked(struct ramfs_dentry *parent, const char *name,
         kfree(inode);
         return result;
     }
-    dentry->next_sibling = parent->children;
-    parent->children = dentry;
+    struct ramfs_inode *parent_inode = inode_of(parent->dentry.node);
+    dentry->next_sibling = parent_inode->children;
+    parent_inode->children = dentry;
     if (type == VFS_NODE_DIRECTORY) {
-        inode->directory = dentry;
-        inode_of(parent->dentry.node)->nlink++;
+        parent_inode->nlink++;
     }
     if (out) {
         vfs_dentry_retain(&dentry->dentry);
@@ -158,6 +158,155 @@ static int ramfs_create(struct vfs_mount *mount,
     int result = create_locked(parent, name, type, mode, out);
     irq_spin_unlock(&tree_lock);
     return result;
+}
+
+static struct ramfs_dentry **child_link_locked(struct ramfs_dentry *parent,
+                                                struct ramfs_dentry *child) {
+    struct ramfs_dentry **link = &inode_of(parent->dentry.node)->children;
+    while (*link && *link != child)
+        link = &(*link)->next_sibling;
+    return *link ? link : NULL;
+}
+
+static int ramfs_remove(struct vfs_mount *mount,
+                        struct vfs_dentry *parent_entry, const char *name,
+                        int directory) {
+    (void)mount;
+    struct ramfs_dentry *parent = dentry_of(parent_entry);
+    if (!parent || !name || !*name)
+        return -EINVAL;
+    irq_spin_lock(&tree_lock);
+    struct ramfs_dentry *child = find_child_locked(parent, name);
+    if (!child) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOENT;
+    }
+    bool is_directory = child->dentry.node->type == VFS_NODE_DIRECTORY;
+    if (directory && !is_directory) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOTDIR;
+    }
+    if (!directory && is_directory) {
+        irq_spin_unlock(&tree_lock);
+        return -EISDIR;
+    }
+    if (is_directory && inode_of(child->dentry.node)->children) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOTEMPTY;
+    }
+    struct ramfs_dentry **link = child_link_locked(parent, child);
+    if (!link) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOENT;
+    }
+    *link = child->next_sibling;
+    child->next_sibling = NULL;
+    child->dentry.linked = 0;
+    struct ramfs_inode *inode = inode_of(child->dentry.node);
+    if (is_directory) {
+        inode_of(parent_entry->node)->nlink--;
+        inode->nlink = 0;
+    } else if (inode->nlink) {
+        inode->nlink--;
+    }
+    irq_spin_unlock(&tree_lock);
+
+    /* Drop namespace membership. Open files and cwd paths keep their own
+     * references, so the inode/dentry can outlive its visible name. */
+    vfs_dentry_release(&child->dentry);
+    return 0;
+}
+
+static int ramfs_rename(struct vfs_mount *mount,
+                        struct vfs_dentry *old_parent_entry,
+                        const char *old_name,
+                        struct vfs_dentry *new_parent_entry,
+                        const char *new_name) {
+    (void)mount;
+    struct ramfs_dentry *old_parent = dentry_of(old_parent_entry);
+    struct ramfs_dentry *new_parent = dentry_of(new_parent_entry);
+    if (!old_parent || !new_parent || !old_name || !*old_name
+            || !new_name || !*new_name)
+        return -EINVAL;
+
+    struct ramfs_dentry *replaced = NULL;
+    struct vfs_dentry *old_parent_ref = NULL;
+    irq_spin_lock(&tree_lock);
+    struct ramfs_dentry *source = find_child_locked(old_parent, old_name);
+    if (!source) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOENT;
+    }
+    struct ramfs_dentry *target = find_child_locked(new_parent, new_name);
+    if (source == target) {
+        irq_spin_unlock(&tree_lock);
+        return 0;
+    }
+
+    bool source_directory = source->dentry.node->type == VFS_NODE_DIRECTORY;
+    if (source_directory) {
+        for (struct vfs_dentry *ancestor = new_parent_entry;
+             ancestor; ancestor = ancestor->parent) {
+            if (ancestor == &source->dentry) {
+                irq_spin_unlock(&tree_lock);
+                return -EINVAL;
+            }
+        }
+    }
+    if (target) {
+        bool target_directory = target->dentry.node->type == VFS_NODE_DIRECTORY;
+        if (source_directory && !target_directory) {
+            irq_spin_unlock(&tree_lock);
+            return -ENOTDIR;
+        }
+        if (!source_directory && target_directory) {
+            irq_spin_unlock(&tree_lock);
+            return -EISDIR;
+        }
+        if (target_directory && inode_of(target->dentry.node)->children) {
+            irq_spin_unlock(&tree_lock);
+            return -ENOTEMPTY;
+        }
+    }
+
+    if (target) {
+        struct ramfs_dentry **target_link = child_link_locked(new_parent,
+                                                               target);
+        *target_link = target->next_sibling;
+        target->next_sibling = NULL;
+        target->dentry.linked = 0;
+        struct ramfs_inode *target_inode = inode_of(target->dentry.node);
+        if (target->dentry.node->type == VFS_NODE_DIRECTORY) {
+            inode_of(new_parent_entry->node)->nlink--;
+            target_inode->nlink = 0;
+        } else if (target_inode->nlink) {
+            target_inode->nlink--;
+        }
+        replaced = target;
+    }
+
+    struct ramfs_dentry **source_link = child_link_locked(old_parent, source);
+    *source_link = source->next_sibling;
+    if (old_parent != new_parent) {
+        vfs_dentry_retain(new_parent_entry);
+        old_parent_ref = source->dentry.parent;
+        source->dentry.parent = new_parent_entry;
+        if (source_directory) {
+            inode_of(old_parent_entry->node)->nlink--;
+            inode_of(new_parent_entry->node)->nlink++;
+        }
+    }
+    memcpy(source->dentry.name, new_name, strlen(new_name) + 1);
+    struct ramfs_inode *new_parent_inode = inode_of(new_parent_entry->node);
+    source->next_sibling = new_parent_inode->children;
+    new_parent_inode->children = source;
+    irq_spin_unlock(&tree_lock);
+
+    if (old_parent_ref)
+        vfs_dentry_release(old_parent_ref);
+    if (replaced)
+        vfs_dentry_release(&replaced->dentry);
+    return 0;
 }
 
 static void seed_tar_file(const struct tar_file *file, void *context) {
@@ -222,7 +371,6 @@ void ramfs_init(void) {
     root_inode.ino = 1;
     root_inode.mode = 0755;
     root_inode.nlink = 2;
-    root_inode.directory = &root_dentry;
     next_ino = 2;
     if (vfs_dentry_init(&root_dentry.dentry, &root_inode.vnode,
                         NULL, "", &root_dentry) < 0)
@@ -309,12 +457,7 @@ static int ramfs_node_readdir(struct vfs_node *vnode, size_t index,
     if (vnode->type != VFS_NODE_DIRECTORY) return -ENOTDIR;
 
     irq_spin_lock(&tree_lock);
-    struct ramfs_dentry *directory = inode->directory;
-    if (!directory) {
-        irq_spin_unlock(&tree_lock);
-        return -ENOENT;
-    }
-    struct ramfs_dentry *child = directory->children;
+    struct ramfs_dentry *child = inode->children;
     while (child && index--) child = child->next_sibling;
     if (!child) {
         irq_spin_unlock(&tree_lock);
@@ -360,5 +503,7 @@ static const struct vfs_fs_ops ramfs_fs_ops = {
     .root = ramfs_root,
     .lookup_child = ramfs_lookup_child,
     .create = ramfs_create,
+    .remove = ramfs_remove,
+    .rename = ramfs_rename,
     .destroy_dentry = ramfs_destroy_dentry,
 };
