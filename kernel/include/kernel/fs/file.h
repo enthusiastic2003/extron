@@ -39,7 +39,7 @@ int  file_table_clone(struct proc *dst, struct proc *src);
 void file_table_close_all(struct proc *p);
 void file_table_close_cloexec(struct proc *p);
 
-int     file_open(struct proc *p, const char *path, int flags);
+int     file_open(struct proc *p, const char *path, int flags, uint32_t mode);
 int     file_pipe(struct proc *p, int fds[2], int flags);
 int     file_dup(struct proc *p, int oldfd, int minimum, int cloexec);
 int     file_dup2(struct proc *p, int oldfd, int newfd, int cloexec);

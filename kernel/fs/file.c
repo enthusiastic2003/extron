@@ -1,5 +1,6 @@
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/errno.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/drivers/tty.h>
@@ -83,6 +84,8 @@ static void file_release(struct open_file *f) {
         irq_spin_unlock(&pipe->lock);
         if (free_pipe)
             kfree(pipe);
+    } else if (f->kind == FILE_VNODE) {
+        vfs_node_release(f->object.node);
     }
     kfree(f);
 }
@@ -150,20 +153,27 @@ void file_table_close_cloexec(struct proc *p) {
             file_close(p, fd);
 }
 
-int file_open(struct proc *p, const char *path, int flags) {
+int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
     if (!p)
-        return -1;
+        return -EINVAL;
     int fd = free_descriptor_from(p, 0);
     if (fd < 0)
-        return -1;
+        return -EMFILE;
 
     struct open_file *f = kmalloc(sizeof(*f));
     if (!f)
-        return -1;
+        return -ENOMEM;
     struct vfs_node *node;
-    if (vfs_open(p->cwd, path, flags, &node) != 0) {
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0) {
         kfree(f);
-        return -1;
+        return -EIO;
+    }
+    int result = vfs_open(&cwd, path, flags, mode, &node);
+    vfs_path_release(&cwd);
+    if (result < 0) {
+        kfree(f);
+        return result;
     }
     memset(f, 0, sizeof(*f));
     f->lock = (spinlock_t)SPINLOCK_INIT;
@@ -172,8 +182,9 @@ int file_open(struct proc *p, const char *path, int flags) {
     f->object.node = node;
     struct vfs_attr attr;
     if (vfs_getattr(node, &attr) != 0) {
+        vfs_node_release(node);
         kfree(f);
-        return -1;
+        return -EIO;
     }
     f->offset = (flags & O_APPEND) ? attr.size : 0;
     f->flags = flags;
@@ -184,16 +195,16 @@ int file_open(struct proc *p, const char *path, int flags) {
 
 int file_pipe(struct proc *p, int fds[2], int flags) {
     if (!p || !fds || (flags & ~O_CLOEXEC))
-        return -1;
+        return -EINVAL;
     int read_fd = free_descriptor_from(p, 0);
     if (read_fd < 0)
-        return -1;
+        return -EMFILE;
     /* Reserve the first slot while finding the second. */
     p->files[read_fd] = &console_input;
     int write_fd = free_descriptor_from(p, 0);
     p->files[read_fd] = NULL;
     if (write_fd < 0)
-        return -1;
+        return -EMFILE;
 
     struct pipe_buffer *pipe = kmalloc(sizeof(*pipe));
     struct open_file *reader = kmalloc(sizeof(*reader));
@@ -202,7 +213,7 @@ int file_pipe(struct proc *p, int fds[2], int flags) {
         if (pipe) kfree(pipe);
         if (reader) kfree(reader);
         if (writer) kfree(writer);
-        return -1;
+        return -ENOMEM;
     }
     memset(pipe, 0, sizeof(*pipe));
     memset(reader, 0, sizeof(*reader));
@@ -229,10 +240,10 @@ int file_pipe(struct proc *p, int fds[2], int flags) {
 
 int file_dup(struct proc *p, int oldfd, int minimum, int cloexec) {
     if (!descriptor_ok(p, oldfd))
-        return -1;
+        return -EBADF;
     int newfd = free_descriptor_from(p, minimum);
     if (newfd < 0)
-        return -1;
+        return -EMFILE;
     file_retain(p->files[oldfd]);
     p->files[newfd] = p->files[oldfd];
     p->fd_flags[newfd] = cloexec ? FD_CLOEXEC : 0;
@@ -241,7 +252,7 @@ int file_dup(struct proc *p, int oldfd, int minimum, int cloexec) {
 
 int file_dup2(struct proc *p, int oldfd, int newfd, int cloexec) {
     if (!descriptor_ok(p, oldfd) || newfd < 0 || newfd >= PROC_MAX_FDS)
-        return -1;
+        return !descriptor_ok(p, oldfd) ? -EBADF : -EINVAL;
     if (oldfd == newfd)
         return newfd;
     struct open_file *source = p->files[oldfd];
@@ -254,19 +265,19 @@ int file_dup2(struct proc *p, int oldfd, int newfd, int cloexec) {
 }
 
 int file_get_fd_flags(struct proc *p, int fd) {
-    return descriptor_ok(p, fd) ? p->fd_flags[fd] : -1;
+    return descriptor_ok(p, fd) ? p->fd_flags[fd] : -EBADF;
 }
 
 int file_set_fd_flags(struct proc *p, int fd, int flags) {
     if (!descriptor_ok(p, fd) || (flags & ~FD_CLOEXEC))
-        return -1;
+        return !descriptor_ok(p, fd) ? -EBADF : -EINVAL;
     p->fd_flags[fd] = (uint8_t)flags;
     return 0;
 }
 
 int file_get_status_flags(struct proc *p, int fd) {
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     irq_spin_lock(&f->lock);
     int flags = f->flags;
@@ -276,7 +287,7 @@ int file_get_status_flags(struct proc *p, int fd) {
 
 int file_set_status_flags(struct proc *p, int fd, int flags) {
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     irq_spin_lock(&f->lock);
     f->flags = (f->flags & ~(O_APPEND | O_NONBLOCK))
@@ -295,10 +306,10 @@ struct extron_dirent {
 
 long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
     if (!descriptor_ok(p, fd) || size < sizeof(struct extron_dirent))
-        return -1;
+        return !descriptor_ok(p, fd) ? -EBADF : -EINVAL;
     struct open_file *f = p->files[fd];
     if (f->kind != FILE_VNODE)
-        return -1;
+        return -ENOTDIR;
     irq_spin_lock(&f->lock);
     struct extron_dirent *entry = buffer;
     struct vfs_dirent ventry;
@@ -311,7 +322,7 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
         size_t name_length = strlen(ventry.name) + 1;
         if (name_length > sizeof(entry->name)) {
             irq_spin_unlock(&f->lock);
-            return -1;
+            return -EIO;
         }
         memcpy(entry->name, ventry.name, name_length);
         f->offset++;
@@ -323,7 +334,7 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
 
 int file_info(struct proc *p, int fd, struct vfs_attr *attr) {
     if (!descriptor_ok(p, fd) || !attr)
-        return -1;
+        return !descriptor_ok(p, fd) ? -EBADF : -EINVAL;
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_VNODE)
         return vfs_getattr(f->object.node, attr);
@@ -343,7 +354,7 @@ static long pipe_read(struct open_file *f, void *buffer, size_t count) {
     while (!pipe->used && pipe->writers) {
         if (f->flags & O_NONBLOCK) {
             irq_spin_unlock(&pipe->lock);
-            return -1;
+            return -EAGAIN;
         }
         sleep(pipe, &pipe->lock);
         if (signal_pending_unblocked(my_thread())) {
@@ -377,7 +388,7 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
         while (pipe->used == PIPE_CAPACITY && pipe->readers) {
             if (f->flags & O_NONBLOCK) {
                 irq_spin_unlock(&pipe->lock);
-                return written ? (long)written : -1;
+                return written ? (long)written : -EAGAIN;
             }
             sleep(pipe, &pipe->lock);
             if (signal_pending_unblocked(my_thread())) {
@@ -387,7 +398,7 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
         }
         if (!pipe->readers) {
             irq_spin_unlock(&pipe->lock);
-            return written ? (long)written : -1;
+            return written ? (long)written : -EPIPE;
         }
         size_t available = PIPE_CAPACITY - pipe->used;
         size_t chunk = count - written;
@@ -409,18 +420,18 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
 
 long file_read(struct proc *p, int fd, void *buffer, size_t count) {
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_CONSOLE_IN)
         return tty_read(buffer, count);
     if (f->kind == FILE_PIPE_READER)
         return pipe_read(f, buffer, count);
     if (f->kind != FILE_VNODE)
-        return -1;
+        return -EBADF;
     irq_spin_lock(&f->lock);
     if ((f->flags & O_ACCMODE) == O_WRONLY) {
         irq_spin_unlock(&f->lock);
-        return -1;
+        return -EBADF;
     }
     long result = vfs_read(f->object.node, f->offset, buffer, count);
     if (result > 0) f->offset += (size_t)result;
@@ -430,24 +441,24 @@ long file_read(struct proc *p, int fd, void *buffer, size_t count) {
 
 long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_CONSOLE_OUT)
         return tty_write(buffer, count);
     if (f->kind == FILE_PIPE_WRITER)
         return pipe_write(f, buffer, count);
     if (f->kind != FILE_VNODE)
-        return -1;
+        return -EBADF;
     irq_spin_lock(&f->lock);
     if ((f->flags & O_ACCMODE) == 0) {
         irq_spin_unlock(&f->lock);
-        return -1;
+        return -EBADF;
     }
     if (f->flags & O_APPEND) {
         struct vfs_attr attr;
         if (vfs_getattr(f->object.node, &attr) != 0) {
             irq_spin_unlock(&f->lock);
-            return -1;
+            return -EIO;
         }
         f->offset = attr.size;
     }
@@ -459,21 +470,21 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
 
 long file_seek(struct proc *p, int fd, int64_t offset, int whence) {
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     if (f->kind != FILE_VNODE)
-        return -1;
+        return -ESPIPE;
     irq_spin_lock(&f->lock);
     struct vfs_attr attr;
     if (vfs_getattr(f->object.node, &attr) != 0) {
         irq_spin_unlock(&f->lock);
-        return -1;
+        return -EIO;
     }
     int64_t base = whence == 0 ? 0 : whence == 1 ? (int64_t)f->offset
                                                     : whence == 2 ? (int64_t)attr.size : -1;
     if (base < 0 || offset < -base) {
         irq_spin_unlock(&f->lock);
-        return -1;
+        return -EINVAL;
     }
     f->offset = (size_t)(base + offset);
     long result = (long)f->offset;
@@ -483,7 +494,7 @@ long file_seek(struct proc *p, int fd, int64_t offset, int whence) {
 
 int file_close(struct proc *p, int fd) {
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     p->files[fd] = NULL;
     p->fd_flags[fd] = 0;
@@ -500,10 +511,10 @@ int file_is_tty(struct proc *p, int fd) {
 
 int file_poll(struct proc *p, int fd, short events, short *revents) {
     if (!revents)
-        return -1;
+        return -EINVAL;
     *revents = 0;
     if (!descriptor_ok(p, fd))
-        return -1;
+        return -EBADF;
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_CONSOLE_IN) {
         if ((events & POLLIN) && kbd_input_ready())

@@ -142,7 +142,8 @@ struct proc {
     struct signal_action signal_actions[SIGNAL_MAX + 1];
     struct open_file    *files[PROC_MAX_FDS];
     uint8_t             fd_flags[PROC_MAX_FDS];
-    char                cwd[VFS_PATH_MAX + 1]; /* canonical path relative to VFS root */
+    spinlock_t          cwd_lock;
+    struct vfs_path     cwd;                 /* retained directory location */
 };
 
 /* Size of a per-thread kernel stack (interrupts land here). Was 4
@@ -175,6 +176,11 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
  * tables TTBR0_EL1 points at. sys_wait() calls it from the PARENT's
  * context for exactly that reason. */
 void proc_destroy(struct proc *p);
+
+/* A process's cwd is shared by all of its threads. Callers use snapshots so
+ * a concurrent chdir cannot release the dentry during pathname traversal. */
+int  proc_cwd_snapshot(struct proc *p, struct vfs_path *out);
+void proc_cwd_set(struct proc *p, const struct vfs_path *path);
 
 /* fork(): a duplicate of `parent` that resumes from the trap frame `f`
  * with x0 == 0, already on the run queue. NULL on failure, having

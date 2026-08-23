@@ -1,304 +1,364 @@
 #include <kernel/fs/ramfs.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/tar.h>
+#include <kernel/errno.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/klibc/string.h>
 #include <arch/irq_spinlock.h>
 
-#define O_ACCMODE 03
-#define O_WRONLY  01
-#define O_RDWR    02
-#define O_CREAT   0100
-#define O_EXCL    0200
-#define O_TRUNC   01000
-#define O_DIRECTORY 0200000
+struct ramfs_dentry;
 
-struct ramfs_node {
+struct ramfs_inode {
     struct vfs_node vnode;
     spinlock_t lock;
-    char path[VFS_PATH_MAX + 1];
     bool owns_data;
     uint8_t *data;
     size_t size;
     size_t capacity;
     uint64_t ino;
     uint32_t mode;
-    struct ramfs_node *next;
+    uint32_t nlink;
+    uint32_t uid;
+    uint32_t gid;
+    struct ramfs_dentry *directory;
 };
 
-static struct ramfs_node root;
-static struct ramfs_node *nodes;
+struct ramfs_dentry {
+    struct vfs_dentry dentry;
+    struct ramfs_dentry *children;
+    struct ramfs_dentry *next_sibling;
+};
+
+static struct ramfs_inode root_inode;
+static struct ramfs_dentry root_dentry;
 static spinlock_t tree_lock = SPINLOCK_INIT;
 static uint64_t next_ino;
 static const struct vfs_fs_ops ramfs_fs_ops;
 
+static struct ramfs_inode *inode_of(struct vfs_node *node) {
+    return node ? node->private : NULL;
+}
+
+static struct ramfs_dentry *dentry_of(struct vfs_dentry *dentry) {
+    return dentry ? dentry->private : NULL;
+}
+
 static long ramfs_node_read(struct vfs_node *, size_t, void *, size_t);
 static long ramfs_node_write(struct vfs_node *, size_t, const void *, size_t);
+static int ramfs_node_truncate(struct vfs_node *, size_t);
 static int ramfs_node_readdir(struct vfs_node *, size_t, struct vfs_dirent *);
 static int ramfs_node_getattr(struct vfs_node *, struct vfs_attr *);
+static void ramfs_node_destroy(struct vfs_node *);
 
 static const struct vfs_node_ops ramfs_node_ops = {
     .read = ramfs_node_read,
     .write = ramfs_node_write,
+    .truncate = ramfs_node_truncate,
     .readdir = ramfs_node_readdir,
     .getattr = ramfs_node_getattr,
+    .destroy = ramfs_node_destroy,
 };
 
-static int resolve(const char *cwd, const char *path,
-                   char out[VFS_PATH_MAX + 1]) {
-    size_t length = 0;
-    if (*path != '/' && cwd && *cwd) {
-        length = strlen(cwd);
-        if (length > VFS_PATH_MAX) return -1;
-        memcpy(out, cwd, length);
-    }
-    while (*path) {
-        while (*path == '/') path++;
-        const char *start = path;
-        while (*path && *path != '/') path++;
-        size_t part = (size_t)(path - start);
-        if (!part || (part == 1 && start[0] == '.')) continue;
-        if (part == 2 && start[0] == '.' && start[1] == '.') {
-            while (length && out[length - 1] != '/') length--;
-            if (length) length--;
-            continue;
-        }
-        if (length && length < VFS_PATH_MAX) out[length++] = '/';
-        if (part > VFS_PATH_MAX - length) return -1;
-        memcpy(out + length, start, part);
-        length += part;
-    }
-    out[length] = '\0';
-    return 0;
-}
-
-static struct ramfs_node *find_locked(const char *path) {
-    if (!*path || (path[0] == '.' && path[1] == '\0'))
-        return &root;
-    for (struct ramfs_node *n = nodes; n; n = n->next)
-        if (strcmp(n->path, path) == 0)
-            return n;
+static struct ramfs_dentry *find_child_locked(struct ramfs_dentry *parent,
+                                               const char *name) {
+    for (struct ramfs_dentry *child = parent->children;
+         child; child = child->next_sibling)
+        if (strcmp(child->dentry.name, name) == 0)
+            return child;
     return NULL;
 }
 
-static struct ramfs_node *new_node_locked(const char *path, bool directory) {
-    size_t length = strlen(path);
-    if (!length || length >= sizeof(((struct ramfs_node *)0)->path))
-        return NULL;
-    struct ramfs_node *node = kmalloc(sizeof(*node));
-    if (!node) return NULL;
-    memset(node, 0, sizeof(*node));
-    node->vnode.ops = &ramfs_node_ops;
-    node->vnode.private = node;
-    node->vnode.type = directory ? VFS_NODE_DIRECTORY : VFS_NODE_REGULAR;
-    node->lock = (spinlock_t)SPINLOCK_INIT;
-    memcpy(node->path, path, length + 1);
-    node->ino = next_ino++;
-    node->mode = directory ? 0755 : 0644;
-    node->next = nodes;
-    nodes = node;
-    return node;
+static struct ramfs_inode *new_inode(enum vfs_node_type type, uint32_t mode) {
+    struct ramfs_inode *inode = kmalloc(sizeof(*inode));
+    if (!inode) return NULL;
+    memset(inode, 0, sizeof(*inode));
+    vfs_node_init(&inode->vnode, &ramfs_node_ops, inode, type);
+    inode->lock = (spinlock_t)SPINLOCK_INIT;
+    inode->ino = next_ino++;
+    inode->mode = mode & 07777;
+    inode->nlink = type == VFS_NODE_DIRECTORY ? 2 : 1;
+    return inode;
+}
+
+static int create_locked(struct ramfs_dentry *parent, const char *name,
+                         enum vfs_node_type type, uint32_t mode,
+                         struct vfs_dentry **out) {
+    if (!parent || !name || !*name)
+        return -EINVAL;
+    if (parent->dentry.node->type != VFS_NODE_DIRECTORY)
+        return -ENOTDIR;
+    if (find_child_locked(parent, name))
+        return -EEXIST;
+
+    struct ramfs_inode *inode = new_inode(type, mode);
+    struct ramfs_dentry *dentry = kmalloc(sizeof(*dentry));
+    if (!inode || !dentry) {
+        if (inode) kfree(inode);
+        if (dentry) kfree(dentry);
+        return -ENOMEM;
+    }
+    memset(dentry, 0, sizeof(*dentry));
+    int result = vfs_dentry_init(&dentry->dentry, &inode->vnode,
+                                 &parent->dentry, name, dentry);
+    if (result < 0) {
+        kfree(dentry);
+        kfree(inode);
+        return result;
+    }
+    dentry->next_sibling = parent->children;
+    parent->children = dentry;
+    if (type == VFS_NODE_DIRECTORY) {
+        inode->directory = dentry;
+        inode_of(parent->dentry.node)->nlink++;
+    }
+    if (out) {
+        vfs_dentry_retain(&dentry->dentry);
+        *out = &dentry->dentry;
+    }
+    return 0;
+}
+
+static int ramfs_root(struct vfs_mount *mount, struct vfs_dentry **out) {
+    (void)mount;
+    if (!out) return -EINVAL;
+    vfs_dentry_retain(&root_dentry.dentry);
+    *out = &root_dentry.dentry;
+    return 0;
+}
+
+static int ramfs_lookup_child(struct vfs_mount *mount,
+                              struct vfs_dentry *parent_entry,
+                              const char *name, struct vfs_dentry **out) {
+    (void)mount;
+    if (!parent_entry || !name || !out)
+        return -EINVAL;
+    if (parent_entry->node->type != VFS_NODE_DIRECTORY)
+        return -ENOTDIR;
+    struct ramfs_dentry *parent = dentry_of(parent_entry);
+    irq_spin_lock(&tree_lock);
+    struct ramfs_dentry *child = find_child_locked(parent, name);
+    if (child)
+        vfs_dentry_retain(&child->dentry);
+    irq_spin_unlock(&tree_lock);
+    if (!child)
+        return -ENOENT;
+    *out = &child->dentry;
+    return 0;
+}
+
+static int ramfs_create(struct vfs_mount *mount,
+                        struct vfs_dentry *parent_entry, const char *name,
+                        enum vfs_node_type type, uint32_t mode,
+                        struct vfs_dentry **out) {
+    (void)mount;
+    struct ramfs_dentry *parent = dentry_of(parent_entry);
+    if (!parent)
+        return -EINVAL;
+    irq_spin_lock(&tree_lock);
+    int result = create_locked(parent, name, type, mode, out);
+    irq_spin_unlock(&tree_lock);
+    return result;
 }
 
 static void seed_tar_file(const struct tar_file *file, void *context) {
     (void)context;
-    struct ramfs_node *node = new_node_locked(file->name, false);
-    if (!node) return;
-    node->data = file->data;
-    node->size = node->capacity = file->size;
+    const char *cursor = file->name;
+    while (*cursor == '/') cursor++;
+    while (cursor[0] == '.' && cursor[1] == '/') cursor += 2;
+    if (!*cursor) return;
+
+    struct ramfs_dentry *parent = &root_dentry;
+    irq_spin_lock(&tree_lock);
+    for (;;) {
+        const char *start = cursor;
+        while (*cursor && *cursor != '/') cursor++;
+        size_t length = (size_t)(cursor - start);
+        while (*cursor == '/') cursor++;
+        if (!length || length > VFS_NAME_MAX) {
+            irq_spin_unlock(&tree_lock);
+            return;
+        }
+        char name[VFS_NAME_MAX + 1];
+        memcpy(name, start, length);
+        name[length] = '\0';
+        bool final = !*cursor;
+        struct ramfs_dentry *child = find_child_locked(parent, name);
+        if (!child) {
+            struct vfs_dentry *created = NULL;
+            int result = create_locked(parent, name,
+                final ? VFS_NODE_REGULAR : VFS_NODE_DIRECTORY,
+                final ? 0644 : 0755, &created);
+            if (result < 0) {
+                irq_spin_unlock(&tree_lock);
+                return;
+            }
+            child = dentry_of(created);
+            vfs_dentry_release(created);
+        }
+        if (final) {
+            struct ramfs_inode *inode = inode_of(child->dentry.node);
+            if (inode && child->dentry.node->type == VFS_NODE_REGULAR) {
+                inode->data = file->data;
+                inode->size = inode->capacity = file->size;
+                inode->owns_data = false;
+            }
+            irq_spin_unlock(&tree_lock);
+            return;
+        }
+        if (child->dentry.node->type != VFS_NODE_DIRECTORY) {
+            irq_spin_unlock(&tree_lock);
+            return;
+        }
+        parent = child;
+    }
 }
 
 void ramfs_init(void) {
-    memset(&root, 0, sizeof(root));
-    root.lock = (spinlock_t)SPINLOCK_INIT;
-    root.vnode.ops = &ramfs_node_ops;
-    root.vnode.private = &root;
-    root.vnode.type = VFS_NODE_DIRECTORY;
-    root.ino = 1;
-    root.mode = 0755;
+    memset(&root_inode, 0, sizeof(root_inode));
+    memset(&root_dentry, 0, sizeof(root_dentry));
+    vfs_node_init(&root_inode.vnode, &ramfs_node_ops, &root_inode,
+                  VFS_NODE_DIRECTORY);
+    root_inode.lock = (spinlock_t)SPINLOCK_INIT;
+    root_inode.ino = 1;
+    root_inode.mode = 0755;
+    root_inode.nlink = 2;
+    root_inode.directory = &root_dentry;
     next_ino = 2;
-    nodes = NULL;
+    if (vfs_dentry_init(&root_dentry.dentry, &root_inode.vnode,
+                        NULL, "", &root_dentry) < 0)
+        return;
     tar_foreach(seed_tar_file, NULL);
     vfs_mount_root(&ramfs_fs_ops, NULL);
 }
 
-static int ramfs_open(struct vfs_mount *mount, const char *cwd,
-                      const char *raw_path, int flags,
-                      struct vfs_node **out) {
-    (void)mount;
-    char resolved[VFS_PATH_MAX + 1];
-    if (resolve(cwd, raw_path, resolved) != 0) return -1;
-    const char *path = resolved;
-    int access = flags & O_ACCMODE;
-    irq_spin_lock(&tree_lock);
-    struct ramfs_node *node = find_locked(path);
-
-    if (!node) {
-        if (flags & O_CREAT) {
-            node = new_node_locked(path, false);
+static int ensure_capacity_locked(struct ramfs_inode *inode, size_t size) {
+    if (inode->owns_data && size <= inode->capacity)
+        return 0;
+    size_t capacity = inode->capacity ? inode->capacity : 256;
+    while (capacity < size) {
+        if (capacity > (size_t)-1 / 2) {
+            capacity = size;
+            break;
         }
-    } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
-        irq_spin_unlock(&tree_lock);
-        return -1;
+        capacity *= 2;
     }
-
-    bool directory = node && node->vnode.type == VFS_NODE_DIRECTORY;
-    if (!node || directory != !!(flags & O_DIRECTORY)) {
-        irq_spin_unlock(&tree_lock);
-        return -1;
-    }
-    irq_spin_unlock(&tree_lock);
-
-    if ((flags & O_TRUNC) && access != 0) {
-        irq_spin_lock(&node->lock);
-        if (node->owns_data) kfree(node->data);
-        node->data = NULL;
-        node->size = node->capacity = 0;
-        node->owns_data = true;
-        irq_spin_unlock(&node->lock);
-    }
-    *out = &node->vnode;
-    return 0;
-}
-
-static int ramfs_mkdir(struct vfs_mount *mount, const char *cwd,
-                       const char *raw_path, uint32_t mode) {
-    (void)mount;
-    char resolved[VFS_PATH_MAX + 1];
-    if (resolve(cwd, raw_path, resolved) != 0 || !resolved[0]) return -1;
-    const char *path = resolved;
-    irq_spin_lock(&tree_lock);
-    struct ramfs_node *existing = find_locked(path);
-    if (existing) {
-        int result = existing->vnode.type == VFS_NODE_DIRECTORY ? 0 : -1;
-        irq_spin_unlock(&tree_lock);
-        return result;
-    }
-    struct ramfs_node *node = new_node_locked(path, true);
-    if (node)
-        node->mode = mode & 0777;
-    irq_spin_unlock(&tree_lock);
-    return node ? 0 : -1;
-}
-
-static int ramfs_resolve_directory(struct vfs_mount *mount, const char *cwd,
-                                   const char *path, char *out,
-                                   size_t out_size) {
-    (void)mount;
-    char resolved[VFS_PATH_MAX + 1];
-    if (!out || resolve(cwd, path, resolved) != 0) return -1;
-    irq_spin_lock(&tree_lock);
-    struct ramfs_node *node = find_locked(resolved);
-    int ok = node && node->vnode.type == VFS_NODE_DIRECTORY;
-    irq_spin_unlock(&tree_lock);
-    size_t length = strlen(resolved) + 1;
-    if (!ok || length > out_size) return -1;
-    memcpy(out, resolved, length);
-    return 0;
-}
-
-static int ramfs_lookup(struct vfs_mount *mount, const char *cwd,
-                        const char *path, struct vfs_node **out) {
-    (void)mount;
-    char resolved[VFS_PATH_MAX + 1];
-    if (!out || resolve(cwd, path, resolved) != 0) return -1;
-    irq_spin_lock(&tree_lock);
-    struct ramfs_node *node = find_locked(resolved);
-    *out = node ? &node->vnode : NULL;
-    irq_spin_unlock(&tree_lock);
-    return *out ? 0 : -1;
-}
-
-static int ramfs_node_readdir(struct vfs_node *vnode, size_t index,
-                              struct vfs_dirent *entry) {
-    struct ramfs_node *directory = vnode ? vnode->private : NULL;
-    if (!directory || vnode->type != VFS_NODE_DIRECTORY || !entry) return -1;
-    const char *base = directory == &root ? "" : directory->path;
-    size_t base_length = strlen(base);
-    irq_spin_lock(&tree_lock);
-    size_t current = 0;
-    for (struct ramfs_node *node = nodes; node; node = node->next) {
-        const char *child = node->path;
-        if (base_length) {
-            if (strncmp(child, base, base_length) != 0 || child[base_length] != '/')
-                continue;
-            child += base_length + 1;
-        }
-        if (!*child || strchr(child, '/')) continue;
-        if (current++ != index) continue;
-        size_t length = strlen(child) + 1;
-        if (length > sizeof(entry->name)) { irq_spin_unlock(&tree_lock); return -1; }
-        memcpy(entry->name, child, length);
-        entry->ino = node->ino;
-        entry->type = node->vnode.type;
-        irq_spin_unlock(&tree_lock);
-        return 1;
-    }
-    irq_spin_unlock(&tree_lock);
+    uint8_t *data = capacity ? kmalloc(capacity) : NULL;
+    if (capacity && !data)
+        return -ENOMEM;
+    if (capacity) memset(data, 0, capacity);
+    if (inode->size) memcpy(data, inode->data, inode->size);
+    if (inode->owns_data) kfree(inode->data);
+    inode->data = data;
+    inode->capacity = capacity;
+    inode->owns_data = true;
     return 0;
 }
 
 static long ramfs_node_read(struct vfs_node *vnode, size_t offset,
                             void *buffer, size_t count) {
-    struct ramfs_node *node = vnode ? vnode->private : NULL;
-    if (!node || vnode->type != VFS_NODE_REGULAR) return -1;
-    irq_spin_lock(&node->lock);
-    if (offset > node->size) offset = node->size;
-    if (count > node->size - offset) count = node->size - offset;
-    if (count)
-        memcpy(buffer, node->data + offset, count);
-    irq_spin_unlock(&node->lock);
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode) return -EINVAL;
+    if (vnode->type != VFS_NODE_REGULAR) return -EISDIR;
+    irq_spin_lock(&inode->lock);
+    if (offset > inode->size) offset = inode->size;
+    if (count > inode->size - offset) count = inode->size - offset;
+    if (count) memcpy(buffer, inode->data + offset, count);
+    irq_spin_unlock(&inode->lock);
     return (long)count;
 }
 
 static long ramfs_node_write(struct vfs_node *vnode, size_t offset,
                              const void *buffer, size_t count) {
-    struct ramfs_node *node = vnode ? vnode->private : NULL;
-    if (!node || vnode->type != VFS_NODE_REGULAR
-            || count > (size_t)-1 - offset) return -1;
-    irq_spin_lock(&node->lock);
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode || count > (size_t)-1 - offset) return -EINVAL;
+    if (vnode->type != VFS_NODE_REGULAR) return -EISDIR;
+    irq_spin_lock(&inode->lock);
     size_t end = offset + count;
-    if (!node->owns_data || end > node->capacity) {
-        size_t capacity = node->capacity ? node->capacity : 256;
-        while (capacity < end) {
-            if (capacity > (size_t)-1 / 2) { capacity = end; break; }
-            capacity *= 2;
-        }
-        uint8_t *data = kmalloc(capacity);
-        if (!data) { irq_spin_unlock(&node->lock); return -1; }
-        memset(data, 0, capacity);
-        if (node->size) memcpy(data, node->data, node->size);
-        if (node->owns_data) kfree(node->data);
-        node->data = data;
-        node->capacity = capacity;
-        node->owns_data = true;
+    int result = ensure_capacity_locked(inode, end);
+    if (result < 0) {
+        irq_spin_unlock(&inode->lock);
+        return result;
     }
-    if (offset > node->size) memset(node->data + node->size, 0, offset - node->size);
-    if (count) memcpy(node->data + offset, buffer, count);
-    if (end > node->size) node->size = end;
-    irq_spin_unlock(&node->lock);
+    if (offset > inode->size)
+        memset(inode->data + inode->size, 0, offset - inode->size);
+    if (count) memcpy(inode->data + offset, buffer, count);
+    if (end > inode->size) inode->size = end;
+    irq_spin_unlock(&inode->lock);
     return (long)count;
 }
 
+static int ramfs_node_truncate(struct vfs_node *vnode, size_t size) {
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode) return -EINVAL;
+    if (vnode->type != VFS_NODE_REGULAR) return -EISDIR;
+    irq_spin_lock(&inode->lock);
+    int result = ensure_capacity_locked(inode, size);
+    if (result == 0) {
+        if (size > inode->size)
+            memset(inode->data + inode->size, 0, size - inode->size);
+        inode->size = size;
+    }
+    irq_spin_unlock(&inode->lock);
+    return result;
+}
+
+static int ramfs_node_readdir(struct vfs_node *vnode, size_t index,
+                              struct vfs_dirent *entry) {
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode || !entry) return -EINVAL;
+    if (vnode->type != VFS_NODE_DIRECTORY) return -ENOTDIR;
+
+    irq_spin_lock(&tree_lock);
+    struct ramfs_dentry *directory = inode->directory;
+    if (!directory) {
+        irq_spin_unlock(&tree_lock);
+        return -ENOENT;
+    }
+    struct ramfs_dentry *child = directory->children;
+    while (child && index--) child = child->next_sibling;
+    if (!child) {
+        irq_spin_unlock(&tree_lock);
+        return 0;
+    }
+    struct ramfs_inode *child_inode = inode_of(child->dentry.node);
+    entry->ino = child_inode->ino;
+    entry->type = child->dentry.node->type;
+    memcpy(entry->name, child->dentry.name, strlen(child->dentry.name) + 1);
+    irq_spin_unlock(&tree_lock);
+    return 1;
+}
+
 static int ramfs_node_getattr(struct vfs_node *vnode, struct vfs_attr *attr) {
-    struct ramfs_node *node = vnode ? vnode->private : NULL;
-    if (!node || !attr)
-        return -1;
-    irq_spin_lock(&node->lock);
-    attr->ino = node->ino;
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode || !attr) return -EINVAL;
+    irq_spin_lock(&inode->lock);
+    attr->ino = inode->ino;
     attr->type = vnode->type;
-    attr->mode = node->mode;
-    attr->nlink = 1;
-    attr->uid = 0;
-    attr->gid = 0;
-    attr->size = node->size;
-    irq_spin_unlock(&node->lock);
+    attr->mode = inode->mode;
+    attr->nlink = inode->nlink;
+    attr->uid = inode->uid;
+    attr->gid = inode->gid;
+    attr->size = inode->size;
+    irq_spin_unlock(&inode->lock);
     return 0;
 }
 
+static void ramfs_node_destroy(struct vfs_node *vnode) {
+    struct ramfs_inode *inode = inode_of(vnode);
+    if (!inode || inode == &root_inode) return;
+    if (inode->owns_data) kfree(inode->data);
+    kfree(inode);
+}
+
+static void ramfs_destroy_dentry(struct vfs_dentry *entry) {
+    struct ramfs_dentry *dentry = dentry_of(entry);
+    if (dentry && dentry != &root_dentry)
+        kfree(dentry);
+}
+
 static const struct vfs_fs_ops ramfs_fs_ops = {
-    .open = ramfs_open,
-    .lookup = ramfs_lookup,
-    .mkdir = ramfs_mkdir,
-    .resolve_directory = ramfs_resolve_directory,
+    .root = ramfs_root,
+    .lookup_child = ramfs_lookup_child,
+    .create = ramfs_create,
+    .destroy_dentry = ramfs_destroy_dentry,
 };

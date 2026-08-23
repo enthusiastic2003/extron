@@ -12,6 +12,7 @@
 #include <kernel/proc/futex.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/errno.h>
 #include <kernel/klibc/string.h>
 #include <stdbool.h>
 
@@ -658,7 +659,7 @@ static uint64_t sys_map_initrd(uint64_t name_addr, uint64_t name_len,
  */
 static long copy_user_string(struct proc *p, uint64_t uaddr, char *dst, size_t max) {
     if (max == 0)
-        return -1;
+        return -EINVAL;
     uint64_t checked_page = ~0ULL;
 
     for (size_t i = 0; i < max; i++) {
@@ -666,24 +667,24 @@ static long copy_user_string(struct proc *p, uint64_t uaddr, char *dst, size_t m
         uint64_t page = va & ~((uint64_t)PAGE_SIZE - 1);
         if (page != checked_page) {
             if (!user_buffer_ok(p, page, 1))
-                return -1;
+                return -EFAULT;
             checked_page = page;
         }
         dst[i] = *(const char *)va;
         if (dst[i] == '\0')
             return (long)i;
     }
-    return -1;   /* no terminator within `max` */
+    return -ENAMETOOLONG;   /* no terminator within `max` */
 }
 
 static uint64_t sys_open(uint64_t path_addr, uint64_t flags, uint64_t mode,
                          struct aarch64_frame *f) {
-    (void)mode;
     (void)f;
-    char path[101];
-    if (copy_user_string(my_proc(), path_addr, path, sizeof(path)) < 0)
-        return (uint64_t)-1;
-    return (uint64_t)file_open(my_proc(), path, (int)flags);
+    char path[VFS_PATH_MAX + 1];
+    long result = copy_user_string(my_proc(), path_addr, path, sizeof(path));
+    if (result < 0)
+        return (uint64_t)result;
+    return (uint64_t)file_open(my_proc(), path, (int)flags, (uint32_t)mode);
 }
 
 static uint64_t sys_close(uint64_t fd, uint64_t b, uint64_t c,
@@ -701,10 +702,16 @@ static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
 static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
                           struct aarch64_frame *f) {
     (void)c; (void)f;
-    char path[101];
-    if (copy_user_string(my_proc(), path_addr, path, sizeof(path)) < 0)
-        return (uint64_t)-1;
-    return (uint64_t)vfs_mkdir(my_proc()->cwd, path, (uint32_t)mode);
+    char path[VFS_PATH_MAX + 1];
+    long result = copy_user_string(my_proc(), path_addr, path, sizeof(path));
+    if (result < 0)
+        return (uint64_t)result;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(my_proc(), &cwd) < 0)
+        return (uint64_t)-EIO;
+    result = vfs_mkdir(&cwd, path, (uint32_t)mode);
+    vfs_path_release(&cwd);
+    return (uint64_t)result;
 }
 
 static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
@@ -761,32 +768,45 @@ static uint64_t sys_getcwd(uint64_t buffer, uint64_t size, uint64_t c,
                            struct aarch64_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
-    size_t cwd_length = strlen(p->cwd);
-    size_t needed = cwd_length + 2;
-    if (!user_buffer_ok(p, buffer, size) || size < needed) return (uint64_t)-1;
-    char *out = (char *)buffer;
-    out[0] = '/';
-    memcpy(out + 1, p->cwd, cwd_length + 1);
-    return 0;
+    if (!size || !user_buffer_ok(p, buffer, size))
+        return (uint64_t)-EFAULT;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return (uint64_t)-EIO;
+    int result = vfs_get_path(&cwd, (char *)buffer, (size_t)size);
+    vfs_path_release(&cwd);
+    return (uint64_t)(result == -ENAMETOOLONG ? -ERANGE : result);
 }
 
 static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
                           struct aarch64_frame *f) {
     (void)b; (void)c; (void)f;
-    char path[VFS_PATH_MAX + 1], resolved[VFS_PATH_MAX + 1];
+    char path[VFS_PATH_MAX + 1];
     struct proc *p = my_proc();
-    if (copy_user_string(p, path_addr, path, sizeof(path)) < 0
-            || vfs_resolve_directory(p->cwd, path, resolved,
-                                     sizeof(resolved)) != 0)
-        return (uint64_t)-1;
-    memcpy(p->cwd, resolved, strlen(resolved) + 1);
+    long copied = copy_user_string(p, path_addr, path, sizeof(path));
+    if (copied < 0)
+        return (uint64_t)copied;
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return (uint64_t)-EIO;
+    struct vfs_path resolved;
+    int result = vfs_lookup_path(&cwd, path, &resolved);
+    vfs_path_release(&cwd);
+    if (result < 0)
+        return (uint64_t)result;
+    if (resolved.dentry->node->type != VFS_NODE_DIRECTORY) {
+        vfs_path_release(&resolved);
+        return (uint64_t)-ENOTDIR;
+    }
+    proc_cwd_set(p, &resolved);
+    vfs_path_release(&resolved);
     return 0;
 }
 
 static uint64_t sys_readdir(uint64_t fd, uint64_t buffer, uint64_t size,
                             struct aarch64_frame *f) {
     (void)f;
-    if (!user_buffer_ok(my_proc(), buffer, size)) return (uint64_t)-1;
+    if (!user_buffer_ok(my_proc(), buffer, size)) return (uint64_t)-EFAULT;
     return (uint64_t)file_readdir(my_proc(), (int)fd, (void *)buffer, size);
 }
 
@@ -815,18 +835,25 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, stat_addr, sizeof(struct extron_stat)))
-        return (uint64_t)-1;
+        return (uint64_t)-EFAULT;
     struct vfs_attr attr;
     if (target == 0) {
         char path[VFS_PATH_MAX + 1];
-        if (copy_user_string(p, value, path, sizeof(path)) < 0
-                || vfs_stat(p->cwd, path, &attr) != 0)
-            return (uint64_t)-1;
+        long copied = copy_user_string(p, value, path, sizeof(path));
+        if (copied < 0)
+            return (uint64_t)copied;
+        struct vfs_path cwd;
+        if (proc_cwd_snapshot(p, &cwd) < 0)
+            return (uint64_t)-EIO;
+        int result = vfs_stat(&cwd, path, &attr);
+        vfs_path_release(&cwd);
+        if (result < 0)
+            return (uint64_t)result;
     } else if (target == 1) {
         if (file_info(p, (int)value, &attr) != 0)
-            return (uint64_t)-1;
+            return (uint64_t)-EBADF;
     } else {
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     }
     struct extron_stat *st = (struct extron_stat *)stat_addr;
     memset(st, 0, sizeof(*st));

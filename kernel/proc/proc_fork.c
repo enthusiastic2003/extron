@@ -72,7 +72,10 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
     child->user_argv = parent->user_argv;
     signal_process_fork(child, parent);
     child->main_thread.signal_mask = caller->signal_mask;
-    memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
+    struct vfs_path parent_cwd;
+    proc_cwd_snapshot(parent, &parent_cwd);
+    vfs_path_release(&child->cwd);
+    child->cwd = parent_cwd;
     file_table_clone(child, parent);
 
     /* The child's trap frame goes at the very top of its kernel stack,

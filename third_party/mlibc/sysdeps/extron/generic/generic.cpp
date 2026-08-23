@@ -208,16 +208,18 @@ gid_t sys_getgid() { return 0; }
 gid_t sys_getegid() { return 0; }
 
 int sys_getcwd(char *buffer, size_t size) {
-    return syscall2(SYS_GETCWD, (long)buffer, size) < 0 ? ERANGE : 0;
+    long ret = syscall2(SYS_GETCWD, (long)buffer, size);
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_chdir(const char *path) {
-    return syscall1(SYS_CHDIR, (long)path) < 0 ? ENOENT : 0;
+    long ret = syscall1(SYS_CHDIR, (long)path);
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_open_dir(const char *path, int *handle) {
     long ret = syscall3(SYS_OPEN, (long)path, 0200000, 0);
-    if (ret < 0) return ENOENT;
+    if (ret < 0) return -ret;
     *handle = (int)ret;
     return 0;
 }
@@ -225,7 +227,7 @@ int sys_open_dir(const char *path, int *handle) {
 int sys_read_entries(int handle, void *buffer, size_t max_size,
                      size_t *bytes_read) {
     long ret = syscall3(SYS_READDIR, handle, (long)buffer, max_size);
-    if (ret < 0) return EBADF;
+    if (ret < 0) return -ret;
     *bytes_read = (size_t)ret;
     return 0;
 }
@@ -240,7 +242,7 @@ int sys_stat(fsfd_target target, int fd, const char *path, int,
         ret = syscall3(SYS_STAT, 0, (long)path, (long)statbuf);
     else
         return ENOTSUP;
-    return ret < 0 ? ENOENT : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 extern "C" void __mlibc_signal_restore();
@@ -485,29 +487,27 @@ int sys_write(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
 int sys_open(const char *pathname, int flags, mode_t mode, int *fd) {
     long ret = syscall3(SYS_OPEN, (long)pathname, flags, mode);
     if (ret < 0)
-        return ENOENT;
+        return -ret;
     *fd = (int)ret;
     return 0;
 }
 
 int sys_close(int fd) {
     long ret = syscall1(SYS_CLOSE, fd);
-    return ret < 0 ? EBADF : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_seek(int fd, off_t offset, int whence, off_t *new_offset) {
-    if (fd == 0 || fd == 1 || fd == 2)
-        return ESPIPE;  // not seekable — tells mlibc to treat as pipe_like
     long ret = syscall3(SYS_LSEEK, fd, offset, whence);
     if (ret < 0)
-        return EINVAL;
+        return -ret;
     *new_offset = ret;
     return 0;
 }
 
 int sys_mkdir(const char *path, mode_t mode) {
     long ret = syscall2(SYS_MKDIR, (long)path, mode);
-    return ret < 0 ? EIO : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_pipe(int *fds, int flags) {

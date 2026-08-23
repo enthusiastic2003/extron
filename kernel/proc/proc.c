@@ -100,7 +100,10 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->stop_event_pending = false;
     p->continue_event_pending = false;
     signal_process_init(p);
-    p->cwd[0] = '\0';
+    p->cwd_lock = (spinlock_t)SPINLOCK_INIT;
+    p->cwd = (struct vfs_path){0};
+    if (vfs_root_path(&p->cwd) < 0)
+        panic("proc_init: VFS root is not mounted");
     file_table_init(p);
 
     struct thread *t = &p->main_thread;
@@ -108,6 +111,28 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
         panic("aarch64 proc_init: kernel stack allocation failed");
     p->threads = t;
     p->thread_count = 1;
+}
+
+int proc_cwd_snapshot(struct proc *p, struct vfs_path *out) {
+    if (!p || !out)
+        return -1;
+    irq_spin_lock(&p->cwd_lock);
+    *out = p->cwd;
+    vfs_path_retain(out);
+    irq_spin_unlock(&p->cwd_lock);
+    return 0;
+}
+
+void proc_cwd_set(struct proc *p, const struct vfs_path *path) {
+    if (!p || !path || !path->dentry)
+        return;
+    struct vfs_path replacement = *path;
+    vfs_path_retain(&replacement);
+    irq_spin_lock(&p->cwd_lock);
+    struct vfs_path old = p->cwd;
+    p->cwd = replacement;
+    irq_spin_unlock(&p->cwd_lock);
+    vfs_path_release(&old);
 }
 
 /*
@@ -127,6 +152,7 @@ void proc_destroy(struct proc *p) {
         return;
 
     file_table_close_all(p);
+    vfs_path_release(&p->cwd);
     if (p->mm) {
         vm_space_destroy(p->mm);   /* pages, then the tables under them */
         p->mm = NULL;

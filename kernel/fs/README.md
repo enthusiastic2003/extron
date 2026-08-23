@@ -1,47 +1,55 @@
 # Extron VFS
 
 `vfs.c` is the filesystem-neutral boundary between process-facing file code
-and concrete filesystems. The first root mount is ramfs, but descriptors and
-syscalls no longer store or inspect `struct ramfs_node`.
+and concrete filesystems. Ramfs supplies the root filesystem, but descriptors,
+cwd state, and syscalls do not depend on ramfs internals.
 
-There are two operation layers:
+## Stage 1 foundation
 
-- `vfs_fs_ops` owns pathname namespace operations for a mount: open, lookup,
-  mkdir, and resolving a directory for `chdir`.
-- `vfs_node_ops` owns operations on a resolved object: read, write, readdir,
-  and getattr.
+The namespace now has separate objects for the two roles POSIX filesystems
+eventually need:
 
-An `open_file` contains a `vfs_node`, shared offset, and status flags. The
-node provides stable metadata (`ino`, type, mode, link count, uid/gid, and
-size) independent of its backing filesystem. Pipe and console descriptions
-remain non-vnode kernel objects for now; devfs will move console devices into
-the VFS later.
+- a `vfs_dentry` is one name in one parent directory;
+- a `vfs_node` is the inode-like object named by that dentry.
 
-## Current root filesystem
+Both objects are reference counted. Namespace membership owns the baseline
+dentry reference, open-file descriptions retain nodes, mounts retain their
+roots and covered paths, and each process retains its cwd as a `vfs_path`.
+Fork takes another cwd reference rather than copying a pathname. Cwd snapshots
+are protected against concurrent `chdir()` by another thread in the process.
 
-Ramfs remains a single in-memory namespace lazily seeded from the initrd.
-Seeded file contents are immutable views until the first write, at which point
-ramfs allocates owned storage. The VFS migration intentionally preserves this
-behavior and the existing pathname limit.
+Pathnames are walked one component at a time. Absolute and relative paths,
+repeated slashes, `.`, `..`, missing parents, non-directory intermediate
+components, a 255-byte component limit, and a 1024-byte path limit are handled
+at the common VFS layer. Filesystems only implement direct-child lookup and
+creation. VFS and file operations return negative, Linux-compatible errno
+values; the Extron mlibc sysdeps translate those into userspace `errno`.
 
-The current mount router contains one root mount. Adding devfs should replace
-that single slot with longest-prefix mount lookup while leaving descriptor and
-syscall code unchanged.
+The fixed-size mount table currently contains only the root ramfs. Its routing
+and covered-path machinery is in place so a later devfs can be mounted without
+changing pathname callers. There is no unmount operation yet.
 
-## Next layers
+## Ramfs
 
-The next filesystem work should proceed through VFS operations rather than
-ramfs calls:
+Ramfs is a real parent/child hierarchy of dentries and inodes. Initrd entries
+seed that hierarchy at boot, creating intermediate directories when an archive
+entry contains `/`. Seeded file contents remain immutable initrd views until
+the first write or truncation, when ramfs creates owned storage. Runtime files
+and directories retain their requested creation mode as metadata.
 
-1. component-by-component lookup with explicit parent validation;
-2. unlink/rmdir and rename;
-3. symlink/readlink and no-follow lookup rules;
-4. timestamps, link counts, ownership, umask, and permission enforcement;
-5. a devfs mount for `/dev/console`, `/dev/tty`, `/dev/null`, and `/dev/zero`;
-6. a block-device/cache layer and an existing persistent filesystem.
+The current namespace is append-only: namespace references are deliberately
+not removed because `unlink`, `rmdir`, and `rename` are not implemented yet.
+That keeps lifetime rules explicit instead of pretending deletion works.
 
-`usr/mlibc_tests/mlibc_file_test.c` checks VFS-visible metadata and verifies
-that pathname `stat` and descriptor `fstat` identify the same inode. The
-kernel also has compile-time assertions for mlibc's AArch64 `struct stat`
-layout; this migration exposed and fixed the previous 32-bit `st_nlink`
-assumption that shifted `st_size` in userspace.
+## Deliberately not in Stage 1
+
+- unlink/rmdir, rename, hard links, symlinks, and no-follow lookup rules;
+- timestamps, umask, ownership changes, and permission enforcement;
+- devfs and VFS-backed console/TTY device nodes;
+- VFS-based executable loading (exec still reads an initrd image directly);
+- persistent/block-backed storage and an unmount protocol.
+
+`usr/mlibc_tests/mlibc_file_test.c` exercises the Stage 1 contract end to end:
+nested lookup and creation, `.`/`..`, cwd reconstruction and fork inheritance,
+long paths, creation modes, seeded-file COW behavior, shared open-file offsets,
+and distinct `ENOENT`, `ENOTDIR`, and `EEXIST` failures through mlibc.
