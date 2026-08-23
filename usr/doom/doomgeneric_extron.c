@@ -19,10 +19,14 @@
 #include <string.h>
 #include <stdint.h>
 
-#include <extron/syscall.h>
-#include <extron/fb.h>
+#include "../include/extron/syscall.h"
+#include "../include/extron/fb.h"
 
 static const struct extron_fb_info *fb;
+
+static uint64_t extron_uptime_ms(void) {
+    return (uint64_t)__syscall0(SYS_UPTIME_MS);
+}
 
 /* Where DOOM's 640x400 image sits inside whatever the display actually
  * is. Computed from the reported geometry, not assumed. */
@@ -141,7 +145,7 @@ static void expire_holds(uint32_t now) {
 }
 
 static void poll_input(void) {
-    uint32_t now = (uint32_t)sys_uptime_ms();
+    uint32_t now = (uint32_t)extron_uptime_ms();
     int c;
     while ((c = extron_input_getc()) >= 0) {
         unsigned char key = to_doom_key(c);
@@ -227,11 +231,11 @@ void DG_DrawFrame(void) {
 }
 
 void DG_SleepMs(uint32_t ms) {
-    sys_sleep(ms / 1000, (long)(ms % 1000) * 1000000L);
+    __syscall2(SYS_SLEEP, ms / 1000, (long)(ms % 1000) * 1000000L);
 }
 
 uint32_t DG_GetTicksMs(void) {
-    return (uint32_t)sys_uptime_ms();
+    return (uint32_t)extron_uptime_ms();
 }
 
 int DG_GetKey(int *pressed, unsigned char *key) {
@@ -253,11 +257,10 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    /* There is no command line to inherit — crt0 hands main() argc=0 —
-     * so the arguments DOOM needs are supplied here. -iwad names the WAD
-     * directly rather than letting d_iwad.c hunt through directories
-     * that do not exist on this system; the name is resolved by fopen(),
-     * which our libc backs with SYS_MAP_INITRD. */
+    /* The kernel now supplies a real SysV argc/argv stack for mlibc, but
+     * there is still no shell to provide Doom's command line. Supply the
+     * fixed arguments here. -iwad avoids unnecessary directory discovery
+     * and names the WAD exposed through the ramfs directly. */
     static char arg0[] = "doom";
     static char arg1[] = "-iwad";
     static char arg2[] = "doom1.wad";

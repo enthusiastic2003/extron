@@ -6,8 +6,8 @@
 #include <stdbool.h>
 
 /* Range managed by vm_allocate_region()/vm_free_region() — clear of the
- * fixed test VAs used elsewhere (ELF load at 0x400000, stack at
- * 0x500000). 256MB is generous for a hobby kernel and easy to raise. */
+ * fixed mappings used elsewhere (ELF image from 0x400000, stack at
+ * 0x1000000). 256MB is generous for a hobby kernel and easy to raise. */
 #define USER_HEAP_START 0x10000000UL
 #define USER_HEAP_SIZE  0x10000000UL /* 256MB */
 

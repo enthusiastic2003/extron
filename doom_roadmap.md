@@ -1,5 +1,11 @@
 # DOOM Roadmap — DONE
 
+Update: DOOM now builds with the real `aarch64-extron` toolchain and mlibc.
+The original minimal-libc work described below remains as historical context.
+The kernel now exposes one writable ramfs namespace, lazily seeded by initrd
+files with copy-on-write data. Doom's upstream stdio WAD backend works through
+ordinary `fopen`/`fread`/`fseek`, while configs and saves can be created in RAM.
+
 DOOM runs on real hardware, concurrently with a second process, on one core.
 `captures/doom_hardware.png` is the display; the serial log alongside it shows a
 Fibonacci ticker waking on a timer once a second with `t == n` for 44 consecutive

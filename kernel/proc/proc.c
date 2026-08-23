@@ -7,6 +7,7 @@
 #include <kernel/panic.h>
 #include <kernel/console.h>
 #include <kernel/mm/uvm.h>
+#include <kernel/fs/file.h>
 #include <arch/irq_spinlock.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -37,6 +38,7 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->user_argv = 0;
     p->parent = NULL;
     p->exit_status = 0;
+    file_table_init(p);
 
     /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
      * have a guard page. kmalloc hands back byte-granularity memory from
@@ -90,6 +92,7 @@ void proc_destroy(struct proc *p) {
     if (!p)
         return;
 
+    file_table_close_all(p);
     if (p->mm) {
         vm_space_destroy(p->mm);   /* pages, then the tables under them */
         p->mm = NULL;

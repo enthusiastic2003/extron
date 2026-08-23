@@ -9,6 +9,7 @@
 #include <kernel/drivers/serial.h>
 #include <kernel/drivers/timer.h>
 #include <kernel/fs/tar.h>
+#include <kernel/fs/ramfs.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
@@ -127,6 +128,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * fdt_get_initrd_region() (aarch64-specific) -> a real or synthesized
      * multiboot2 MODULE tag -> tar_init(). */
     tar_init(mb2_addr);
+    ramfs_init();
     tar_list();
     struct tar_file f;
     if (tar_open("hello.txt", &f)) {
@@ -208,50 +210,25 @@ void kernel_stage2(uint64_t mb2_addr) {
      * for at all).
      */
 
-    /* TEMPORARY — real-hardware verification of the four mlibc_tests/
-     * ports (already 0-failure in QEMU) plus the pre-existing
-     * mlibc_syscall_test.c. DOOM/fib_ticker/key_monitor parked below
-     * for this run; see git history / uncomment to bring them back once
-     * hardware confirms these. */
-    struct proc *badptr = proc_create_from_binary("mlibc_badptr_test.elf", 0);
-    if (!badptr) panic("kernel_stage2: failed to create mlibc_badptr_test");
-    sched_policy_add(badptr);
-
-    struct proc *fptest = proc_create_from_binary("mlibc_fp_test.elf", 0);
-    if (!fptest) panic("kernel_stage2: failed to create mlibc_fp_test");
-    sched_policy_add(fptest);
-
-    struct proc *memstress = proc_create_from_binary("mlibc_mem_stress.elf", 0);
-    if (!memstress) panic("kernel_stage2: failed to create mlibc_mem_stress");
-    sched_policy_add(memstress);
-
-    struct proc *forkstress = proc_create_from_binary("mlibc_fork_stress.elf", 0);
-    if (!forkstress) panic("kernel_stage2: failed to create mlibc_fork_stress");
-    sched_policy_add(forkstress);
-
-    struct proc *syscalltest = proc_create_from_binary("mlibc_syscall_test.elf", 0);
-    if (!syscalltest) panic("kernel_stage2: failed to create mlibc_syscall_test");
-    sched_policy_add(syscalltest);
-
     /* DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
      * ring at creation, so its frame loop makes no syscall to draw and
      * none to poll input — only SYS_SLEEP to pace itself and
      * SYS_UPTIME_MS for its clock. The WAD comes out of the initrd via
-     * SYS_MAP_INITRD, mapped rather than copied.
+     * the ramfs, which lazily exposes initrd files and copies them only
+     * if a process writes to them.
      *
-     * Creation is allowed to fail without panicking the boot: the
-     * firmware refuses ALLOCATE_BUFFER with no HDMI sink attached
-     * (config.txt has no hdmi_force_hotplug), and a headless board is a
-     * normal way to run this kernel, not a reason to take the rest of
-     * the boot down with it.
-     *
-     * struct proc *doom = proc_create_from_binary("doom.elf",
-     *                                             PROC_MAP_FRAMEBUFFER);
-     * if (doom) {
-     *     sched_policy_add(doom);
-     * } else {
-     *     kprintf("[BOOT] no framebuffer — skipping DOOM, continuing headless\n");
-     * }
+     * This focused hardware test requires a display: a failed process
+     * creation means either framebuffer setup or the mlibc Doom image
+     * failed, so stop with an explicit diagnostic rather than reaching
+     * sched_start() with an empty run queue. */
+    struct proc *doom = proc_create_from_binary("doom.elf",
+                                                PROC_MAP_FRAMEBUFFER);
+    if (!doom)
+        panic("kernel_stage2: failed to create mlibc DOOM");
+    sched_policy_add(doom);
+
+    /* The normal concurrent demonstration can be restored after this
+     * focused mlibc migration test:
      *
      * struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
      * if (!fib) {
@@ -266,7 +243,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * sched_policy_add(keymon);
      */
 
-    kprintf("Starting scheduler — mlibc_tests (badptr, fp, mem_stress, fork_stress, syscall_test).\n");
+    kprintf("Starting scheduler — mlibc DOOM hardware test.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

@@ -6,6 +6,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/sync/spinlock.h>
+#include <kernel/fs/file.h>
 
 struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular include */
 
@@ -114,6 +115,7 @@ struct proc {
      * it — see sys_wait() on why that is a leak and not a crash. */
     struct proc         *parent;
     int                 exit_status;
+    struct open_file    *files[PROC_MAX_FDS];
 };
 
 /* Size of the per-process kernel stack (interrupts land here). Was 4

@@ -21,6 +21,10 @@
 #define SYS_UPTIME_MS   10
 #define SYS_MAP_INITRD  11
 #define SYS_WAIT        12
+#define SYS_OPEN        13
+#define SYS_CLOSE       14
+#define SYS_LSEEK       15
+#define SYS_MKDIR       16
 
 /* x8 = number, x0-x2 = args, result in x0 — the AAPCS64/Linux
  * convention the kernel's syscall.h documents. "memory" clobber so the

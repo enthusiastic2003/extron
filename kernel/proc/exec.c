@@ -13,8 +13,13 @@
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
  * has its own independent TTBR0 (see kernel/arch/aarch64/proc.c's
- * proc_init(), which this calls). */
-#define USER_STACK_VA 0x500000
+ * proc_init(), which this calls).
+ *
+ * This used to start at 0x500000, only 1 MiB above the required ELF base.
+ * That fit the small test programs but collided with mlibc DOOM: its second
+ * PT_LOAD ends at 0x557018. Keep generous image-growth room while remaining
+ * far below the userspace heap at 0x10000000. */
+#define USER_STACK_VA 0x1000000
 
 /* One page was enough while every payload was hand-written assembly with
  * no call depth and no locals. C code blows through that immediately —
@@ -273,6 +278,8 @@ static int exec_image_build(const char *binary_path, unsigned flags,
         memset(phys_to_virt_hhdm(stack_phys), 0, PAGE_SIZE);
         if (map_page(ttbr0, USER_STACK_VA + i * PAGE_SIZE, stack_phys,
                      PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
+            kprintf("[EXEC] stack VA collision at %p while loading %s\n",
+                    (void *)(USER_STACK_VA + i * PAGE_SIZE), binary_path);
             pmm_free_page((void *)stack_phys);
             goto fail;
         }

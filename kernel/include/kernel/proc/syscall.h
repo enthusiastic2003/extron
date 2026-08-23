@@ -28,6 +28,10 @@
 #define SYS_UPTIME_MS   10
 #define SYS_MAP_INITRD  11  /* map an initrd file read-only into the caller */
 #define SYS_WAIT        12  /* block until a child exits, then reap it */
+#define SYS_OPEN        13
+#define SYS_CLOSE       14
+#define SYS_LSEEK       15
+#define SYS_MKDIR       16
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

@@ -8,6 +8,8 @@
 #include <kernel/drivers/keyboard.h>
 #include <kernel/fs/tar.h>
 #include <kernel/proc/exec.h>
+#include <kernel/fs/file.h>
+#include <kernel/fs/ramfs.h>
 #include <kernel/klibc/string.h>
 #include <stdbool.h>
 
@@ -82,6 +84,12 @@ static bool user_buffer_ok(struct proc *p, uint64_t addr, uint64_t len) {
 static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count,
                           struct aarch64_frame *f) {
     (void)f;
+    if (fd >= 3) {
+        if (!user_buffer_ok(my_proc(), buf_addr, count))
+            return (uint64_t)-1;
+        return (uint64_t)file_write(my_proc(), (int)fd,
+                                    (const void *)buf_addr, count);
+    }
     if (fd != 1 && fd != 2) {
         kprintf("[SYSCALL write] unsupported fd=%lu\n", (unsigned long)fd);
         return (uint64_t)-1;
@@ -165,6 +173,11 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
                          struct aarch64_frame *f) {
     (void)f;
+    if (fd >= 3) {
+        if (!user_buffer_ok(my_proc(), buf_addr, count))
+            return (uint64_t)-1;
+        return (uint64_t)file_read(my_proc(), (int)fd, (void *)buf_addr, count);
+    }
     if (fd != 0) {
         kprintf("[SYSCALL read] unsupported fd=%lu\n", (unsigned long)fd);
         return (uint64_t)-1;
@@ -341,6 +354,37 @@ static long copy_user_string(struct proc *p, uint64_t uaddr, char *dst, size_t m
             return (long)i;
     }
     return -1;   /* no terminator within `max` */
+}
+
+static uint64_t sys_open(uint64_t path_addr, uint64_t flags, uint64_t mode,
+                         struct aarch64_frame *f) {
+    (void)mode;
+    (void)f;
+    char path[101];
+    if (copy_user_string(my_proc(), path_addr, path, sizeof(path)) < 0)
+        return (uint64_t)-1;
+    return (uint64_t)file_open(my_proc(), path, (int)flags);
+}
+
+static uint64_t sys_close(uint64_t fd, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    return (uint64_t)file_close(my_proc(), (int)fd);
+}
+
+static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
+                          struct aarch64_frame *f) {
+    (void)f;
+    return (uint64_t)file_seek(my_proc(), (int)fd, (int64_t)offset, (int)whence);
+}
+
+static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)mode; (void)c; (void)f;
+    char path[101];
+    if (copy_user_string(my_proc(), path_addr, path, sizeof(path)) < 0)
+        return (uint64_t)-1;
+    return (uint64_t)ramfs_mkdir(path);
 }
 
 /*
@@ -527,6 +571,10 @@ static const syscall_fn syscall_table[] = {
     [SYS_UPTIME_MS]  = sys_uptime_ms,
     [SYS_MAP_INITRD] = sys_map_initrd,
     [SYS_WAIT]       = sys_wait,
+    [SYS_OPEN]       = sys_open,
+    [SYS_CLOSE]      = sys_close,
+    [SYS_LSEEK]      = sys_lseek,
+    [SYS_MKDIR]      = sys_mkdir,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

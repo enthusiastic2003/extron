@@ -5,6 +5,7 @@
 #include <kernel/mm/paging.h>
 #include <kernel/console.h>
 #include <kernel/klibc/string.h>
+#include <kernel/fs/file.h>
 #include <arch/exceptions.h>
 
 /*
@@ -64,6 +65,7 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
     child->parent    = parent;
     child->user_argc = parent->user_argc;
     child->user_argv = parent->user_argv;
+    file_table_clone(child, parent);
 
     /* The child's trap frame goes at the very top of its kernel stack,
      * in the same place SAVE_CONTEXT would have built one. proc_init()

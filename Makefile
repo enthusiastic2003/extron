@@ -88,6 +88,7 @@ USER_CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
 # checked into this repo and confirmed sufficient on its own.
 MLIBC_GCC     ?= $(HOME)/extron-toolkit/toolchain/bin/aarch64-extron-gcc
 MLIBC_SYSROOT := usr/mlibc-sysroot
+MLIBC_LIBC    := $(MLIBC_SYSROOT)/lib/libc.a
 MLIBC_C_SRC   := $(wildcard usr/mlibc_tests/*.c)
 MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/%.elf,$(MLIBC_C_SRC))
 
@@ -97,10 +98,10 @@ INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC)) \
                 $(BUILD)/initrd/doom.elf
 
 # --- DOOM ---
-# doomgeneric's own sources, compiled against our libc rather than a
-# host one. Only w_file_stdc.c's stdio backend is unusual: our fopen()
-# maps a file out of the initrd (SYS_MAP_INITRD) instead of opening a
-# descriptor, so DOOM's WAD loading works unmodified.
+# doomgeneric's own sources, compiled against mlibc with the same real
+# aarch64-extron toolchain as usr/mlibc_tests/. Extron intentionally has
+# a writable ramfs lazily seeded from the initrd, so Doom uses its
+# upstream w_file_stdc.c through ordinary mlibc stdio calls.
 #
 # doomgeneric_*.c for the other platforms are excluded — ours is
 # usr/doom/doomgeneric_extron.c, per the port's own instructions
@@ -118,7 +119,11 @@ DOOM_SRC  := dummy am_map doomdef doomstat dstrings d_event d_items d_iwad \
              z_zone w_file_stdc i_input i_video doomgeneric
 DOOM_OBJ  := $(patsubst %,$(BUILD)/doom/%.o,$(DOOM_SRC)) \
              $(BUILD)/doom/doomgeneric_extron.o
-DOOM_CFLAGS := $(USER_CFLAGS) -I$(DOOM_DIR) -DNORMALUNIX -DLINUX -Wno-unused-but-set-variable
+DOOM_DEPS := $(DOOM_OBJ:.o=.d)
+DOOM_CFLAGS := --sysroot="$(abspath $(MLIBC_SYSROOT))" -O2 -Wall -Wextra \
+               -MMD -MP \
+               -I$(DOOM_DIR) -DNORMALUNIX -DLINUX \
+               -Wno-unused-but-set-variable
 INITRD_DATA  := $(patsubst usr/%,$(BUILD)/initrd/%,$(USER_DATA))
 INITRD       := initrd.tar
 
@@ -164,15 +169,16 @@ $(BUILD)/initrd/%: usr/%
 
 $(BUILD)/doom/%.o: $(DOOM_DIR)/%.c
 	mkdir -p $(dir $@)
-	$(USER_CC) $(DOOM_CFLAGS) -c $< -o $@
+	$(MLIBC_GCC) $(DOOM_CFLAGS) -c $< -o $@
 
 $(BUILD)/doom/doomgeneric_extron.o: usr/doom/doomgeneric_extron.c
 	mkdir -p $(dir $@)
-	$(USER_CC) $(DOOM_CFLAGS) -c $< -o $@
+	$(MLIBC_GCC) $(DOOM_CFLAGS) -c $< -o $@
 
-$(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(USER_LIB_OBJ)
+$(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
-	$(USER_CC) $(USER_CFLAGS) $(USER_LDFLAGS) $(DOOM_OBJ) $(USER_LIB_OBJ) -o $@
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $(DOOM_OBJ) \
+		-o $@ -static -O2
 
 $(INITRD): $(INITRD_ELF) $(INITRD_DATA)
 	# Explicit filenames, not "-C dir ." — the latter adds a "./" prefix
@@ -193,3 +199,4 @@ clean:
 # Header dependencies emitted by -MMD. Leading '-' so a clean tree (no .d
 # files yet) isn't an error.
 -include $(DEPS)
+-include $(DOOM_DEPS)
