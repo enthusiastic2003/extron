@@ -75,6 +75,7 @@
 #define SYS_FCHOWN      64
 #define SYS_FUTIMENS    65
 #define SYS_FCHDIR      66
+#define SYS_REBOOT      71
 
 struct extron_thread_create_args {
     uintptr_t entry;
@@ -131,5 +132,16 @@ void     sys_thread_exit(void) __attribute__((noreturn));
 long     sys_thread_join(long tid);
 long     sys_futex_wait(int *word, int expected, uint64_t timeout_ms);
 long     sys_futex_wake(int *word);
+
+/* Resets the machine. Root-only — returns -1 (errno EPERM) otherwise;
+ * never returns at all on success. static inline like __syscall3 above,
+ * not a declaration resolved elsewhere: sys_write()/sys_read()/etc.
+ * below this point are stale declarations from the retired usr/lib/
+ * syscall.c and have no implementation anywhere any more — nothing
+ * still calls them (DOOM uses __syscall0/1/2/3 directly), but they're
+ * left as-is rather than touched by an unrelated change. */
+static inline long sys_reboot(void) {
+    return __syscall0(SYS_REBOOT);
+}
 
 #endif

@@ -7,6 +7,7 @@
 #include <kernel/drivers/timer.h>
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/tty.h>
+#include <kernel/drivers/power.h>
 #include <kernel/fs/tar.h>
 #include <kernel/proc/exec.h>
 #include <kernel/proc/futex.h>
@@ -673,6 +674,24 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
     struct proc *p = my_proc();
     vm_free_region(p->mm, addr, size);
     return 0;
+}
+
+/* Root-only, matching real Unix's CAP_SYS_BOOT/reboot(2) gate — every
+ * other privilege check in this file exists precisely so an arbitrary
+ * process can't do something this drastic, and a syscall that resets
+ * the whole machine is the most drastic one there is. Never returns on
+ * success (power_reset() loops on the SoC actually resetting), so
+ * there's no "success" value to report — only the permission failure. */
+static uint64_t sys_reboot(uint64_t a, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    irq_spin_lock(&p->cred_lock);
+    bool root = p->euid == 0;
+    irq_spin_unlock(&p->cred_lock);
+    if (!root)
+        return (uint64_t)-EPERM;
+    power_reset();
 }
 
 /* Monotonic milliseconds since boot. Takes no pointer, so nothing to
@@ -1935,6 +1954,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_SETRESGID] = sys_setresgid,
     [SYS_MMAP] = sys_mmap,
     [SYS_MUNMAP] = sys_munmap,
+    [SYS_REBOOT] = sys_reboot,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

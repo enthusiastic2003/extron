@@ -47,8 +47,10 @@ KERNEL_IMG := $(BUILD)/kernel8.img
 # There is no hand-rolled userspace libc in this tree — see git history
 # for usr/lib/'s old crt0.S/malloc.c/stdio.c/etc, and for usr/fib_ticker.c
 # /usr/key_monitor.c (the two lone usr/*.c demos that used to link it),
-# if either is ever needed again. Every real usr/ payload is either
-# usr/mlibc_tests/*.c, usr/doom/, or usr/busybox/ now.
+# if either is ever needed again. usr/*.c files (usr/reboot.c today) build
+# against real mlibc via MLIBC_GCC below, same as usr/mlibc_tests/*.c,
+# usr/doom/, and usr/busybox/.
+USER_C_SRC   := $(wildcard usr/*.c)
 USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad)
 
 # --- mlibc-based userland tests (usr/mlibc_tests/) ---
@@ -66,7 +68,8 @@ MLIBC_LIBC    := $(MLIBC_SYSROOT)/lib/libc.a
 MLIBC_C_SRC   := $(wildcard usr/mlibc_tests/*.c)
 MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/%.elf,$(MLIBC_C_SRC))
 
-INITRD_ELF   := $(MLIBC_ELF) \
+INITRD_ELF   := $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
+                $(MLIBC_ELF) \
                 $(BUILD)/initrd/doom.elf \
                 $(BUILD)/initrd/sh
 
@@ -119,6 +122,10 @@ $(KERNEL_ELF): $(OBJ) kernel/arch/aarch64/linker.ld
 
 $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
+
+$(BUILD)/initrd/%.elf: usr/%.c $(MLIBC_LIBC)
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
 
 $(BUILD)/initrd/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)

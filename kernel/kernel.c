@@ -18,6 +18,7 @@
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/mailbox.h>
 #include <kernel/drivers/fb.h>
+#include <kernel/drivers/power.h>
 
 /**
  * @brief Stage 1: Initialization Phase.
@@ -198,6 +199,10 @@ void kernel_stage2(uint64_t mb2_addr) {
      * between its two available regions. */
     mailbox_init();
     mailbox_report();
+
+    /* PM block (watchdog reset) — same self-mapping convention as the
+     * mailbox above, needed before any process can call SYS_REBOOT. */
+    power_init();
 
     /* Ask for 640x480 — a mode this display can actually present. The
      * capture showed it negotiating 4:3, so requesting 16:9 would just
