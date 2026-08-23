@@ -84,6 +84,8 @@
 #define SYS_FCHDIR      66
 #define SYS_SETRESUID   67
 #define SYS_SETRESGID   68
+#define SYS_MMAP        69
+#define SYS_MUNMAP      70
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

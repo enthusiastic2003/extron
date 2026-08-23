@@ -4,27 +4,24 @@
 #include <kernel/proc/proc.h>
 
 /*
- * Loads an ELF binary from the initrd (kernel/fs/tar.h) into a fresh
- * address space and returns a ready-to-schedule struct proc, or NULL on
- * failure (binary not found in the initrd, or a bad ELF). Mirrors
- * x86's proc_create_from_binary() (kernel/proc/exec.c on that side) —
- * same role, same name, simplified for now: no argv/envp/fork parent
- * The returned process initially owns one schedulable main thread.
+ * Loads an ELF binary through the VFS (kernel/proc/exec.c's
+ * load_binary_bytes(), against the caller's own cwd/credentials — root's
+ * for a kernel-initiated boot spawn) into a fresh address space and
+ * returns a ready-to-schedule struct proc, or NULL on failure (not
+ * found, not executable, or a bad ELF). Mirrors x86's
+ * proc_create_from_binary() (kernel/proc/exec.c on that side) — same
+ * role, same name, simplified for now: no argv/envp/fork parent. The
+ * returned process initially owns one schedulable main thread.
  *
- * PROC_MAP_FRAMEBUFFER maps the display into the new process, at a
- * fixed VA with a descriptor page alongside it (see USER_FB_* in
- * kernel/proc/exec.c). Opt-in per process rather than mapped into
- * everything: a process with no business drawing shouldn't have the
- * display in its address space, which is the mistake the UART carried
- * until 268c962.
- *
- * Deliberately NOT a syscall. Handing a process its framebuffer at
- * creation is the same kind of act as handing it its stack, and
- * doomgeneric's porting contract is five DG_* functions with no
- * platform calls beyond them — a SYS_MAP_FB would be a syscall existing
- * only to undo a decision made moments earlier in the same kernel.
+ * Neither the framebuffer nor the keyboard input ring get special
+ * exec-time treatment any more — both are real devices (/dev/fb0,
+ * /dev/input; kernel/fs/devfs.c) a process opens and mmap()s itself,
+ * through the real mmap() syscall, the same way any other program would
+ * reach any other device. That's also why this takes no flags: execve()
+ * is the plain three-argument POSIX call, with nothing extra to opt in
+ * to — see the mistake the UART's identity mapping was until 268c962,
+ * which PROC_MAP_FRAMEBUFFER (now removed) had repeated for the display.
  */
-#define PROC_MAP_FRAMEBUFFER (1u << 0)
 
 /* Bounds on what execve() will carry across. Small on purpose: the
  * whole argument block is laid out inside the single top page of the
@@ -45,8 +42,8 @@ struct exec_image {
     virt_addr_t      argv;      /* user VA of the argv[] array */
 };
 
-struct proc *proc_create_from_binary(const char *binary_path, unsigned flags);
-struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flags,
+struct proc *proc_create_from_binary(const char *binary_path);
+struct proc *proc_create_from_binary_argv(const char *binary_path,
                                           const char *const *args, int argc);
 
 /*

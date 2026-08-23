@@ -390,6 +390,7 @@ uint64_t arch_translate_vm_flags(int vm_flags) {
     if (vm_flags & VM_WRITE) hw_flags |= PAGE_WRITE;
     if (vm_flags & VM_USER) hw_flags |= PAGE_USER;
     if (!(vm_flags & VM_EXEC)) hw_flags |= PAGE_NX;
+    if (vm_flags & VM_NOCACHE) hw_flags |= PAGE_NORMAL_NC;
     return hw_flags;
 }
 

@@ -583,6 +583,98 @@ static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3,
     return 0;
 }
 
+/* mlibc's abi-bits/vm-flags.h values, duplicated for the same reason
+ * every other userspace ABI constant in this file is. */
+#define PROT_READ      0x01
+#define PROT_WRITE     0x02
+#define PROT_EXEC      0x04
+#define MAP_SHARED     0x01
+#define MAP_PRIVATE    0x02
+#define MAP_FIXED      0x10
+#define MAP_ANONYMOUS  0x20
+
+/* mmap()'s six real arguments don't fit the three-register syscall
+ * convention every other syscall here uses — bundled into one struct
+ * and passed by pointer, the same way SYS_PATH_AT already does for the
+ * same reason. */
+struct mmap_request {
+    uint64_t hint;
+    uint64_t size;
+    int64_t  prot;
+    int64_t  flags;
+    int64_t  fd;
+    int64_t  offset;
+};
+
+/*
+ * MAP_ANONYMOUS: vm_allocate_region() picks a free VA and hands back
+ * fresh, zeroed pages — the same call SYS_ANON_ALLOC already makes,
+ * just reachable through the real mmap() ABI now.
+ *
+ * Otherwise: the fd's vfs_node must offer memory to map at all
+ * (ops->mmap — ramfs files, console, null, and zero don't), which then
+ * goes through vm_map_region() exactly like the framebuffer and initrd
+ * views already do — existing physical memory, not fresh pages, so
+ * unmapping it later must not hand it back to the PMM (vm_map_region()
+ * already records that correctly via owns_pages).
+ *
+ * No MAP_FIXED (no placement control over vm_allocate_region()'s
+ * first-fit yet) and no demand paging (everything here is either
+ * eagerly allocated or already-resident device memory) — both
+ * deliberately deferred, not silently pretended to work.
+ */
+static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
+                         struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_addr, sizeof(struct mmap_request)))
+        return (uint64_t)-EFAULT;
+    struct mmap_request req = *(struct mmap_request *)request_addr;
+
+    if (req.flags & MAP_FIXED)
+        return (uint64_t)-ENOSYS;
+    if (!(req.flags & (MAP_SHARED | MAP_PRIVATE)))
+        return (uint64_t)-EINVAL;
+
+    int vm_flags = VM_USER;
+    if (req.prot & PROT_READ)  vm_flags |= VM_READ;
+    if (req.prot & PROT_WRITE) vm_flags |= VM_WRITE;
+    if (req.prot & PROT_EXEC)  vm_flags |= VM_EXEC;
+
+    if (req.flags & MAP_ANONYMOUS) {
+        virt_addr_t va = vm_allocate_region(p->mm, req.size, vm_flags);
+        return va ? (uint64_t)va : (uint64_t)-ENOMEM;
+    }
+
+    struct vfs_node *node;
+    if (file_get_node(p, (int)req.fd, &node) != 0)
+        return (uint64_t)-EBADF;
+    if (!node->ops || !node->ops->mmap) {
+        vfs_node_release(node);
+        return (uint64_t)-ENODEV;
+    }
+    uint64_t phys;
+    size_t mapped_size;
+    bool cacheable = true;
+    int result = node->ops->mmap(node, (size_t)req.offset, (size_t)req.size,
+                                 &phys, &mapped_size, &cacheable);
+    vfs_node_release(node);
+    if (result != 0)
+        return (uint64_t)result;
+    if (!cacheable)
+        vm_flags |= VM_NOCACHE;
+    virt_addr_t va = vm_map_region(p->mm, (phys_addr_t)phys, mapped_size, vm_flags);
+    return va ? (uint64_t)va : (uint64_t)-ENOMEM;
+}
+
+static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    vm_free_region(p->mm, addr, size);
+    return 0;
+}
+
 /* Monotonic milliseconds since boot. Takes no pointer, so nothing to
  * validate — the result goes back in x0.
  *
@@ -1841,6 +1933,8 @@ static const syscall_fn syscall_table[] = {
     [SYS_FCHDIR] = sys_fchdir,
     [SYS_SETRESUID] = sys_setresuid,
     [SYS_SETRESGID] = sys_setresgid,
+    [SYS_MMAP] = sys_mmap,
+    [SYS_MUNMAP] = sys_munmap,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

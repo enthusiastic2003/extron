@@ -92,6 +92,8 @@
 #define SYS_FCHDIR      66
 #define SYS_SETRESUID   67
 #define SYS_SETRESGID   68
+#define SYS_MMAP        69
+#define SYS_MUNMAP      70
 
 
 using main_fn = int (*)(int, char **);
@@ -788,13 +790,32 @@ int sys_fcntl(int fd, int request, va_list args, int *result) {
     return 0;
 }
 
+/* mmap()'s six real arguments don't fit a three-register syscall, so
+ * they're bundled into one struct and passed by pointer — the same
+ * shape SYS_PATH_AT already uses for the same reason (kernel/proc/
+ * syscall.c's struct mmap_request must match this byte for byte). */
+struct mmap_request {
+    uint64_t hint;
+    uint64_t size;
+    int64_t  prot;
+    int64_t  flags;
+    int64_t  fd;
+    int64_t  offset;
+};
+
 int sys_vm_map(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
-    sys_libc_log("[mlibc stub] sys_vm_map called\n");
-    return ENOSYS; // You will implement this later for file-backed mapping
+    struct mmap_request request = {
+        .hint = (uint64_t)hint, .size = size, .prot = prot,
+        .flags = flags, .fd = fd, .offset = offset,
+    };
+    long ret = syscall1(SYS_MMAP, (long)&request);
+    if (ret < 0) return (int)-ret;
+    *window = (void *)ret;
+    return 0;
 }
 
 int sys_vm_unmap(void *pointer, size_t size) {
-    long ret = syscall2(SYS_ANON_FREE, (long)pointer, size);
+    long ret = syscall2(SYS_MUNMAP, (long)pointer, size);
     if (ret < 0) return -ret;
     return 0;
 }

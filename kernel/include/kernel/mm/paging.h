@@ -43,10 +43,17 @@
 #define PAGE_CUSTOM_SWAP   (1ULL << 11) // 1 = Page is swapped to disk
 
 // --- 1. The OS Generic Definitions (vmm.h) ---
-#define VM_READ  (1 << 0)
-#define VM_WRITE (1 << 1)
-#define VM_EXEC  (1 << 2)
-#define VM_USER  (1 << 3)
+#define VM_READ    (1 << 0)
+#define VM_WRITE   (1 << 1)
+#define VM_EXEC    (1 << 2)
+#define VM_USER    (1 << 3)
+/* PAGE_NORMAL_NC, not the default cacheable mapping every other VM_*
+ * combination gets — for memory something OUTSIDE the CPU (the GPU
+ * scanning out a framebuffer, any future MMIO) reads or writes
+ * continuously, where a write sitting dirty in cache instead of
+ * actually reaching memory is invisible to that watching until an
+ * unrelated eviction happens to flush it. */
+#define VM_NOCACHE (1 << 4)
 
 #include <stdint.h>
 

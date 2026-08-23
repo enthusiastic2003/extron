@@ -7,8 +7,6 @@
 #include <kernel/mm/kheap.h>
 #include <kernel/mm/uvm.h>
 #include <kernel/console.h>
-#include <kernel/drivers/fb.h>
-#include <kernel/drivers/keyboard.h>
 #include <kernel/klibc/string.h>
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
@@ -29,120 +27,6 @@
  * the DOOM port's call depth. */
 #define USER_STACK_PAGES 32
 #define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
-
-/* Where a PROC_MAP_FRAMEBUFFER process finds the display.
- *
- * A fixed VA plus a descriptor page, rather than a syscall that returns
- * them. The process needs six numbers it cannot compute — base, width,
- * height, pitch, depth and byte order — and every one is the firmware's
- * answer, not something userspace may assume. In particular pitch is not
- * width*4 in general, so hardcoding the geometry would reintroduce the
- * exact bug fb.c reads it back to avoid.
- *
- * The descriptor is mapped read-only: it describes the process's own
- * address space, and nothing good comes of the process editing it. */
-#define USER_FB_INFO_VA 0x50000000UL
-#define USER_FB_VA      0x50001000UL
-
-/* The shared keystroke ring (kernel/drivers/keyboard.c), mapped
- * alongside the framebuffer for the same reason: a game loop has to
- * poll input without blocking, and SYS_READ blocks by design. Writable
- * because the consumer owns the tail index — see struct kbd_ring on why
- * that needs no lock and why a process can only hurt itself with it. */
-#define USER_INPUT_VA   0x4FFFF000UL
-
-/* Must match struct extron_fb_info in usr/include/extron/fb.h. Written
- * out twice deliberately — this is the ABI boundary, the same reason the
- * syscall numbers are duplicated rather than shared through a header. */
-struct user_fb_info {
-    uint64_t base;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pitch;
-    uint32_t depth;
-    uint32_t rgb_order;
-    uint32_t size;
-};
-
-/* Maps the framebuffer and its descriptor into `mm`. Returns 0 on
- * success, -1 if there is no framebuffer or a mapping fails.
- *
- * Every mapping made here is also registered with vm_insert_region().
- * The framebuffer and the input ring are registered NOT-owned: they are
- * VideoCore memory and a kernel-side ring respectively, so fork() must
- * share them rather than copy, and teardown must unmap without handing
- * either back to the PMM. The descriptor page IS owned — it's a page
- * allocated right here, per process. */
-static int map_framebuffer_into(struct vm_space *mm, const char *binary_path) {
-    const struct framebuffer *fb = fb_get();
-    if (!fb) {
-        kprintf("[EXEC] %s wants the framebuffer but none is initialised\n",
-                binary_path);
-        return -1;
-    }
-
-    /* The descriptor is a fresh page the kernel fills in; the framebuffer
-     * itself is VideoCore memory that already exists, so it is mapped,
-     * never allocated. */
-    phys_addr_t info_phys = (phys_addr_t)pmm_alloc_page();
-    if (!info_phys) {
-        kprintf("[EXEC] out of memory allocating fb descriptor for %s\n",
-                binary_path);
-        return -1;
-    }
-    struct user_fb_info *info =
-        (struct user_fb_info *)phys_to_virt_hhdm(info_phys);
-    memset(info, 0, PAGE_SIZE);
-    info->base      = USER_FB_VA;
-    info->width     = fb->width;
-    info->height    = fb->height;
-    info->pitch     = fb->pitch;
-    info->depth     = fb->depth;
-    info->rgb_order = fb->rgb_order;
-    info->size      = fb->size;
-
-    if (map_page(mm->ttbr0, USER_FB_INFO_VA, info_phys,
-                 PAGE_PRESENT | PAGE_USER | PAGE_NX) != 0) {
-        pmm_free_page((void *)info_phys);
-        return -1;
-    }
-    if (vm_insert_region(mm, USER_FB_INFO_VA, PAGE_SIZE, true) != 0) {
-        /* Unrecorded, so teardown would not find it — hand it back here
-         * rather than leaking a page on the way out of a failure. */
-        unmap_page(mm->ttbr0, USER_FB_INFO_VA);
-        pmm_free_page((void *)info_phys);
-        return -1;
-    }
-
-    phys_addr_t ring = kbd_ring_phys();
-    if (ring) {
-        if (map_page(mm->ttbr0, USER_INPUT_VA, ring,
-                     PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
-            kprintf("[EXEC] failed mapping the input ring for %s\n", binary_path);
-            return -1;
-        }
-        if (vm_insert_region(mm, USER_INPUT_VA, PAGE_SIZE, false) != 0)
-            return -1;
-    }
-
-    /* PAGE_NORMAL_NC for the same reason the kernel's own mapping uses
-     * it (kernel/drivers/fb.c): the GPU scans this memory out
-     * continuously so it must not sit dirty in a cache, but Device
-     * memory would forbid the unaligned accesses a memcpy emits — and
-     * DG_DrawFrame is precisely a memcpy. */
-    for (uint32_t off = 0; off < fb->size; off += PAGE_SIZE) {
-        if (map_page(mm->ttbr0, USER_FB_VA + off, fb->phys + off,
-                     PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX
-                     | PAGE_NORMAL_NC) != 0) {
-            kprintf("[EXEC] failed mapping framebuffer for %s\n", binary_path);
-            return -1;
-        }
-    }
-    if (vm_insert_region(mm, USER_FB_VA, fb->size, false) != 0)
-        return -1;
-
-    return 0;
-}
 
 /* The whole argument block has to fit in the single page it is written
  * into, or build_arg_stack() would run off the bottom of that page and
@@ -295,7 +179,7 @@ static void *load_binary_bytes(struct proc *requester, const char *binary_path,
  * only discarded once there is definitely a new one to replace it with.
  */
 static int exec_image_build(struct proc *requester, const char *binary_path,
-                            unsigned flags, const char *const *args, int argc,
+                            const char *const *args, int argc,
                             struct exec_image *out) {
     size_t binary_size;
     void *binary = load_binary_bytes(requester, binary_path, &binary_size);
@@ -361,11 +245,6 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     out->user_sp = build_arg_stack(top_phys, args, argc, &out->argv);
     out->argc    = (uint64_t)argc;
 
-    if (flags & PROC_MAP_FRAMEBUFFER) {
-        if (map_framebuffer_into(mm, binary_path) != 0)
-            goto fail;
-    }
-
     /* No MMIO mapping here any more. The UART used to be identity-mapped
      * into every process purely so kernel kprintf()s would survive a
      * TTBR0 swap — uart.c now reaches it through the kernel's own
@@ -383,11 +262,11 @@ fail:
     return -1;
 }
 
-struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flags,
+struct proc *proc_create_from_binary_argv(const char *binary_path,
                                           const char *const *args, int argc) {
     struct exec_image img;
 
-    if (exec_image_build(NULL, binary_path, flags, args, argc, &img) != 0)
+    if (exec_image_build(NULL, binary_path, args, argc, &img) != 0)
         return NULL;
 
     struct proc *p = kmalloc(sizeof(struct proc));
@@ -409,9 +288,9 @@ struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flag
     return p;
 }
 
-struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
+struct proc *proc_create_from_binary(const char *binary_path) {
     const char *args[1] = { binary_path };
-    return proc_create_from_binary_argv(binary_path, flags, args, 1);
+    return proc_create_from_binary_argv(binary_path, args, 1);
 }
 
 int proc_exec_replace(struct proc *p, const char *binary_path,
@@ -420,7 +299,7 @@ int proc_exec_replace(struct proc *p, const char *binary_path,
     struct thread *t = my_thread();
     if (!p || !t || t->process != p)
         return -1;
-    if (exec_image_build(p, binary_path, 0, args, argc, out) != 0)
+    if (exec_image_build(p, binary_path, args, argc, out) != 0)
         return -1;
 
     struct vm_space *old = p->mm;

@@ -214,11 +214,14 @@ void kernel_stage2(uint64_t mb2_addr) {
      * parked here (sleep_test, spin_write_test, anon_alloc_test,
      * badptr_test, fp_test_a/b, uptime_test, libc_test, mem_stress,
      * heartbeat_test, read_echo_test, fb_user_test, fork_test — all
-     * .S/.c files directly under usr/) are retired. Every one of them
-     * either had its coverage superseded outright (DOOM + fib_ticker +
-     * key_monitor together demonstrate real concurrency and framebuffer
-     * use far more thoroughly than the smoke tests they replace) or was
-     * ported to a real-mlibc equivalent under usr/mlibc_tests/:
+     * .S/.c files directly under usr/) are retired, along with the
+     * fib_ticker/key_monitor concurrency demos that used the same
+     * hand-rolled userspace libc (usr/lib/, also retired). Every one of
+     * them either had its coverage superseded outright (DOOM alone
+     * already demonstrates concurrency and framebuffer use, and
+     * mlibc_fork_stress.c/mlibc_thread_test.c cover multi-process/
+     * multi-thread scheduling directly) or was ported to a real-mlibc
+     * equivalent under usr/mlibc_tests/:
      *   mlibc_badptr_test.c   — user_buffer_ok() pointer isolation
      *   mlibc_fp_test.c       — FP/SIMD + TPIDR_EL0 across preemption
      *   mlibc_mem_stress.c    — allocator load + OOM refusal paths
@@ -235,26 +238,10 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* Start the interactive system environment. BusyBox is a static mlibc
      * binary whose applets re-exec through /sh; the ramfs provides its
      * writable working tree while retaining initrd files as COW views. */
-    struct proc *shell = proc_create_from_binary("sh", 0);
+    struct proc *shell = proc_create_from_binary("sh");
     if (!shell)
         panic("kernel_stage2: failed to create BusyBox ash");
     sched_policy_add(&shell->main_thread);
-
-    /* The earlier concurrent demonstrations remain handy as optional
-     * scheduler tests:
-     *
-     * struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
-     * if (!fib) {
-     *     panic("kernel_stage2: failed to create the fibonacci proc");
-     * }
-     * sched_policy_add(&fib->main_thread);
-     *
-     * struct proc *keymon = proc_create_from_binary("key_monitor.elf", 0);
-     * if (!keymon) {
-     *     panic("kernel_stage2: failed to create the key monitor proc");
-     * }
-     * sched_policy_add(&keymon->main_thread);
-     */
 
     kprintf("Starting scheduler — BusyBox ash.\n");
     sched_start();

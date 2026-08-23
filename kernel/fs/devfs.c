@@ -1,11 +1,16 @@
 #include <kernel/fs/devfs.h>
 #include <kernel/drivers/tty.h>
+#include <kernel/drivers/fb.h>
+#include <kernel/drivers/keyboard.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/klibc/string.h>
 #include <kernel/errno.h>
 
 static struct vfs_node console_node;
 static struct vfs_node null_node;
 static struct vfs_node zero_node;
+static struct vfs_node fb_node;
+static struct vfs_node input_node;
 static struct vfs_node root_node;
 static struct vfs_dentry root_dentry;
 
@@ -20,6 +25,8 @@ static struct devfs_entry entries[] = {
     { .name = "tty",     .node = &console_node },
     { .name = "null",    .node = &null_node },
     { .name = "zero",    .node = &zero_node },
+    { .name = "fb0",     .node = &fb_node },
+    { .name = "input",   .node = &input_node },
 };
 #define ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))
 
@@ -49,9 +56,70 @@ static long zero_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
     return (long)count;
 }
 
+/* Geometry as a flat struct, read in one call — usr/include/extron/fb.h's
+ * struct extron_fb_geometry must match this byte for byte. A real ioctl
+ * (FBIOGET_VSCREENINFO-style) would need sys_ioctl() to stop assuming
+ * every fd is the console (kernel/proc/syscall.c's sys_ioctl() gates on
+ * file_is_tty() first); read() needs no such change and this device has
+ * no other use for read() anyway. */
+struct fb_geometry {
+    uint32_t width, height, pitch, depth, rgb_order, size;
+};
+
+static long fb_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
+    (void)n;
+    const struct framebuffer *fb = fb_get();
+    if (!fb) return -ENODEV;
+    struct fb_geometry geo = {
+        .width = fb->width, .height = fb->height, .pitch = fb->pitch,
+        .depth = fb->depth, .rgb_order = fb->rgb_order, .size = fb->size,
+    };
+    if (off >= sizeof(geo)) return 0;
+    size_t avail = sizeof(geo) - off;
+    if (count > avail) count = avail;
+    memcpy(buf, (uint8_t *)&geo + off, count);
+    return (long)count;
+}
+
+static int fb_mmap(struct vfs_node *n, size_t offset, size_t length,
+                   uint64_t *out_phys, size_t *out_size, bool *out_cacheable) {
+    (void)n;
+    const struct framebuffer *fb = fb_get();
+    if (!fb) return -ENODEV;
+    if (offset > fb->size || length > fb->size - offset)
+        return -EINVAL;
+    *out_phys = (uint64_t)fb->phys + offset;
+    *out_size = length;
+    /* The GPU scans this memory out continuously — see VM_NOCACHE's own
+     * comment (kernel/include/kernel/mm/paging.h). */
+    *out_cacheable = false;
+    return 0;
+}
+
+/* Backed by the same page the kernel's UART ISR pushes bytes into
+ * (kernel/drivers/keyboard.c) — real RAM, not MMIO, so unlike the
+ * framebuffer this stays ordinarily cacheable: the kernel and the
+ * process share it the same way any two cache-coherent contexts on
+ * this machine would, with dmb ish barriers (already in
+ * extron_input_getc(), usr/include/extron/fb.h) doing the ordering
+ * work instead of PAGE_NORMAL_NC. */
+static int input_mmap(struct vfs_node *n, size_t offset, size_t length,
+                      uint64_t *out_phys, size_t *out_size, bool *out_cacheable) {
+    (void)n;
+    phys_addr_t ring = kbd_ring_phys();
+    if (!ring) return -ENODEV;
+    if (offset > PAGE_SIZE || length > PAGE_SIZE - offset)
+        return -EINVAL;
+    *out_phys = (uint64_t)ring + offset;
+    *out_size = length;
+    *out_cacheable = true;
+    return 0;
+}
+
 static int device_getattr(struct vfs_node *n, struct vfs_attr *attr) {
     memset(attr, 0, sizeof(*attr));
-    attr->ino = n == &console_node ? 2 : n == &null_node ? 3 : 4;
+    attr->ino = n == &console_node ? 2 : n == &null_node ? 3
+              : n == &zero_node ? 4 : n == &fb_node ? 5 : 6;
     attr->type = VFS_NODE_DEVICE;
     attr->mode = 0666;
     attr->nlink = (n == &console_node) ? 2 : 1;
@@ -73,6 +141,17 @@ static const struct vfs_node_ops null_ops = {
 static const struct vfs_node_ops zero_ops = {
     .read = zero_read,
     .write = null_write,
+    .getattr = device_getattr,
+};
+
+static const struct vfs_node_ops fb_ops = {
+    .read = fb_read,
+    .mmap = fb_mmap,
+    .getattr = device_getattr,
+};
+
+static const struct vfs_node_ops input_ops = {
+    .mmap = input_mmap,
     .getattr = device_getattr,
 };
 
@@ -181,6 +260,8 @@ void devfs_init(void) {
     vfs_node_init(&console_node, &console_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&null_node, &null_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&zero_node, &zero_ops, NULL, VFS_NODE_DEVICE);
+    vfs_node_init(&fb_node, &fb_ops, NULL, VFS_NODE_DEVICE);
+    vfs_node_init(&input_node, &input_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&root_node, &root_ops, NULL, VFS_NODE_DIRECTORY);
     vfs_dentry_init(&root_dentry, &root_node, NULL, "", NULL);
     for (size_t i = 0; i < ENTRY_COUNT; i++)

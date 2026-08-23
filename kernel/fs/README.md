@@ -143,6 +143,37 @@ BusyBox rebuild with an updated path (or a `/sh` -> `/bin/sh` symlink once
 something else lives at the real location) — left for a follow-up rather than
 risked alongside everything else in this stage.
 
+## Real mmap()/munmap() and two more devfs devices
+
+`vfs_node_ops` gained an `mmap` hook: given an offset/length into a node,
+hand back an EXISTING physical range to map plus whether it should be
+cacheable. `sys_mmap()`/`sys_munmap()` (kernel/proc/syscall.c) are real
+now — `MAP_ANONYMOUS` still goes through `vm_allocate_region()` (the same
+call `SYS_ANON_ALLOC` already made for malloc), and an fd-backed mapping
+goes through the new hook into `vm_map_region()`, the same call the
+framebuffer and initrd views already used. `mmap()`'s six arguments don't
+fit three registers, so they're bundled into one struct passed by pointer —
+the same shape `SYS_PATH_AT` already uses for the same reason. `MAP_FIXED`
+and demand paging are refused/absent, not silently pretended to work (see
+deferred list).
+
+Two more devfs nodes exist purely to have something real to `mmap()`:
+`/dev/fb0` (open, `read()` a `struct extron_fb_geometry`, `mmap()` the
+pixels) and `/dev/input` (`mmap()` the same keystroke ring the kernel's UART
+ISR writes). Both replace what used to be exec-time special cases —
+`PROC_MAP_FRAMEBUFFER`, `map_framebuffer_into()`, and the fixed
+`USER_FB_VA`/`USER_INPUT_VA` mappings are gone; `proc_create_from_binary()`
+and `execve()` take no flags at all now. DOOM opens and `mmap()`s both
+devices itself in `DG_Init()`, the same way any program would.
+
+The framebuffer mapping needed `VM_NOCACHE` (new, `kernel/include/kernel/mm/
+paging.h`) — the GPU scans that memory continuously, so a write sitting
+dirty in cache would be invisible to it. The input ring stays ordinarily
+cacheable: it's real RAM shared with the kernel's own ISR, ordered by the
+existing `dmb ish` barriers, not a second bus master. `mlibc_mmap_test.elf`
+covers both backings plus `MAP_FIXED` rejection and the `-ENODEV` case for a
+node with no `mmap` op (an ordinary ramfs file).
+
 ## setresuid()/setresgid()
 
 Each sets the real/effective/saved triple independently, `-1` in any slot
@@ -168,7 +199,23 @@ still root does not survive a later drop to a non-root uid.
   without becoming signalable/ptraceable as them; low value here;
 - a hardware-backed realtime clock (currently uptime plus a settable offset);
 - moving BusyBox and the other initrd binaries into `/bin` (see Stage 6);
-- persistent/block-backed storage and an unmount protocol.
+- persistent/block-backed storage and an unmount protocol;
+- `mprotect()` — no `vfs_node_ops`/page-table path changes a mapping's
+  permissions after creation;
+- `munmap()` splitting a mapping — only a whole `vm_map_region()`/
+  `vm_allocate_region()` region matching an exact base can be freed;
+- `MAP_FIXED` — refused outright, no placement control over
+  `vm_allocate_region()`'s first-fit;
+- demand paging — every mapping is eagerly backed (fresh zeroed pages for
+  `MAP_ANONYMOUS`, already-resident device memory otherwise); a large,
+  sparsely-touched mapping costs its full size up front;
+- file-backed `mmap()` over an ordinary ramfs file — `vfs_node_ops.mmap` only
+  has real users backed by fixed, already-existing physical memory
+  (`/dev/fb0`, `/dev/input`) so far, not RAM a filesystem owns;
+- `MAP_SHARED` between unrelated processes — needs its own reference-counted
+  backing store independent of any one `vm_space`, closer to a `shm_open()`
+  subsystem than an `mmap()` detail; `fork()` still eagerly copies every
+  owned page rather than sharing or copy-on-writing any of them.
 
 `usr/mlibc_tests/mlibc_file_test.c` exercises the namespace stages end to end:
 nested lookup and creation, `.`/`..`, cwd reconstruction and fork inheritance,

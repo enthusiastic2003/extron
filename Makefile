@@ -38,63 +38,35 @@ S_SRC   := $(shell find kernel -name "*.S")
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
 S_OBJ   := $(patsubst kernel/%.S,$(BUILD)/kernel/%.o,$(S_SRC))
 OBJ     := $(C_OBJ) $(S_OBJ)
-DEPS    := $(C_OBJ:.o=.d) $(S_OBJ:.o=.d) $(USER_LIB_OBJ:.o=.d)
+DEPS    := $(C_OBJ:.o=.d) $(S_OBJ:.o=.d)
 
 KERNEL_ELF := $(BUILD)/kernel8.elf
 KERNEL_IMG := $(BUILD)/kernel8.img
 
 # --- Userland test payloads -> initrd.tar ---
-# No aarch64-extron cross toolchain exists yet, so these are plain
-# freestanding static ELFs via the same aarch64-linux-gnu-gcc used for
-# the kernel itself — see usr/user_test.S for why. ELF_USER_EXPECTED_BASE
-# (kernel/include/kernel/elf.h) requires the first PT_LOAD segment to
-# start at exactly 0x400000; -Ttext-segment (not -Ttext, which only pins
-# the .text *section*, not the segment that contains the ELF/program
-# headers too) is what actually guarantees that.
-USER_CC      = aarch64-linux-gnu-gcc
-USER_LDFLAGS = -ffreestanding -nostdlib -static -no-pie \
-               -Wl,-Ttext-segment=0x400000 -Wl,--build-id=none
-
-USER_ASM_SRC := $(wildcard usr/*.S)
-USER_C_SRC   := $(wildcard usr/*.c)
+# There is no hand-rolled userspace libc in this tree — see git history
+# for usr/lib/'s old crt0.S/malloc.c/stdio.c/etc, and for usr/fib_ticker.c
+# /usr/key_monitor.c (the two lone usr/*.c demos that used to link it),
+# if either is ever needed again. Every real usr/ payload is either
+# usr/mlibc_tests/*.c, usr/doom/, or usr/busybox/ now.
 USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad)
-
-# The userspace C library. Payloads written in C (usr/*.c) link crt0 plus
-# these; payloads written in assembly (usr/*.S) are freestanding and link
-# none of it, which is why they keep their own _start.
-#
-# liballoc.c is the KERNEL's allocator source compiled a second time —
-# not a copy. -Iusr/include shadows kernel/include/liballoc_config.h with
-# the userspace one, which renames kmalloc/kfree to malloc/free and
-# points the page hooks at SYS_ANON_ALLOC (usr/lib/malloc.c).
-USER_LIB_SRC := $(wildcard usr/lib/*.c) kernel/mm/liballoc.c
-USER_LIB_ASM := usr/lib/crt0.S
-USER_LIB_OBJ := $(patsubst %.c,$(BUILD)/usrlib/%.o,$(USER_LIB_SRC)) \
-                $(patsubst %.S,$(BUILD)/usrlib/%.o,$(USER_LIB_ASM))
-
-USER_CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
-               -mcpu=cortex-a72 -mno-outline-atomics -fno-builtin \
-               -MMD -MP -Iusr/include -g
 
 # --- mlibc-based userland tests (usr/mlibc_tests/) ---
 # Built with the real aarch64-extron cross toolchain against this repo's
-# own usr/mlibc-sysroot/ rather than aarch64-linux-gnu-gcc + usr/lib:
-# these are real mlibc programs (crt1/TLS/constructors via __dlapi_enter,
-# malloc, fork/execve/wait, printf) rather than the raw-syscall/hand-
-# rolled-libc payloads above. The toolchain binary itself is still a
-# machine-local build (see usr/mlibc_tests/mlibc_syscall_test.c's header
-# comment) — MLIBC_GCC can be overridden if it doesn't live at the
-# default path. The sysroot (headers + libc.a + crt0.o/crt1.o) is
-# checked into this repo and confirmed sufficient on its own.
+# own usr/mlibc-sysroot/: real mlibc programs (crt1/TLS/constructors via
+# __dlapi_enter, malloc, fork/execve/wait, printf) — every usr/ payload
+# uses this same toolchain and sysroot. The toolchain binary itself is
+# still a machine-local build (see usr/mlibc_tests/mlibc_syscall_test.c's
+# header comment) — MLIBC_GCC can be overridden if it doesn't live at the
+# default path. The sysroot (headers + libc.a + crt0.o/crt1.o) is checked
+# into this repo and confirmed sufficient on its own.
 MLIBC_GCC     ?= $(HOME)/extron-toolkit/toolchain/bin/aarch64-extron-gcc
 MLIBC_SYSROOT := usr/mlibc-sysroot
 MLIBC_LIBC    := $(MLIBC_SYSROOT)/lib/libc.a
 MLIBC_C_SRC   := $(wildcard usr/mlibc_tests/*.c)
 MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/%.elf,$(MLIBC_C_SRC))
 
-INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC)) \
-                $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
-                $(MLIBC_ELF) \
+INITRD_ELF   := $(MLIBC_ELF) \
                 $(BUILD)/initrd/doom.elf \
                 $(BUILD)/initrd/sh
 
@@ -147,22 +119,6 @@ $(KERNEL_ELF): $(OBJ) kernel/arch/aarch64/linker.ld
 
 $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
-
-$(BUILD)/usrlib/%.o: %.c
-	mkdir -p $(dir $@)
-	$(USER_CC) $(USER_CFLAGS) -c $< -o $@
-
-$(BUILD)/usrlib/%.o: %.S
-	mkdir -p $(dir $@)
-	$(USER_CC) $(USER_CFLAGS) -c $< -o $@
-
-$(BUILD)/initrd/%.elf: usr/%.S
-	mkdir -p $(dir $@)
-	$(USER_CC) $(USER_LDFLAGS) $< -o $@
-
-$(BUILD)/initrd/%.elf: usr/%.c $(USER_LIB_OBJ)
-	mkdir -p $(dir $@)
-	$(USER_CC) $(USER_CFLAGS) $(USER_LDFLAGS) $< $(USER_LIB_OBJ) -o $@
 
 $(BUILD)/initrd/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)

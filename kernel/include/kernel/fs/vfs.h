@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <kernel/sync/spinlock.h>
 
 #define VFS_NAME_MAX 255
@@ -77,6 +78,19 @@ struct vfs_node_ops {
     int (*getattr)(struct vfs_node *, struct vfs_attr *);
     int (*setattr)(struct vfs_node *, const struct vfs_setattr *);
     long (*readlink)(struct vfs_node *, void *, size_t);
+    /* Device-backed mmap: given an offset/length into this node, hand
+     * back the EXISTING physical range to map (uint64_t rather than
+     * phys_addr_t so this header stays free of a kernel/mm dependency —
+     * callers already have phys_addr_t and it's the same width) and
+     * whether it should be mapped cacheable. Real RAM (a future ramfs
+     * file mapping) wants true; memory something outside the CPU reads
+     * or writes continuously (the framebuffer today) wants false — see
+     * VM_NOCACHE (kernel/include/kernel/mm/paging.h). Returns 0 with
+     * the three out-parameters filled, or a negative errno. Nodes with
+     * no memory to offer (ramfs files today, console, null, zero) leave
+     * this unset; mmap() on those fails with -ENODEV. */
+    int (*mmap)(struct vfs_node *, size_t offset, size_t length,
+               uint64_t *out_phys, size_t *out_size, bool *out_cacheable);
     void (*destroy)(struct vfs_node *);
 };
 
