@@ -65,7 +65,7 @@ int file_open(struct proc *p, const char *path, int flags) {
     if (!f)
         return -1;
     struct ramfs_node *node;
-    if (ramfs_open(path, flags, &node) != 0) {
+    if (ramfs_open(p->cwd, path, flags, &node) != 0) {
         kfree(f);
         return -1;
     }
@@ -76,6 +76,43 @@ int file_open(struct proc *p, const char *path, int flags) {
     f->flags = flags;
     p->files[fd] = f;
     return fd;
+}
+
+struct extron_dirent {
+    uint64_t ino;
+    int64_t off;
+    uint16_t reclen;
+    uint8_t type;
+    char name[1024];
+};
+
+long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
+    if (!p || fd < 3 || fd >= PROC_MAX_FDS || !p->files[fd]
+            || size < sizeof(struct extron_dirent)) return -1;
+    struct open_file *f = p->files[fd];
+    irq_spin_lock(&f->lock);
+    struct extron_dirent *entry = buffer;
+    unsigned char type;
+    int result = ramfs_readdir(f->node, f->offset, entry->name,
+                               sizeof(entry->name), &type);
+    if (result > 0) {
+        entry->ino = f->offset + 1;
+        entry->off = (int64_t)(f->offset + 1);
+        entry->reclen = sizeof(*entry);
+        entry->type = type;
+        f->offset++;
+        result = sizeof(*entry);
+    }
+    irq_spin_unlock(&f->lock);
+    return result;
+}
+
+int file_info(struct proc *p, int fd, size_t *size, int *directory) {
+    if (!p || fd < 3 || fd >= PROC_MAX_FDS || !p->files[fd]) return -1;
+    struct ramfs_node *node = p->files[fd]->node;
+    if (size) *size = ramfs_size(node);
+    if (directory) *directory = node->directory;
+    return 0;
 }
 
 long file_read(struct proc *p, int fd, void *buffer, size_t count) {

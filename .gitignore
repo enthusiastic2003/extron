@@ -10,7 +10,22 @@ captures/
 # doomgeneric upstream, cloned by hand (see doom_roadmap.md). Not
 # vendored into history: it's a large third-party tree we don't modify —
 # our port is usr/doom/doomgeneric_extron.c, which IS tracked.
-third_party/
+third_party/*
+
+# The upstream mlibc checkout remains unvendored, but Extron's platform
+# boundary is part of this OS and must be present in a fresh clone.
+!third_party/mlibc/
+third_party/mlibc/*
+!third_party/mlibc/cross-aarch64-extron.ini
+!third_party/mlibc/sysdeps/
+third_party/mlibc/sysdeps/*
+!third_party/mlibc/sysdeps/extron/
+# Most of this directory is supplied by the upstream checkout. Keep only
+# Extron's locally maintained ABI delta visible to the parent repository.
+third_party/mlibc/sysdeps/extron/include/abi-bits/*
+!third_party/mlibc/sysdeps/extron/include/abi-bits/ioctls.h
+third_party/mlibc/sysdeps/extron/include/paths.h
+third_party/mlibc/sysdeps/extron/include/sys/ioctl.h
 
 # The shareware WAD. Freely redistributable but 4MB of binary that would
 # sit in every clone forever; fetch it into usr/ instead.

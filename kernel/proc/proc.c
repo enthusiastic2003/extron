@@ -38,6 +38,7 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->user_argv = 0;
     p->parent = NULL;
     p->exit_status = 0;
+    p->cwd[0] = '\0';
     file_table_init(p);
 
     /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
@@ -304,6 +305,7 @@ void wakeup(void *chan) {
         struct proc *p = proc_table[i];
         if (p && p->state == PROC_SLEEPING && p->chan == chan) {
             p->chan = NULL;
+            p->sleep_until = 0;
             sched_policy_add(p); /* sets PROC_RUNNABLE itself */
         }
     }
@@ -314,11 +316,11 @@ void proc_wakeup_expired(uint64_t now) {
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
-        if (p && p->state == PROC_SLEEPING && p->chan == NULL) {
-            if (now >= p->sleep_until) {
-                p->sleep_until = 0;
-                sched_policy_add(p); /* sets PROC_RUNNABLE itself */
-            }
+        if (p && p->state == PROC_SLEEPING && p->sleep_until
+                && now >= p->sleep_until) {
+            p->chan = NULL;
+            p->sleep_until = 0;
+            sched_policy_add(p); /* sets PROC_RUNNABLE itself */
         }
     }
     irq_spin_unlock(&proc_table_lock);

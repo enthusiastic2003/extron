@@ -14,6 +14,7 @@
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
 #include <kernel/drivers/keyboard.h>
+#include <kernel/drivers/tty.h>
 #include <kernel/drivers/mailbox.h>
 #include <kernel/drivers/fb.h>
 
@@ -167,6 +168,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     }
     */
     init_kbd();
+    tty_init();
 
     /* VideoCore mailbox bring-up. Deliberately before any framebuffer
      * code: it proves the transport (Device mapping, cache maintenance,
@@ -210,25 +212,16 @@ void kernel_stage2(uint64_t mb2_addr) {
      * for at all).
      */
 
-    /* DOOM. PROC_MAP_FRAMEBUFFER hands it the display and the keystroke
-     * ring at creation, so its frame loop makes no syscall to draw and
-     * none to poll input — only SYS_SLEEP to pace itself and
-     * SYS_UPTIME_MS for its clock. The WAD comes out of the initrd via
-     * the ramfs, which lazily exposes initrd files and copies them only
-     * if a process writes to them.
-     *
-     * This focused hardware test requires a display: a failed process
-     * creation means either framebuffer setup or the mlibc Doom image
-     * failed, so stop with an explicit diagnostic rather than reaching
-     * sched_start() with an empty run queue. */
-    struct proc *doom = proc_create_from_binary("doom.elf",
-                                                PROC_MAP_FRAMEBUFFER);
-    if (!doom)
-        panic("kernel_stage2: failed to create mlibc DOOM");
-    sched_policy_add(doom);
+    /* Start the interactive system environment. BusyBox is a static mlibc
+     * binary whose applets re-exec through /sh; the ramfs provides its
+     * writable working tree while retaining initrd files as COW views. */
+    struct proc *shell = proc_create_from_binary("sh", 0);
+    if (!shell)
+        panic("kernel_stage2: failed to create BusyBox ash");
+    sched_policy_add(shell);
 
-    /* The normal concurrent demonstration can be restored after this
-     * focused mlibc migration test:
+    /* The earlier concurrent demonstrations remain handy as optional
+     * scheduler tests:
      *
      * struct proc *fib = proc_create_from_binary("fib_ticker.elf", 0);
      * if (!fib) {
@@ -243,7 +236,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * sched_policy_add(keymon);
      */
 
-    kprintf("Starting scheduler — mlibc DOOM hardware test.\n");
+    kprintf("Starting scheduler — BusyBox ash.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

@@ -29,6 +29,7 @@ static uint64_t periph_base = PERIPHERAL_PHYS;
 #define UART0_FBRD      (UART0_BASE + 0x28)
 #define UART0_LCRH      (UART0_BASE + 0x2C)
 #define UART0_CR        (UART0_BASE + 0x30)
+#define UART0_IFLS      (UART0_BASE + 0x34)
 #define UART0_IMSC      (UART0_BASE + 0x38)
 #define UART0_ICR       (UART0_BASE + 0x44)
 
@@ -76,6 +77,11 @@ void init_serial(void) {
 
     // Enable FIFOs, 8 bits, no parity, 1 stop bit.
     mmio_write(UART0_LCRH, (1u << 4) | (3u << 5));
+
+    // Lowest RX FIFO trigger (1/8 full); RTIM still handles a lone byte.
+    unsigned int ifls = mmio_read(UART0_IFLS);
+    ifls &= ~(7u << 3);
+    mmio_write(UART0_IFLS, ifls);
 
     // Enable UART, TX, RX.
     mmio_write(UART0_CR, (1u << 0) | (1u << 8) | (1u << 9));

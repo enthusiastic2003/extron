@@ -46,6 +46,8 @@ struct exec_image {
 };
 
 struct proc *proc_create_from_binary(const char *binary_path, unsigned flags);
+struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flags,
+                                          const char *const *args, int argc);
 
 /*
  * execve()'s address-space half: build `binary_path` into a new image

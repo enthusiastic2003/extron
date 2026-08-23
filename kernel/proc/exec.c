@@ -315,13 +315,11 @@ fail:
     return -1;
 }
 
-struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
-    /* argv[0] is the path it was loaded from, which is the only honest
-     * answer available and matches what execve() would produce. */
-    const char *args[1] = { binary_path };
+struct proc *proc_create_from_binary_argv(const char *binary_path, unsigned flags,
+                                          const char *const *args, int argc) {
     struct exec_image img;
 
-    if (exec_image_build(binary_path, flags, args, 1, &img) != 0)
+    if (exec_image_build(binary_path, flags, args, argc, &img) != 0)
         return NULL;
 
     struct proc *p = kmalloc(sizeof(struct proc));
@@ -342,6 +340,11 @@ struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
     p->user_argc = img.argc;
     p->user_argv = img.argv;
     return p;
+}
+
+struct proc *proc_create_from_binary(const char *binary_path, unsigned flags) {
+    const char *args[1] = { binary_path };
+    return proc_create_from_binary_argv(binary_path, flags, args, 1);
 }
 
 int proc_exec_replace(struct proc *p, const char *binary_path,

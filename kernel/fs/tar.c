@@ -107,6 +107,9 @@ void tar_list(void) {
 bool tar_open(const char *name, struct tar_file *out) {
     if (tar_start == 0 || tar_end == 0) return false;
 
+    while (*name == '/') name++;
+    while (name[0] == '.' && name[1] == '/') name += 2;
+
     uint64_t ptr = tar_start;
     while (ptr < tar_end) {
         struct tar_header *header = (struct tar_header *)ptr;
@@ -130,4 +133,21 @@ bool tar_open(const char *name, struct tar_file *out) {
     }
 
     return false;
+}
+
+void tar_foreach(tar_visit_fn visit, void *ctx) {
+    if (!visit || tar_start == 0 || tar_end == 0) return;
+    uint64_t ptr = tar_start;
+    while (ptr < tar_end) {
+        struct tar_header *header = (struct tar_header *)ptr;
+        if (!header->name[0]) break;
+        size_t size = octal_to_int(header->size, sizeof(header->size));
+        struct tar_file file = {
+            .name = header->name,
+            .size = size,
+            .data = (void *)(ptr + 512),
+        };
+        visit(&file, ctx);
+        ptr += 512 + align_up(size, 512);
+    }
 }

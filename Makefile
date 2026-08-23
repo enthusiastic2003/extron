@@ -95,7 +95,12 @@ MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/%.elf,$(MLIBC_C_
 INITRD_ELF   := $(patsubst usr/%.S,$(BUILD)/initrd/%.elf,$(USER_ASM_SRC)) \
                 $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
                 $(MLIBC_ELF) \
-                $(BUILD)/initrd/doom.elf
+                $(BUILD)/initrd/doom.elf \
+                $(BUILD)/initrd/sh
+
+# --- BUSYBOX ---
+BUSYBOX_DIR   := third_party/busybox
+BUSYBOX_CROSS ?= $(HOME)/extron-toolkit/toolchain/bin/aarch64-extron-
 
 # --- DOOM ---
 # doomgeneric's own sources, compiled against mlibc with the same real
@@ -159,7 +164,7 @@ $(BUILD)/initrd/%.elf: usr/%.c $(USER_LIB_OBJ)
 	mkdir -p $(dir $@)
 	$(USER_CC) $(USER_CFLAGS) $(USER_LDFLAGS) $< $(USER_LIB_OBJ) -o $@
 
-$(BUILD)/initrd/%.elf: usr/mlibc_tests/%.c
+$(BUILD)/initrd/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
 
@@ -179,6 +184,14 @@ $(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $(DOOM_OBJ) \
 		-o $@ -static -O2
+
+$(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC_LIBC)
+	tools/configure_busybox.sh
+	$(MAKE) -C $(BUSYBOX_DIR) -j4 CCACHE_DISABLE=1 \
+		CROSS_COMPILE="$(BUSYBOX_CROSS)" \
+		CONFIG_SYSROOT="$(abspath $(MLIBC_SYSROOT))"
+	mkdir -p $(dir $@)
+	cp $(BUSYBOX_DIR)/busybox $@
 
 $(INITRD): $(INITRD_ELF) $(INITRD_DATA)
 	# Explicit filenames, not "-C dir ." — the latter adds a "./" prefix

@@ -1,0 +1,61 @@
+diff --git a/include/platform.h b/include/platform.h
+--- a/include/platform.h
++++ b/include/platform.h
+@@ -437,6 +437,14 @@
+ #define HAVE_DEV_FD 1
+ #define DEV_FD_PREFIX "/dev/fd/"
+ 
++/* Extron is POSIX-like but is not Linux. Its early ramfs has no mount table
++ * or statfs ABI, and its serial console does not maintain utmp records. */
++#if defined(__extron__)
++# undef HAVE_MNTENT_H
++# undef HAVE_SYS_STATFS_H
++# undef HAVE_DEV_FD
++#endif
++
+ #if defined(__UCLIBC__)
+ # if UCLIBC_VERSION < KERNEL_VERSION(0, 9, 32)
+ #  undef HAVE_STRVERSCMP
+diff --git a/libbb/appletlib.c b/libbb/appletlib.c
+--- a/libbb/appletlib.c
++++ b/libbb/appletlib.c
+@@ -33,7 +33,7 @@
+ #include "busybox.h"
+ 
+ #if !(defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) \
+-    || defined(__APPLE__) \
++    || defined(__APPLE__) || defined(__extron__) \
+     )
+ # include <malloc.h> /* for mallopt */
+ #endif
+diff --git a/libbb/alloc_affinity.c b/libbb/alloc_affinity.c
+--- a/libbb/alloc_affinity.c
++++ b/libbb/alloc_affinity.c
+@@ -9,6 +9,10 @@
+ #include <sched.h>
+ #include "libbb.h"
+ 
++#if defined(__extron__)
++int sched_getaffinity(pid_t, size_t, cpu_set_t *);
++#endif
++
+ unsigned long* FAST_FUNC get_malloc_cpu_affinity(int pid, unsigned *sz)
+ {
+	unsigned long *mask = NULL;
+diff --git a/libbb/poll_with_signals.c b/libbb/poll_with_signals.c
+--- a/libbb/poll_with_signals.c
++++ b/libbb/poll_with_signals.c
+@@ -42,7 +42,13 @@ int FAST_FUNC check_got_signal_and_poll(struct pollfd pfd[1], int timeout)
+ 		errno = EINTR; /* inform the caller that we got a signal */
+ 		return -1;
+ 	}
++#if defined(__extron__)
++	/* Extron does not yet deliver userspace signals, so there is no race
++	 * between testing bb_got_signal and entering poll(). */
++	n = poll(pfd, 1, timeout);
++#else
+ 	n = ppoll(pfd, 1, timeout >= 0 ? &tv : NULL, &orig_mask);
++#endif
+ 	sigprocmask2(SIG_SETMASK, &orig_mask);
+ 	return n;
+ }

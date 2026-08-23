@@ -40,8 +40,11 @@
 #define GICD_CTLR       0x000
 #define GICD_IGROUPR    0x080
 #define GICD_ISENABLER  0x100
+#define GICD_ICENABLER  0x180
+#define GICD_ICPENDR    0x280
 #define GICD_IPRIORITYR 0x400
 #define GICD_ITARGETSR  0x800
+#define GICD_ICFGR      0xC00
 
 #define GICC_CTLR 0x000
 #define GICC_PMR  0x004
@@ -108,23 +111,31 @@ void gic_init(void) {
 }
 
 void gic_enable_irq(unsigned id) {
-    /* SPIs (32+) need explicit CPU targeting on GICv2 — unlike PPIs
-     * (implicitly banked per-core, no routing decision to make), an SPI
-     * with no target CPU set in GICD_ITARGETSRn just sits pending at
-     * the distributor forever, never forwarded to any CPU interface —
-     * enabled, correctly grouped, genuinely pending, and still never
-     * delivered. GICD_ITARGETSRn is byte-per-interrupt-ID (4 IDs per
-     * 32-bit register, unlike the bit-per-ID IGROUPR/ISENABLER above),
-     * so this is a byte-level read-modify-write: value 0x01 in an ID's
-     * byte targets CPU interface 0, the only core running this kernel
-     * (boot.S parks the others). PPI/SGI bytes (id<32) are read-only,
-     * hardwired to the banked "this CPU" affinity — writing them would
-     * just be silently ignored, so gating on id>=32 is a clarity choice,
-     * not a correctness requirement. */
+    /* Do not depend on GIC state left by firmware. In particular, an SPI
+     * routed to another core or configured edge-triggered can work under
+     * QEMU's reset defaults and never arrive on a real Pi. Disable it while
+     * configuring, select Group 1, a visible priority, and clear any stale
+     * pending latch before enabling. */
+    unsigned bank = id / 32;
+    uint32_t bit = 1U << (id % 32);
+    gicd[GICD_ICENABLER / 4 + bank] = bit;
+    gicd[GICD_IGROUPR / 4 + bank] |= bit;
+
+    volatile uint8_t *dist8 = (volatile uint8_t *)gicd;
+    dist8[GICD_IPRIORITYR + id] = 0x80;
+
     if (id >= 32) {
-        gicd[GICD_ITARGETSR / 4 + id / 4] |= (1U << ((id % 4) * 8));
+        /* GICv2 target mask 0x01 routes to CPU interface 0, the sole core
+         * not parked by boot.S. ICFGR bit[1] = 0 selects level-sensitive,
+         * matching the Pi DT's PL011 interrupt flags. */
+        dist8[GICD_ITARGETSR + id] = 0x01;
+        unsigned cfg_shift = (id % 16) * 2;
+        gicd[GICD_ICFGR / 4 + id / 16] &= ~(3U << cfg_shift);
     }
-    gicd[GICD_ISENABLER / 4 + (id / 32)] = (1U << (id % 32));
+    gicd[GICD_ICPENDR / 4 + bank] = bit;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    gicd[GICD_ISENABLER / 4 + bank] = bit;
+    __asm__ volatile ("dsb sy; isb" ::: "memory");
 }
 
 unsigned gic_ack_irq(void) {

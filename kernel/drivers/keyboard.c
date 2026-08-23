@@ -1,6 +1,7 @@
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/proc/proc.h>
+#include <kernel/proc/sched.h>
 #include <arch/gic.h>
 #include <arch/exceptions.h>
 #include <arch/irq_spinlock.h>
@@ -9,6 +10,7 @@
 #include <kernel/mm/paging.h>
 #include <kernel/klibc/string.h>
 #include <kernel/console.h>
+#include <kernel/drivers/timer.h>
 
 /*
  * There's no physical keyboard on this setup — a headless RPi4 talked
@@ -69,8 +71,7 @@ static void ring_push(uint8_t c) {
     ring->head = next;
 }
 
-static void kbd_irq_handler(struct aarch64_frame *f) {
-    (void)f;
+static void drain_uart(void) {
     /* No irq_spin_lock needed here: this ISR runs with DAIF fully
      * masked (automatic on any exception entry), so it can't be
      * preempted by anything, including a second UART interrupt. The
@@ -104,6 +105,11 @@ static void kbd_irq_handler(struct aarch64_frame *f) {
         wakeup(&kbuf);
 }
 
+static void kbd_irq_handler(struct aarch64_frame *f) {
+    (void)f;
+    drain_uart();
+}
+
 void init_kbd(void) {
     ring_phys = (phys_addr_t)pmm_alloc_page();
     if (ring_phys) {
@@ -132,4 +138,50 @@ char kbd_getc(void) {
     kbuf.tail = (kbuf.tail + 1) % KBD_BUFFER_SIZE;
     irq_spin_unlock(&kbuf.lock);
     return c;
+}
+
+int kbd_try_getc(char *out) {
+    if (!out)
+        return 0;
+    irq_spin_lock(&kbuf.lock);
+    if (kbuf.head == kbuf.tail) {
+        irq_spin_unlock(&kbuf.lock);
+        return 0;
+    }
+    *out = kbuf.buf[kbuf.tail];
+    kbuf.tail = (kbuf.tail + 1) % KBD_BUFFER_SIZE;
+    irq_spin_unlock(&kbuf.lock);
+    return 1;
+}
+
+int kbd_input_ready(void) {
+    irq_spin_lock(&kbuf.lock);
+    int ready = kbuf.head != kbuf.tail;
+    irq_spin_unlock(&kbuf.lock);
+    return ready;
+}
+
+void kbd_flush_input(void) {
+    irq_spin_lock(&kbuf.lock);
+    kbuf.tail = kbuf.head;
+    irq_spin_unlock(&kbuf.lock);
+}
+
+int kbd_wait_for_input(int timeout_ms) {
+    irq_spin_lock(&kbuf.lock);
+    if (kbuf.head == kbuf.tail && timeout_ms != 0) {
+        struct proc *p = my_proc();
+        if (timeout_ms > 0) {
+            uint64_t ticks = ((uint64_t)timeout_ms * timer_ticks_per_second() + 999) / 1000;
+            if (!ticks) ticks = 1;
+            p->sleep_until = timer_ticks() + ticks;
+        } else {
+            p->sleep_until = 0;
+        }
+        sleep(&kbuf, &kbuf.lock);
+        p->sleep_until = 0;
+    }
+    int ready = kbuf.head != kbuf.tail;
+    irq_spin_unlock(&kbuf.lock);
+    return ready;
 }

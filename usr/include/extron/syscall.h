@@ -25,6 +25,14 @@
 #define SYS_CLOSE       14
 #define SYS_LSEEK       15
 #define SYS_MKDIR       16
+#define SYS_GETPID      17
+#define SYS_GETPPID     18
+#define SYS_GETCWD      19
+#define SYS_CHDIR       20
+#define SYS_READDIR     21
+#define SYS_STAT        22
+#define SYS_IOCTL       23
+#define SYS_POLL        24
 
 /* x8 = number, x0-x2 = args, result in x0 — the AAPCS64/Linux
  * convention the kernel's syscall.h documents. "memory" clobber so the

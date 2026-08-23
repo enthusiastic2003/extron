@@ -32,6 +32,14 @@
 #define SYS_CLOSE       14
 #define SYS_LSEEK       15
 #define SYS_MKDIR       16
+#define SYS_GETPID      17
+#define SYS_GETPPID     18
+#define SYS_GETCWD      19
+#define SYS_CHDIR       20
+#define SYS_READDIR     21
+#define SYS_STAT        22
+#define SYS_IOCTL       23
+#define SYS_POLL        24
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

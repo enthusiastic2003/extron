@@ -65,6 +65,7 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
     child->parent    = parent;
     child->user_argc = parent->user_argc;
     child->user_argv = parent->user_argv;
+    memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
     file_table_clone(child, parent);
 
     /* The child's trap frame goes at the very top of its kernel stack,

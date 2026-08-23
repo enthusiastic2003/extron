@@ -6,6 +6,7 @@
 #include <kernel/mm/paging.h>
 #include <kernel/drivers/timer.h>
 #include <kernel/drivers/keyboard.h>
+#include <kernel/drivers/tty.h>
 #include <kernel/fs/tar.h>
 #include <kernel/proc/exec.h>
 #include <kernel/fs/file.h>
@@ -100,11 +101,7 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count,
                 my_proc() ? (unsigned long)my_proc()->pid : 0);
         return (uint64_t)-1;
     }
-    const char *buf = (const char *)buf_addr;
-    for (uint64_t i = 0; i < count; i++) {
-        console_putc(buf[i]);
-    }
-    return count;
+    return (uint64_t)tty_write((const void *)buf_addr, count);
 }
 
 /* x86 needs this because FS_BASE (its TLS base) historically requires
@@ -165,11 +162,8 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
     return status;
 }
 
-/* fd 0 only — one byte at a time via the real blocking kbd_getc()
- * (kernel/drivers/keyboard.c), which now sleep()s the calling proc
- * until a byte arrives instead of busy-spinning. A multi-byte-at-once
- * kbd_read() is a straightforward later refinement, not needed for
- * this milestone's scope. */
+/* fd 0 is the system console TTY. keyboard.c fills the raw
+ * interrupt-driven ring; tty_read() owns termios policy. */
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
                          struct aarch64_frame *f) {
     (void)f;
@@ -191,11 +185,92 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
                 my_proc() ? (unsigned long)my_proc()->pid : 0);
         return (uint64_t)-1;
     }
-    char *buf = (char *)buf_addr;
-    for (uint64_t i = 0; i < count; i++) {
-        buf[i] = kbd_getc();
+    return (uint64_t)tty_read((void *)buf_addr, count);
+}
+
+#define TCGETS 0x5401
+#define TCSETS 0x5402
+#define TCSETSW 0x5403
+#define TCSETSF 0x5404
+#define TIOCGWINSZ 0x5413
+#define POLLIN 0x0001
+#define POLLOUT 0x0004
+#define POLLNVAL 0x0020
+
+struct extron_pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+
+static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
+                          struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (fd > 2)
+        return (uint64_t)-1;
+    if (request == TCGETS) {
+        if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
+            return (uint64_t)-1;
+        tty_get_termios((struct tty_termios *)arg);
+        return 0;
     }
-    return count;
+    if (request == TCSETS || request == TCSETSW || request == TCSETSF) {
+        if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
+            return (uint64_t)-1;
+        tty_set_termios((const struct tty_termios *)arg, request == TCSETSF);
+        return 0;
+    }
+    if (request == TIOCGWINSZ) {
+        if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
+            return (uint64_t)-1;
+        tty_get_winsize((struct tty_winsize *)arg);
+        return 0;
+    }
+    return (uint64_t)-1;
+}
+
+static int poll_scan(struct extron_pollfd *fds, size_t count) {
+    int ready = 0;
+    for (size_t i = 0; i < count; i++) {
+        fds[i].revents = 0;
+        if (fds[i].fd == 0) {
+            if ((fds[i].events & POLLIN) && kbd_input_ready())
+                fds[i].revents |= POLLIN;
+        } else if (fds[i].fd == 1 || fds[i].fd == 2) {
+            if (fds[i].events & POLLOUT)
+                fds[i].revents |= POLLOUT;
+        } else if (fds[i].fd >= 0) {
+            fds[i].revents = POLLNVAL;
+        }
+        if (fds[i].revents)
+            ready++;
+    }
+    return ready;
+}
+
+static uint64_t sys_poll(uint64_t fds_addr, uint64_t count, uint64_t timeout_raw,
+                         struct aarch64_frame *f) {
+    (void)f;
+    if (count > 64 || count > (uint64_t)-1 / sizeof(struct extron_pollfd))
+        return (uint64_t)-1;
+    size_t bytes = (size_t)count * sizeof(struct extron_pollfd);
+    if (!user_buffer_ok(my_proc(), fds_addr, bytes))
+        return (uint64_t)-1;
+    struct extron_pollfd *fds = (struct extron_pollfd *)fds_addr;
+    int ready = poll_scan(fds, count);
+    int timeout = (int)timeout_raw;
+    if (ready || timeout == 0)
+        return (uint64_t)ready;
+
+    bool waits_for_input = false;
+    for (size_t i = 0; i < count; i++)
+        if (fds[i].fd == 0 && (fds[i].events & POLLIN))
+            waits_for_input = true;
+    if (!waits_for_input)
+        return 0;
+    kbd_wait_for_input(timeout);
+    return (uint64_t)poll_scan(fds, count);
 }
 
 /* Ticks-from-time using the actually configured Hz (timer_ticks_per_
@@ -384,7 +459,96 @@ static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
     char path[101];
     if (copy_user_string(my_proc(), path_addr, path, sizeof(path)) < 0)
         return (uint64_t)-1;
-    return (uint64_t)ramfs_mkdir(path);
+    return (uint64_t)ramfs_mkdir(my_proc()->cwd, path);
+}
+
+static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    return my_proc()->pid;
+}
+
+static uint64_t sys_getppid(uint64_t a, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    return p->parent ? p->parent->pid : 0;
+}
+
+static uint64_t sys_getcwd(uint64_t buffer, uint64_t size, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    size_t cwd_length = strlen(p->cwd);
+    size_t needed = cwd_length + 2;
+    if (!user_buffer_ok(p, buffer, size) || size < needed) return (uint64_t)-1;
+    char *out = (char *)buffer;
+    out[0] = '/';
+    memcpy(out + 1, p->cwd, cwd_length + 1);
+    return 0;
+}
+
+static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    char path[101], resolved[101];
+    struct proc *p = my_proc();
+    if (copy_user_string(p, path_addr, path, sizeof(path)) < 0
+            || ramfs_chdir(p->cwd, path, resolved, sizeof(resolved)) != 0)
+        return (uint64_t)-1;
+    memcpy(p->cwd, resolved, strlen(resolved) + 1);
+    return 0;
+}
+
+static uint64_t sys_readdir(uint64_t fd, uint64_t buffer, uint64_t size,
+                            struct aarch64_frame *f) {
+    (void)f;
+    if (!user_buffer_ok(my_proc(), buffer, size)) return (uint64_t)-1;
+    return (uint64_t)file_readdir(my_proc(), (int)fd, (void *)buffer, size);
+}
+
+struct extron_stat {
+    uint64_t dev, ino;
+    uint32_t mode, nlink, uid, gid;
+    uint64_t rdev, pad1;
+    int64_t size, blksize;
+    int32_t pad2;
+    int64_t blocks;
+    struct { int64_t sec, nsec; } atim, mtim, ctim;
+    int32_t pad3[2];
+};
+
+static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
+                         struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, stat_addr, sizeof(struct extron_stat)))
+        return (uint64_t)-1;
+    size_t size = 0;
+    int directory = 0;
+    if (target == 0) {
+        char path[101];
+        struct ramfs_node *node;
+        if (copy_user_string(p, value, path, sizeof(path)) < 0
+                || ramfs_lookup(p->cwd, path, &node) != 0)
+            return (uint64_t)-1;
+        size = ramfs_size(node);
+        directory = node->directory;
+    } else if (target == 1) {
+        if (file_info(p, (int)value, &size, &directory) != 0)
+            return (uint64_t)-1;
+    } else {
+        return (uint64_t)-1;
+    }
+    struct extron_stat *st = (struct extron_stat *)stat_addr;
+    memset(st, 0, sizeof(*st));
+    st->ino = target == 1 ? value + 1 : 1;
+    st->mode = (directory ? 0040000 : 0100000) | (directory ? 0755 : 0644);
+    st->nlink = 1;
+    st->size = (int64_t)size;
+    st->blksize = 4096;
+    st->blocks = (int64_t)((size + 511) / 512);
+    return 0;
 }
 
 /*
@@ -575,6 +739,14 @@ static const syscall_fn syscall_table[] = {
     [SYS_CLOSE]      = sys_close,
     [SYS_LSEEK]      = sys_lseek,
     [SYS_MKDIR]      = sys_mkdir,
+    [SYS_GETPID]     = sys_getpid,
+    [SYS_GETPPID]    = sys_getppid,
+    [SYS_GETCWD]     = sys_getcwd,
+    [SYS_CHDIR]      = sys_chdir,
+    [SYS_READDIR]    = sys_readdir,
+    [SYS_STAT]       = sys_stat,
+    [SYS_IOCTL]      = sys_ioctl,
+    [SYS_POLL]       = sys_poll,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
