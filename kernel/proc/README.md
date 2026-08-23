@@ -46,6 +46,53 @@ the direct parent. The raw kernel status is a negative signal number; Extron's
 mlibc translates it into POSIX wait status so `WIFSIGNALED()` and `WTERMSIG()`
 work. An EL1 exception remains a kernel panic.
 
+## Signals
+
+The signal-delivery layer supports process-wide dispositions and pending
+state, thread-directed pending state, per-thread masks, `signal()`/
+`sigaction()`, `raise()`/PID and process-group `kill()`, `sigprocmask()`/
+`pthread_sigmask()`, and AArch64 signal frames. `SA_SIGINFO` handlers receive
+real `siginfo_t` and `ucontext_t` objects containing the sender or fault
+details and the interrupted machine context.
+Handler return enters an mlibc restorer which calls `SYS_SIGRETURN`; the kernel
+then restores all general registers, FP/SIMD registers, FPCR/FPSR, TPIDR_EL0,
+the interrupted stack/PC, and the previous mask. Synchronous EL0 faults enter
+an installed handler or retain their default process-termination behavior.
+
+`SYS_TGKILL` targets a signal at one TID in a process. mlibc uses it for
+deferred `pthread_cancel()`: the cancellation signal interrupts supported
+blocking cancellation points (`read`, blocking pipe `write`, `sleep`, `poll`,
+and futex wait), the handler verifies `SI_TKILL` and the interrupted PC, runs
+pthread cleanup handlers, and exits only the selected thread. A following
+`pthread_join()` returns `PTHREAD_CANCELED`. Disabled cancellation remains
+queued until re-enabled and a cancellation point is reached.
+
+Dispositions are inherited by `fork()`. `execve()` resets caught handlers to
+default, preserves ignored dispositions, clears pending signals, and preserves
+the calling thread's mask.
+
+The default actions for `SIGSTOP`, `SIGTSTP`, `SIGTTIN`, and `SIGTTOU` stop
+all threads in a process; `SIGCONT` resumes them, and `SIGKILL` can terminate a
+stopped process. Processes carry session and process-group IDs. `setpgid()`,
+`getpgid()`, `setsid()`, foreground-TTY `TIOCGPGRP`/`TIOCSPGRP`, and the
+corresponding mlibc interfaces let BusyBox ash create and control jobs.
+Terminal Ctrl-C, Ctrl-\\, and Ctrl-Z are recognized in the interrupt-driven
+UART receive path and sent to the foreground group even when its program is
+not reading stdin.
+
+Stopping preserves each thread's prior runnable or sleeping state together
+with its wait channel and timeout. Wakeups and deadline expiry that happen
+while a process is stopped are recorded without scheduling it; `SIGCONT`
+then either restores the original blocked wait or makes the thread runnable
+if its event already occurred. A stopped pipe read therefore still receives
+its data, and a stopped `sleep()` retains its original deadline.
+
+Parents receive `SIGCHLD` with child identity and exit, signal, stop, or
+continue information. `waitpid()` implements exact-PID and process-group
+selection plus `WNOHANG`, `WUNTRACED`, and `WCONTINUED`; stop and continue
+events do not reap the child. `SA_NOCLDSTOP` suppresses those two `SIGCHLD`
+notifications.
+
 PID reservation is separate from process-table publication. A process is
 fully initialized—including its thread list and kernel stack—before timer or
 wakeup code can discover it in the global table.
@@ -56,13 +103,19 @@ wakeup code can discover it in the global table.
   memory futexes will require physical-page-based keys.
 - The mlibc-created userspace stack has no guard page because Extron does not
   yet implement anonymous `mmap`; it uses the existing anonymous allocator.
-- There are no cancellation signals, robust mutexes, scheduling attributes,
-  or SMP locking guarantees yet.
-- Add process-wide signal state and per-thread masks/delivery state before
-  implementing pthread cancellation.
+- Robust mutexes, scheduling attributes, and SMP locking guarantees are not
+  implemented. Deferred pthread cancellation is validated; asynchronous
+  cancellation remains unvalidated and is unsafe around userspace locks.
+- Alternate signal stacks, real-time queues, `kill(-1)`, public
+  `pthread_kill()`, `sigsuspend()`, `sigtimedwait()`, `SA_NOCLDWAIT`, and
+  `SA_RESTART` are not implemented. Supported blocking calls return `EINTR`;
+  interruption is not yet generalized to every future blocking syscall.
+- Job control currently has one global console TTY. It does not yet model
+  controlling-terminal acquisition, orphaned process groups, session-leader
+  hangup, or background TTY read/write enforcement.
 - Add an mlibc-supported stack unmap/reap path once the libc side resolves its
   current join cleanup FIXME.
 
-Signals should build on this model: pending process signals belong to
-`struct proc`, while masks and delivery state belong to `struct thread`.
-SMP remains a later concern; useful blocking concurrency does not require it.
+Pending process signals belong to `struct proc`, while masks and delivery
+state belong to `struct thread`. SMP remains a later concern; useful blocking
+concurrency does not require it.

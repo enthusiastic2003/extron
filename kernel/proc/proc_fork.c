@@ -66,8 +66,12 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
 
     child->mm        = mm;
     child->parent    = parent;
+    child->pgid      = parent->pgid;
+    child->sid       = parent->sid;
     child->user_argc = parent->user_argc;
     child->user_argv = parent->user_argv;
+    signal_process_fork(child, parent);
+    child->main_thread.signal_mask = caller->signal_mask;
     memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
     file_table_clone(child, parent);
 

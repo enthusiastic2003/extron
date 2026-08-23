@@ -59,6 +59,9 @@ int futex_wait(struct proc *p, int *word, int expected, uint64_t timeout_tick) {
     }
     irq_spin_unlock(&futex_lock);
 
+    if (signal_pending_unblocked(my_thread()))
+        return -4; /* EINTR */
+
     if (timeout_tick && timer_ticks() >= timeout_tick
             && __atomic_load_n(word, __ATOMIC_RELAXED) == expected)
         return -3; /* ETIMEDOUT */

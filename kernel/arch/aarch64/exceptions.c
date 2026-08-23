@@ -125,6 +125,8 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
                   type == AARCH64_EXC_FIQ ? "FIQ" : "IRQ", id, (void *)f->elr_el1);
         }
 
+        signal_deliver_pending(f);
+
         return;
     }
 
@@ -155,6 +157,7 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
          * frame, SP_EL0 here is a banked register eret never touches,
          * so the user stack pointer survives this round trip for free. */
         f->x[0] = syscall_dispatch(f);
+        signal_deliver_pending(f);
         return;
     }
 
@@ -175,6 +178,8 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
     struct thread *thread = my_thread();
     if (from_el0 && cur && thread) {
         int signal = fault_signal(ec);
+        if (signal_deliver_sync(f, signal))
+            return;
         kprintf("\n[USER FAULT] pid=%lu tid=%lu signal=%d (%s)\n"
                 "ELR=%p ESR=%p FAR=%p\n",
                 (unsigned long)cur->pid, (unsigned long)thread->tid,

@@ -7,6 +7,7 @@
 #include <kernel/mm/vmm.h>
 #include <kernel/sync/spinlock.h>
 #include <kernel/fs/file.h>
+#include <kernel/proc/signal.h>
 
 struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular include */
 struct proc;
@@ -31,6 +32,7 @@ enum thread_state {
     THREAD_RUNNABLE,
     THREAD_RUNNING,
     THREAD_SLEEPING,
+    THREAD_STOPPED,
     THREAD_EXITED,
 };
 
@@ -97,7 +99,11 @@ struct thread {
     virt_addr_t         user_sp;             /* EL0 initial SP_EL0, used once on first launch */
     void                *chan;               /* wait channel, valid while THREAD_SLEEPING */
     uint64_t            sleep_until;         /* wake when timer_ticks() >= this; 0 = not timed */
+    enum thread_state   stop_saved_state;    /* state to restore after process continuation */
     virt_addr_t         exit_word;           /* userspace completion word, set to 1 at exit */
+    uint64_t            signal_mask;         /* blocked signals, bit (signo - 1) */
+    uint64_t            signal_pending;      /* thread-directed pending signals */
+    struct signal_info  signal_info[SIGNAL_MAX + 1];
     struct thread       *next_in_process;
 };
 
@@ -122,8 +128,18 @@ struct proc {
      * parent = created by the kernel at boot, so nothing will ever reap
      * it — see sys_wait() on why that is a leak and not a crash. */
     struct proc         *parent;
+    uint64_t            pgid;              /* process group for job control */
+    uint64_t            sid;               /* session containing that group */
     int                 exit_status;
     bool                exited;
+    bool                stopped;
+    int                 stop_signal;
+    bool                stop_event_pending;
+    bool                continue_event_pending;
+    spinlock_t          signal_lock;
+    uint64_t            signal_pending;
+    struct signal_info  signal_info[SIGNAL_MAX + 1];
+    struct signal_action signal_actions[SIGNAL_MAX + 1];
     struct open_file    *files[PROC_MAX_FDS];
     uint8_t             fd_flags[PROC_MAX_FDS];
     char                cwd[VFS_PATH_MAX + 1]; /* canonical path relative to VFS root */
@@ -188,6 +204,10 @@ void          proc_dump_table(void);
  * *out_any_children reports whether it has any children at all, which
  * is how wait() tells "not yet" from "never". */
 struct proc  *proc_find_zombie_child(struct proc *parent, bool *out_any_children);
+struct proc  *proc_find_waitable_child(struct proc *parent, int64_t selector,
+                                       int options, int *event_status,
+                                       bool *out_any_children);
+bool          proc_group_exists(uint64_t pgid, uint64_t sid);
 
 /* ---------------------------------------------------------------
  * Thread state and process-exit helpers
@@ -197,6 +217,9 @@ void thread_set_running(struct thread *t);
 void thread_set_sleeping(struct thread *t);
 void thread_set_exited(struct thread *t);
 void proc_mark_exited(struct proc *p);
+void proc_stop(struct proc *p, int signo);
+void proc_stop_current(int signo);
+void proc_continue(struct proc *p);
 
 /* Terminate the entire current process, wake only its direct parent, and
  * schedule away permanently. Non-negative status is a normal exit code;

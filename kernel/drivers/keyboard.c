@@ -1,4 +1,5 @@
 #include <kernel/drivers/keyboard.h>
+#include <kernel/drivers/tty.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
@@ -90,6 +91,11 @@ static void drain_uart(void) {
      * take one byte per interrupt. */
     bool got_any = false;
     while ((c = serial_try_getc()) != -1) {
+        /* ISIG control bytes act at arrival time, even when the foreground
+         * job is sleeping rather than reading stdin.  Consumed terminal
+         * controls do not become ordinary input bytes. */
+        if (tty_handle_input_byte((uint8_t)c))
+            continue;
         uint32_t next_head = (kbuf.head + 1) % KBD_BUFFER_SIZE;
         if (next_head != kbuf.tail) { /* drop the byte if the software buffer is full too */
             kbuf.buf[kbuf.head] = (char)c;
@@ -124,7 +130,9 @@ void init_kbd(void) {
     serial_enable_rx_irq();
 }
 
-char kbd_getc(void) {
+int kbd_getc_interruptible(char *out) {
+    if (!out)
+        return -1;
     irq_spin_lock(&kbuf.lock);
     while (kbuf.head == kbuf.tail) {
         /* sleep() releases kbuf.lock, marks this thread THREAD_SLEEPING on
@@ -133,11 +141,21 @@ char kbd_getc(void) {
          * kbuf.lock itself once kbd_irq_handler()'s wakeup(&kbuf) (above)
          * resumes this proc, so the loop's re-check below is safe. */
         sleep(&kbuf, &kbuf.lock);
+        if (signal_pending_unblocked(my_thread())) {
+            irq_spin_unlock(&kbuf.lock);
+            return -1;
+        }
     }
-    char c = kbuf.buf[kbuf.tail];
+    *out = kbuf.buf[kbuf.tail];
     kbuf.tail = (kbuf.tail + 1) % KBD_BUFFER_SIZE;
     irq_spin_unlock(&kbuf.lock);
-    return c;
+    return 1;
+}
+
+char kbd_getc(void) {
+    char out = 0;
+    while (kbd_getc_interruptible(&out) < 0) { }
+    return out;
 }
 
 int kbd_try_getc(char *out) {

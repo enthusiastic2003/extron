@@ -1,6 +1,7 @@
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/proc/proc.h>
+#include <kernel/proc/sched.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/keyboard.h>
 #include <kernel/mm/kheap.h>
@@ -345,6 +346,10 @@ static long pipe_read(struct open_file *f, void *buffer, size_t count) {
             return -1;
         }
         sleep(pipe, &pipe->lock);
+        if (signal_pending_unblocked(my_thread())) {
+            irq_spin_unlock(&pipe->lock);
+            return -4; /* EINTR */
+        }
     }
     if (!pipe->used) {
         irq_spin_unlock(&pipe->lock);
@@ -375,6 +380,10 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
                 return written ? (long)written : -1;
             }
             sleep(pipe, &pipe->lock);
+            if (signal_pending_unblocked(my_thread())) {
+                irq_spin_unlock(&pipe->lock);
+                return written ? (long)written : -4; /* EINTR */
+            }
         }
         if (!pipe->readers) {
             irq_spin_unlock(&pipe->lock);

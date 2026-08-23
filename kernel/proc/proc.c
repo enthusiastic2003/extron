@@ -1,6 +1,7 @@
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/futex.h>
+#include <kernel/proc/signal.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/mm/paging.h>
@@ -90,8 +91,15 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->user_argc = 0;
     p->user_argv = 0;
     p->parent = NULL;
+    p->pgid = pid;
+    p->sid = pid;
     p->exit_status = 0;
     p->exited = false;
+    p->stopped = false;
+    p->stop_signal = 0;
+    p->stop_event_pending = false;
+    p->continue_event_pending = false;
+    signal_process_init(p);
     p->cwd[0] = '\0';
     file_table_init(p);
 
@@ -207,6 +215,7 @@ struct thread *proc_thread_create(struct proc *p, virt_addr_t entry,
         return NULL;
     }
     t->exit_word = exit_word;
+    t->signal_mask = my_thread() ? my_thread()->signal_mask : 0;
 
     irq_spin_lock(&proc_table_lock);
     t->next_in_process = p->threads;
@@ -370,13 +379,78 @@ struct proc *proc_find_zombie_child(struct proc *parent, bool *out_any_children)
     return found;
 }
 
+/* selector follows waitpid(): >0 exact PID, -1 any child, 0 caller's
+ * process group, <-1 the absolute value names a process group. */
+struct proc *proc_find_waitable_child(struct proc *parent, int64_t selector,
+                                      int options, int *event_status,
+                                      bool *out_any_children) {
+    struct proc *found = NULL;
+    bool any = false;
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < MAX_PROCS; i++) {
+        struct proc *p = proc_table[i];
+        if (!p || p->parent != parent)
+            continue;
+        bool selected = selector == -1
+            || (selector > 0 && p->pid == (uint64_t)selector)
+            || (selector == 0 && p->pgid == parent->pgid)
+            || (selector < -1 && p->pgid == (uint64_t)-selector);
+        if (!selected)
+            continue;
+        any = true;
+        if (p->exited) {
+            *event_status = p->exit_status;
+            found = p;
+            break;
+        }
+        if ((options & 2) && p->stop_event_pending) { /* WUNTRACED */
+            p->stop_event_pending = false;
+            *event_status = 0x10000 | (p->stop_signal & 0xff);
+            found = p;
+            break;
+        }
+        if ((options & 8) && p->continue_event_pending) { /* WCONTINUED */
+            p->continue_event_pending = false;
+            *event_status = 0x20000;
+            found = p;
+            break;
+        }
+    }
+    irq_spin_unlock(&proc_table_lock);
+    if (out_any_children)
+        *out_any_children = any;
+    return found;
+}
+
+bool proc_group_exists(uint64_t pgid, uint64_t sid) {
+    bool found = false;
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < MAX_PROCS; i++)
+        if (proc_table[i] && !proc_table[i]->exited
+                && proc_table[i]->pgid == pgid
+                && proc_table[i]->sid == sid) {
+            found = true;
+            break;
+        }
+    irq_spin_unlock(&proc_table_lock);
+    return found;
+}
+
 void proc_for_each(void (*fn)(struct proc *, void *), void *arg) {
+    /* Callbacks may wake processes (for example, group-directed SIGCONT),
+     * and wakeup() needs proc_table_lock itself.  Snapshot the table so no
+     * callback runs beneath the global process-table lock.  Process objects
+     * are not freed concurrently on the current single-core kernel. */
+    struct proc *snapshot[MAX_PROCS];
+    size_t count = 0;
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++) {
         if (proc_table[i])
-            fn(proc_table[i], arg);
+            snapshot[count++] = proc_table[i];
     }
     irq_spin_unlock(&proc_table_lock);
+    for (size_t i = 0; i < count; i++)
+        fn(snapshot[i], arg);
 }
 
 static const char *thread_state_str(enum thread_state s) {
@@ -385,6 +459,7 @@ static const char *thread_state_str(enum thread_state s) {
         case THREAD_RUNNABLE: return "RUNNABLE";
         case THREAD_RUNNING:  return "RUNNING";
         case THREAD_SLEEPING: return "SLEEPING";
+        case THREAD_STOPPED:  return "STOPPED";
         case THREAD_EXITED:   return "EXITED";
         default:              return "UNKNOWN";
     }
@@ -422,6 +497,60 @@ void thread_set_sleeping(struct thread *t) { if (t) t->state = THREAD_SLEEPING; 
 void thread_set_exited(struct thread *t)   { if (t) t->state = THREAD_EXITED; }
 void proc_mark_exited(struct proc *p)      { if (p) p->exited = true; }
 
+void proc_stop(struct proc *p, int signo) {
+    if (!p || p->exited || p->stopped)
+        return;
+    struct thread *self = my_thread();
+    bool stops_self = self && self->process == p;
+    p->stopped = true;
+    p->stop_signal = signo;
+    p->stop_event_pending = true;
+    p->continue_event_pending = false;
+    for (struct thread *t = p->threads; t; t = t->next_in_process) {
+        if (t->state == THREAD_EXITED)
+            continue;
+        t->stop_saved_state = t->state;
+        if (t->state == THREAD_RUNNABLE)
+            sched_policy_remove(t);
+        t->state = THREAD_STOPPED;
+    }
+    signal_notify_parent(p, 5, signo); /* CLD_STOPPED */
+    if (p->parent)
+        wakeup(p->parent);
+    if (stops_self)
+        schedule();
+}
+
+void proc_stop_current(int signo) {
+    struct proc *p = my_proc();
+    if (!p || !my_thread())
+        panic("proc_stop_current without a current process");
+    proc_stop(p, signo);
+}
+
+void proc_continue(struct proc *p) {
+    if (!p || p->exited || !p->stopped)
+        return;
+    p->stopped = false;
+    p->continue_event_pending = true;
+    for (struct thread *t = p->threads; t; t = t->next_in_process) {
+        if (t->state != THREAD_STOPPED)
+            continue;
+        enum thread_state saved = t->stop_saved_state;
+        t->stop_saved_state = THREAD_UNUSED;
+        if (saved == THREAD_SLEEPING) {
+            t->state = THREAD_SLEEPING;
+        } else {
+            t->chan = NULL;
+            t->sleep_until = 0;
+            sched_policy_add(t);
+        }
+    }
+    signal_notify_parent(p, 6, 18); /* CLD_CONTINUED, SIGCONT */
+    if (p->parent)
+        wakeup(p->parent);
+}
+
 void proc_exit_current(int status) {
     struct proc *p = my_proc();
     struct thread *self = my_thread();
@@ -435,6 +564,8 @@ void proc_exit_current(int status) {
     file_table_close_all(p);
     proc_mark_exited(p);
     thread_set_exited(self);
+    signal_notify_parent(p, status < 0 ? 2 : 1,
+                         status < 0 ? -status : status);
 
     /* Notify exactly the direct parent. It decides whether and how to handle
      * the child status through wait(); no ancestor is skipped. */
@@ -488,6 +619,15 @@ void wakeup(void *chan) {
                 t->chan = NULL;
                 t->sleep_until = 0;
                 sched_policy_add(t); /* sets THREAD_RUNNABLE itself */
+            } else if (t->state == THREAD_STOPPED
+                    && t->stop_saved_state == THREAD_SLEEPING
+                    && t->chan == chan) {
+                /* The event happened while the process was stopped.  Record
+                 * that it should be runnable after SIGCONT without actually
+                 * scheduling it before then. */
+                t->chan = NULL;
+                t->sleep_until = 0;
+                t->stop_saved_state = THREAD_RUNNABLE;
             }
     }
     irq_spin_unlock(&proc_table_lock);
@@ -504,6 +644,12 @@ void thread_wakeup_expired(uint64_t now) {
                 t->chan = NULL;
                 t->sleep_until = 0;
                 sched_policy_add(t); /* sets THREAD_RUNNABLE itself */
+            } else if (t->state == THREAD_STOPPED
+                    && t->stop_saved_state == THREAD_SLEEPING
+                    && t->sleep_until && now >= t->sleep_until) {
+                t->chan = NULL;
+                t->sleep_until = 0;
+                t->stop_saved_state = THREAD_RUNNABLE;
             }
     }
     irq_spin_unlock(&proc_table_lock);

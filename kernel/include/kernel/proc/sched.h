@@ -47,5 +47,6 @@ extern void   context_switch(struct cpu_context *old, struct cpu_context *new_ct
  * fork() needs it because the parent's own saved context is stale — the
  * current values are in the registers, not in the struct. */
 extern void   cpu_context_save_fpsimd(struct cpu_context *c);
+extern void   cpu_context_restore_fpsimd(struct cpu_context *c);
 
 #endif

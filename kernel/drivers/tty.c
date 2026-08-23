@@ -2,6 +2,7 @@
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/klibc/string.h>
+#include <kernel/proc/signal.h>
 #include <arch/irq_spinlock.h>
 #include <stdbool.h>
 
@@ -26,6 +27,7 @@
 #define CREAD 0000200
 #define CLOCAL 0004000
 #define ICANON 0000002
+#define ISIG   0000001
 #define ECHO 0000010
 #define ECHOE 0000020
 #define ECHOK 0000040
@@ -41,6 +43,7 @@ struct console_tty {
     size_t canonical_offset;
     bool canonical_ready;
     bool canonical_eof;
+    uint64_t foreground_pgid;
 };
 
 static struct console_tty console_tty = { .lock = SPINLOCK_INIT };
@@ -78,7 +81,7 @@ void tty_init(void) {
     console_tty.termios.iflag = ICRNL;
     console_tty.termios.oflag = OPOST | ONLCR;
     console_tty.termios.cflag = CS8 | CREAD | CLOCAL;
-    console_tty.termios.lflag = ICANON | ECHO | ECHOE | ECHOK;
+    console_tty.termios.lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK;
     console_tty.termios.cc[VINTR] = 3;     /* Ctrl-C */
     console_tty.termios.cc[VQUIT] = 28;    /* Ctrl-\\ */
     console_tty.termios.cc[VERASE] = 127;  /* DEL */
@@ -99,7 +102,32 @@ void tty_init(void) {
     console_tty.canonical_offset = 0;
     console_tty.canonical_ready = false;
     console_tty.canonical_eof = false;
+    console_tty.foreground_pgid = 1; /* boot shell is PID/PGID 1 */
     irq_spin_unlock(&console_tty.lock);
+}
+
+bool tty_handle_input_byte(uint8_t byte) {
+    irq_spin_lock(&console_tty.lock);
+    if (!(console_tty.termios.lflag & ISIG)
+            || (byte != console_tty.termios.cc[VINTR]
+                && byte != console_tty.termios.cc[VQUIT]
+                && byte != console_tty.termios.cc[VSUSP])) {
+        irq_spin_unlock(&console_tty.lock);
+        return false;
+    }
+
+    int signo = byte == console_tty.termios.cc[VINTR] ? 2
+        : byte == console_tty.termios.cc[VQUIT] ? 3 : 20;
+    uint64_t pgid = console_tty.foreground_pgid;
+    console_tty.canonical_length = 0;
+    console_tty.canonical_offset = 0;
+    console_tty.canonical_ready = false;
+    console_tty.canonical_eof = false;
+    emit_locked('\n');
+    irq_spin_unlock(&console_tty.lock);
+
+    signal_send_group(pgid, signo);
+    return true;
 }
 
 static long read_noncanonical(char *buffer, size_t count) {
@@ -111,7 +139,9 @@ static long read_noncanonical(char *buffer, size_t count) {
 
     size_t received = 0;
     while (received < minimum) {
-        char raw = kbd_getc();
+        char raw;
+        if (kbd_getc_interruptible(&raw) < 0)
+            return received ? (long)received : -4; /* EINTR */
         irq_spin_lock(&console_tty.lock);
         bool discard;
         char byte = map_input_locked(raw, &discard);
@@ -136,9 +166,11 @@ static long read_noncanonical(char *buffer, size_t count) {
     return (long)received;
 }
 
-static void fill_canonical_line(void) {
+static int fill_canonical_line(void) {
     for (;;) {
-        char raw = kbd_getc();
+        char raw;
+        if (kbd_getc_interruptible(&raw) < 0)
+            return -4; /* EINTR */
         irq_spin_lock(&console_tty.lock);
         bool discard;
         char byte = map_input_locked(raw, &discard);
@@ -184,7 +216,7 @@ static void fill_canonical_line(void) {
             console_tty.canonical_ready = true;
             console_tty.canonical_eof = console_tty.canonical_length == 0;
             irq_spin_unlock(&console_tty.lock);
-            return;
+            return 0;
         }
 
         if (console_tty.canonical_length < TTY_CANON_MAX)
@@ -193,7 +225,7 @@ static void fill_canonical_line(void) {
         if (byte == '\n' || console_tty.canonical_length == TTY_CANON_MAX) {
             console_tty.canonical_ready = true;
             irq_spin_unlock(&console_tty.lock);
-            return;
+            return 0;
         }
         irq_spin_unlock(&console_tty.lock);
     }
@@ -213,7 +245,8 @@ long tty_read(void *buffer, size_t count) {
     bool ready = console_tty.canonical_ready;
     irq_spin_unlock(&console_tty.lock);
     if (!ready)
-        fill_canonical_line();
+        if (fill_canonical_line() < 0)
+            return -4; /* EINTR */
 
     irq_spin_lock(&console_tty.lock);
     if (console_tty.canonical_eof) {
@@ -268,5 +301,18 @@ void tty_set_termios(const struct tty_termios *termios, int flush_input) {
 void tty_get_winsize(struct tty_winsize *out) {
     irq_spin_lock(&console_tty.lock);
     *out = console_tty.winsize;
+    irq_spin_unlock(&console_tty.lock);
+}
+
+uint64_t tty_foreground_pgid(void) {
+    irq_spin_lock(&console_tty.lock);
+    uint64_t pgid = console_tty.foreground_pgid;
+    irq_spin_unlock(&console_tty.lock);
+    return pgid;
+}
+
+void tty_set_foreground_pgid(uint64_t pgid) {
+    irq_spin_lock(&console_tty.lock);
+    console_tty.foreground_pgid = pgid;
     irq_spin_unlock(&console_tty.lock);
 }

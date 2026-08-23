@@ -146,3 +146,33 @@ cpu_context_save_fpsimd:
     stp q28, q29, [x0, #0x240]
     stp q30, q31, [x0, #0x260]
     ret
+
+// void cpu_context_restore_fpsimd(struct cpu_context *c);
+// Restore the state captured by cpu_context_save_fpsimd(). Signal return uses
+// this pair because an asynchronous handler is not an ordinary AAPCS64 call:
+// it must preserve every vector register, not only q8-q15.
+.global cpu_context_restore_fpsimd
+cpu_context_restore_fpsimd:
+    ldp x10, x11, [x0, #0x68]
+    msr fpcr, x10
+    msr fpsr, x11
+    ldr x12,      [x0, #0x78]
+    msr tpidr_el0, x12
+
+    ldp q0,  q1,  [x0, #0x080]
+    ldp q2,  q3,  [x0, #0x0A0]
+    ldp q4,  q5,  [x0, #0x0C0]
+    ldp q6,  q7,  [x0, #0x0E0]
+    ldp q8,  q9,  [x0, #0x100]
+    ldp q10, q11, [x0, #0x120]
+    ldp q12, q13, [x0, #0x140]
+    ldp q14, q15, [x0, #0x160]
+    ldp q16, q17, [x0, #0x180]
+    ldp q18, q19, [x0, #0x1A0]
+    ldp q20, q21, [x0, #0x1C0]
+    ldp q22, q23, [x0, #0x1E0]
+    ldp q24, q25, [x0, #0x200]
+    ldp q26, q27, [x0, #0x220]
+    ldp q28, q29, [x0, #0x240]
+    ldp q30, q31, [x0, #0x260]
+    ret

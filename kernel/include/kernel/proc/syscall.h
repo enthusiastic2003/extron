@@ -50,6 +50,14 @@
 #define SYS_THREAD_JOIN 32
 #define SYS_FUTEX_WAIT  33
 #define SYS_FUTEX_WAKE  34
+#define SYS_SIGACTION   35
+#define SYS_KILL        36
+#define SYS_SIGPROCMASK 37
+#define SYS_SIGRETURN   38
+#define SYS_TGKILL      39
+#define SYS_GETPGID     40
+#define SYS_SETPGID     41
+#define SYS_SETSID      42
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

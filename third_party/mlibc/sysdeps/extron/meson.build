@@ -15,7 +15,8 @@ add_project_arguments('-D_GNU_SOURCE', language: ['c', 'cpp'])
 
 # Compile our generic.cpp into both the dynamic linker and the standard library
 # rtld_sources += files('generic/generic.cpp')
-libc_sources += files('generic/generic.cpp', 'generic/thread.cpp', 'thread_entry.S')
+libc_sources += files('generic/generic.cpp', 'generic/thread.cpp',
+    'thread_entry.S', 'signals.S')
 
 # rtld_include_dirs += include_directories('include')
 libc_include_dirs += include_directories('include')

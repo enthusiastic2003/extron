@@ -188,6 +188,7 @@ static uint64_t sys_thread_exit(uint64_t a, uint64_t b, uint64_t c,
         p->exit_status = 0;
         file_table_close_all(p);
         proc_mark_exited(p);
+        signal_notify_parent(p, 1, 0); /* CLD_EXITED */
         if (p->parent)
             wakeup(p->parent);
     }
@@ -240,6 +241,106 @@ static uint64_t sys_futex_wake(uint64_t word_addr, uint64_t b, uint64_t c,
     return (uint64_t)futex_wake(p, (int *)word_addr);
 }
 
+struct user_sigaction {
+    uint64_t handler;
+    uint64_t flags;
+    uint64_t restorer;
+    uint64_t mask[16];
+};
+
+static uint64_t sys_sigaction(uint64_t signo, uint64_t action_addr,
+                              uint64_t old_addr, struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (signo < 1 || signo > SIGNAL_MAX)
+        return (uint64_t)-1;
+    if (old_addr) {
+        if (!user_buffer_ok(p, old_addr, sizeof(struct user_sigaction)))
+            return (uint64_t)-1;
+        struct signal_action old;
+        if (signal_action_get(p, (int)signo, &old) != 0)
+            return (uint64_t)-1;
+        struct user_sigaction *out = (struct user_sigaction *)old_addr;
+        memset(out, 0, sizeof(*out));
+        out->handler = old.handler;
+        out->flags = old.flags;
+        out->restorer = old.restorer;
+        out->mask[0] = old.mask;
+    }
+    if (action_addr) {
+        if (!user_buffer_ok(p, action_addr, sizeof(struct user_sigaction)))
+            return (uint64_t)-1;
+        const struct user_sigaction *in =
+            (const struct user_sigaction *)action_addr;
+        struct signal_action action = {
+            .handler = in->handler,
+            .flags = in->flags,
+            .restorer = in->restorer,
+            .mask = in->mask[0],
+        };
+        if (action.handler > SIGNAL_IGN
+                && (!user_buffer_ok(p, action.handler, 1)
+                    || !user_buffer_ok(p, action.restorer, 1)))
+            return (uint64_t)-1;
+        if (signal_action_set(p, (int)signo, &action) != 0)
+            return (uint64_t)-1;
+    }
+    return 0;
+}
+
+static uint64_t sys_kill(uint64_t pid, uint64_t signo, uint64_t c,
+                         struct aarch64_frame *f) {
+    (void)c; (void)f;
+    int64_t selector = (int64_t)pid;
+    if (selector > 0) {
+        struct proc *target = proc_lookup((uint64_t)selector);
+        return signal_send(target, (int)signo) == 0 ? 0 : (uint64_t)-1;
+    }
+    uint64_t pgid = selector == 0 ? my_proc()->pgid
+                                  : selector < -1 ? (uint64_t)-selector : 0;
+    return pgid && signal_send_group(pgid, (int)signo) == 0
+        ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_tgkill(uint64_t pid, uint64_t tid, uint64_t signo,
+                           struct aarch64_frame *f) {
+    (void)f;
+    if ((int64_t)pid <= 0 || (int64_t)tid <= 0)
+        return (uint64_t)-1;
+    struct proc *target = proc_lookup(pid);
+    struct thread *thread = proc_thread_lookup(target, tid);
+    return signal_send_thread(target, thread, (int)signo) == 0
+        ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_addr,
+                                uint64_t old_addr, struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    uint64_t set = 0, old = 0;
+    if (set_addr) {
+        if (!user_buffer_ok(p, set_addr, 16 * sizeof(uint64_t)))
+            return (uint64_t)-1;
+        set = *(const uint64_t *)set_addr;
+    }
+    if (old_addr && !user_buffer_ok(p, old_addr, 16 * sizeof(uint64_t)))
+        return (uint64_t)-1;
+    if (signal_mask_update(my_thread(), (int)how,
+                           set_addr ? &set : NULL, &old) != 0)
+        return (uint64_t)-1;
+    if (old_addr) {
+        memset((void *)old_addr, 0, 16 * sizeof(uint64_t));
+        *(uint64_t *)old_addr = old;
+    }
+    return 0;
+}
+
+static uint64_t sys_sigreturn(uint64_t a, uint64_t b, uint64_t c,
+                              struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c;
+    return signal_sigreturn(f);
+}
+
 /* fd 0 is the system console TTY. keyboard.c fills the raw
  * interrupt-driven ring; tty_read() owns termios policy. */
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
@@ -262,6 +363,8 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
 #define TIOCGWINSZ 0x5413
+#define TIOCGPGRP  0x540F
+#define TIOCSPGRP  0x5410
 #define POLLIN 0x0001
 #define POLLOUT 0x0004
 #define POLLNVAL 0x0020
@@ -294,6 +397,21 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
             return (uint64_t)-1;
         tty_get_winsize((struct tty_winsize *)arg);
+        return 0;
+    }
+    if (request == TIOCGPGRP) {
+        if (!user_buffer_ok(p, arg, sizeof(int)))
+            return (uint64_t)-1;
+        *(int *)arg = (int)tty_foreground_pgid();
+        return 0;
+    }
+    if (request == TIOCSPGRP) {
+        if (!user_buffer_ok(p, arg, sizeof(int)))
+            return (uint64_t)-1;
+        int pgid = *(const int *)arg;
+        if (pgid <= 0 || !proc_group_exists((uint64_t)pgid, p->sid))
+            return (uint64_t)-1;
+        tty_set_foreground_pgid((uint64_t)pgid);
         return 0;
     }
     return (uint64_t)-1;
@@ -335,6 +453,8 @@ static uint64_t sys_poll(uint64_t fds_addr, uint64_t count, uint64_t timeout_raw
     if (!waits_for_input)
         return 0;
     kbd_wait_for_input(timeout);
+    if (signal_pending_unblocked(my_thread()))
+        return (uint64_t)-4; /* EINTR */
     return (uint64_t)poll_scan(fds, count);
 }
 
@@ -418,7 +538,7 @@ static uint64_t sys_sleep(uint64_t seconds, uint64_t nanos, uint64_t arg3,
     t->sleep_until = timer_ticks() + ticks;
     thread_set_sleeping(t);
     schedule();
-    return 0;
+    return signal_pending_unblocked(t) ? (uint64_t)-4 : 0; /* EINTR */
 }
 
 static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
@@ -598,6 +718,43 @@ static uint64_t sys_getppid(uint64_t a, uint64_t b, uint64_t c,
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     return p->parent ? p->parent->pid : 0;
+}
+
+static uint64_t sys_getpgid(uint64_t pid, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *caller = my_proc();
+    struct proc *target = pid ? proc_lookup(pid) : caller;
+    if (!target || target->sid != caller->sid)
+        return (uint64_t)-1;
+    return target->pgid;
+}
+
+static uint64_t sys_setpgid(uint64_t pid, uint64_t pgid, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *caller = my_proc();
+    struct proc *target = pid ? proc_lookup(pid) : caller;
+    if (!target || (target != caller && target->parent != caller)
+            || target->sid != caller->sid || target->pid == target->sid)
+        return (uint64_t)-1;
+    if (!pgid)
+        pgid = target->pid;
+    if (pgid != target->pid && !proc_group_exists(pgid, caller->sid))
+        return (uint64_t)-1;
+    target->pgid = pgid;
+    return 0;
+}
+
+static uint64_t sys_setsid(uint64_t a, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (p->pgid == p->pid)
+        return (uint64_t)-1;
+    p->sid = p->pid;
+    p->pgid = p->pid;
+    return p->sid;
 }
 
 static uint64_t sys_getcwd(uint64_t buffer, uint64_t size, uint64_t c,
@@ -785,6 +942,7 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
      * this DAIF-masked syscall replaces the address space, so removing and
      * freeing them here closes the last path back into the old image. */
     proc_terminate_other_threads(p, my_thread(), true);
+    signal_process_exec(p);
 
     /* Start the new program from a clean register state rather than
      * inheriting the old one's. Anything left behind would be a value
@@ -816,12 +974,15 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
  * process. That leaks the orphan's memory until reboot, and is worth
  * fixing when there's a shell to own the problem.
  */
-static uint64_t sys_wait(uint64_t status_addr, uint64_t b, uint64_t c,
+static uint64_t sys_wait(uint64_t status_addr, uint64_t selector_raw,
+                         uint64_t options_raw,
                          struct aarch64_frame *f) {
-    (void)b;
-    (void)c;
     (void)f;
     struct proc *p = my_proc();
+    int64_t selector = (int64_t)selector_raw;
+    int options = (int)options_raw;
+    if ((options & ~(1 | 2 | 8)) != 0)
+        return (uint64_t)-1;
 
     if (status_addr && !user_buffer_ok(p, status_addr, sizeof(int))) {
         kprintf("[SYSCALL wait] rejected status pointer %p from pid %lu\n",
@@ -831,18 +992,23 @@ static uint64_t sys_wait(uint64_t status_addr, uint64_t b, uint64_t c,
 
     for (;;) {
         bool any_children = false;
-        struct proc *zombie = proc_find_zombie_child(p, &any_children);
+        int event_status = 0;
+        struct proc *child = proc_find_waitable_child(
+            p, selector, options, &event_status, &any_children);
 
-        if (zombie) {
-            uint64_t pid    = zombie->pid;
-            int      status = zombie->exit_status;
-            proc_destroy(zombie);
+        if (child) {
+            uint64_t pid = child->pid;
+            bool exited = child->exited;
+            if (exited)
+                proc_destroy(child);
             if (status_addr)
-                *(int *)status_addr = status;
+                *(int *)status_addr = event_status;
             return pid;
         }
         if (!any_children)
             return (uint64_t)-1;
+        if (options & 1) /* WNOHANG */
+            return 0;
 
         /* Sleep on our own address as the channel; sys_exit() wakes it.
          * No lock is taken around this for the same reason sys_sleep()
@@ -881,6 +1047,9 @@ static const syscall_fn syscall_table[] = {
     [SYS_MKDIR]      = sys_mkdir,
     [SYS_GETPID]     = sys_getpid,
     [SYS_GETPPID]    = sys_getppid,
+    [SYS_GETPGID]    = sys_getpgid,
+    [SYS_SETPGID]    = sys_setpgid,
+    [SYS_SETSID]     = sys_setsid,
     [SYS_GETCWD]     = sys_getcwd,
     [SYS_CHDIR]      = sys_chdir,
     [SYS_READDIR]    = sys_readdir,
@@ -897,6 +1066,11 @@ static const syscall_fn syscall_table[] = {
     [SYS_THREAD_JOIN] = sys_thread_join,
     [SYS_FUTEX_WAIT] = sys_futex_wait,
     [SYS_FUTEX_WAKE] = sys_futex_wake,
+    [SYS_SIGACTION] = sys_sigaction,
+    [SYS_KILL] = sys_kill,
+    [SYS_SIGPROCMASK] = sys_sigprocmask,
+    [SYS_SIGRETURN] = sys_sigreturn,
+    [SYS_TGKILL] = sys_tgkill,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

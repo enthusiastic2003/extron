@@ -12,6 +12,7 @@
  */
 void init_kbd(void);
 char kbd_getc(void); /* blocks until a byte arrives */
+int kbd_getc_interruptible(char *out); /* 1=byte, -1=unblocked signal */
 int kbd_try_getc(char *out); /* returns 1 when a byte was available, else 0 */
 int kbd_input_ready(void);
 int kbd_wait_for_input(int timeout_ms);

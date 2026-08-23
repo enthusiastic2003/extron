@@ -58,6 +58,14 @@
 #define SYS_THREAD_JOIN 32
 #define SYS_FUTEX_WAIT  33
 #define SYS_FUTEX_WAKE  34
+#define SYS_SIGACTION   35
+#define SYS_KILL        36
+#define SYS_SIGPROCMASK 37
+#define SYS_SIGRETURN   38
+#define SYS_TGKILL      39
+#define SYS_GETPGID     40
+#define SYS_SETPGID     41
+#define SYS_SETSID      42
 
 
 using main_fn = int (*)(int, char **);
@@ -172,6 +180,12 @@ static inline long syscall3(long n, long a1, long a2, long a3) {
     return x0;
 }
 
+extern "C" long __mlibc_do_asm_cp_syscall(long, long, long, long);
+
+static inline long cp_syscall3(long n, long a1, long a2, long a3) {
+    return __mlibc_do_asm_cp_syscall(n, a1, a2, a3);
+}
+
 // ----------------------------------------------------------------
 // 2. mlibc Required Sysdeps
 // ----------------------------------------------------------------
@@ -229,14 +243,48 @@ int sys_stat(fsfd_target target, int fd, const char *path, int,
     return ret < 0 ? ENOENT : 0;
 }
 
-int sys_sigaction(int, const struct sigaction *, struct sigaction *oldact) {
-    if (oldact) memset(oldact, 0, sizeof(*oldact));
-    return 0;
+extern "C" void __mlibc_signal_restore();
+
+int sys_sigaction(int signo, const struct sigaction *action,
+                  struct sigaction *oldact) {
+    struct sigaction installed;
+    const struct sigaction *input = action;
+    if (action) {
+        installed = *action;
+        installed.sa_flags |= SA_RESTORER;
+        installed.sa_restorer = __mlibc_signal_restore;
+        input = &installed;
+    }
+    long ret = syscall3(SYS_SIGACTION, signo, (long)input, (long)oldact);
+    return ret < 0 ? EINVAL : 0;
 }
 
-int sys_sigprocmask(int, const sigset_t *, sigset_t *oldset) {
-    if (oldset) memset(oldset, 0, sizeof(*oldset));
-    return 0;
+int sys_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
+    long ret = syscall3(SYS_SIGPROCMASK, how, (long)set, (long)oldset);
+    return ret < 0 ? EINVAL : 0;
+}
+
+int sys_thread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
+    return sys_sigprocmask(how, set, oldset);
+}
+
+int sys_kill(int pid, int signal) {
+    long ret = syscall2(SYS_KILL, pid, signal);
+    return ret < 0 ? ESRCH : 0;
+}
+
+int sys_tgkill(int pid, int tid, int signal) {
+    long ret = syscall3(SYS_TGKILL, pid, tid, signal);
+    return ret < 0 ? ESRCH : 0;
+}
+
+extern "C" const char __mlibc_syscall_begin[1];
+extern "C" const char __mlibc_syscall_end[1];
+
+int sys_before_cancellable_syscall(ucontext_t *context) {
+    uintptr_t pc = context->uc_mcontext.pc;
+    return pc >= reinterpret_cast<uintptr_t>(__mlibc_syscall_begin)
+        && pc <= reinterpret_cast<uintptr_t>(__mlibc_syscall_end);
 }
 
 // --- Panic & Logging (Crucial for debugging early boot) ---
@@ -338,11 +386,11 @@ int sys_fork(pid_t *child) {
  */
 int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
     (void)ru;
-    if (pid != -1 || flags != 0)
-        return ENOSYS;
+    if (flags & ~(WNOHANG | WUNTRACED | WCONTINUED))
+        return EINVAL;
 
     int st = 0;
-    long reaped = syscall1(SYS_WAIT, (long)&st);
+    long reaped = syscall3(SYS_WAIT, (long)&st, pid, flags);
     if (reaped < 0)
         return ECHILD; /* the kernel's only failure mode: no children at all */
 
@@ -357,9 +405,36 @@ int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret
      * needs to see N — found by that exact check failing although the
      * kernel's own [SYSCALL exit] log line confirmed the child really
      * did exit with status 42. */
-    if (status)
-        *status = st < 0 ? (-st & 0x7f) : ((st & 0xff) << 8);
+    if (status) {
+        /* Internal transition tags are small positive values.  Testing a
+         * single tag bit is incorrect for signal deaths: e.g. -SIGTERM is
+         * 0xfffffff1 and therefore has every high tag bit set. */
+        if ((st & ~0xff) == 0x10000)
+            *status = ((st & 0xff) << 8) | 0x7f;
+        else if (st == 0x20000)
+            *status = 0xffff;
+        else
+            *status = st < 0 ? (-st & 0x7f) : ((st & 0xff) << 8);
+    }
     *ret_pid = (pid_t)reaped;
+    return 0;
+}
+
+int sys_getpgid(pid_t pid, pid_t *pgid) {
+    long ret = syscall1(SYS_GETPGID, pid);
+    if (ret < 0) return ESRCH;
+    *pgid = (pid_t)ret;
+    return 0;
+}
+
+int sys_setpgid(pid_t pid, pid_t pgid) {
+    return syscall2(SYS_SETPGID, pid, pgid) < 0 ? EPERM : 0;
+}
+
+int sys_setsid(pid_t *sid) {
+    long ret = syscall0(SYS_SETSID);
+    if (ret < 0) return EPERM;
+    *sid = (pid_t)ret;
     return 0;
 }
 
@@ -370,7 +445,7 @@ int sys_execve(const char *path, char *const argv[], char *const envp[]) {
 }
 
 int sys_sleep(time_t *secs, long *nanos) {
-    long ret = syscall2(SYS_SLEEP, *secs, nanos ? *nanos : 0);
+    long ret = cp_syscall3(SYS_SLEEP, *secs, nanos ? *nanos : 0, 0);
     if (ret < 0) {
         return -ret;
     }
@@ -387,7 +462,7 @@ int sys_sleep(time_t *secs, long *nanos) {
 // --- Basic I/O ---
 
 int sys_read(int fd, void *buf, size_t count, ssize_t *bytes_read) {
-    long ret = syscall3(SYS_READ, fd, (long)buf, count);
+    long ret = cp_syscall3(SYS_READ, fd, (long)buf, count);
     if (ret < 0) {
         return -ret;
     }
@@ -396,7 +471,7 @@ int sys_read(int fd, void *buf, size_t count, ssize_t *bytes_read) {
 }
 
 int sys_write(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
-    long ret = syscall3(SYS_WRITE, fd, (long)buf, count);
+    long ret = cp_syscall3(SYS_WRITE, fd, (long)buf, count);
     if (ret < 0) return -ret;
     *bytes_written = ret;
     return 0;
@@ -495,9 +570,10 @@ int sys_futex_wait(int *pointer, int expected, const struct timespec *time) {
         if (!timeout_ms)
             timeout_ms = 1;
     }
-    long ret = syscall3(SYS_FUTEX_WAIT, (long)pointer, expected, timeout_ms);
+    long ret = cp_syscall3(SYS_FUTEX_WAIT, (long)pointer, expected, timeout_ms);
     if (ret == -2) return EAGAIN;
     if (ret == -3) return ETIMEDOUT;
+    if (ret == -4) return EINTR;
     return ret < 0 ? EINVAL : 0;
 }
 int sys_futex_wake(int *pointer) {
@@ -539,8 +615,8 @@ int sys_tcsetattr(int fd, int optional_action, const struct termios *attr) {
 }
 
 int sys_poll(struct pollfd *fds, nfds_t count, int timeout, int *num_events) {
-    long ret = syscall3(SYS_POLL, (long)fds, count, timeout);
-    if (ret < 0) return EINVAL;
+    long ret = cp_syscall3(SYS_POLL, (long)fds, count, timeout);
+    if (ret < 0) return -ret;
     *num_events = (int)ret;
     return 0;
 }

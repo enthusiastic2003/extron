@@ -70,7 +70,7 @@ long sys_execve(const char *path, char *const argv[], char *const envp[]) {
  * status is non-NULL.
  */
 long sys_wait(int *status) {
-    return __syscall1(SYS_WAIT, status);
+    return __syscall3(SYS_WAIT, (long)status, -1, 0);
 }
 
 long sys_gettid(void) {
