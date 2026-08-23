@@ -90,6 +90,8 @@
 #define SYS_FCHOWN      64
 #define SYS_FUTIMENS    65
 #define SYS_FCHDIR      66
+#define SYS_SETRESUID   67
+#define SYS_SETRESGID   68
 
 
 using main_fn = int (*)(int, char **);
@@ -259,6 +261,14 @@ int sys_setgid(gid_t gid) {
 }
 int sys_setegid(gid_t gid) {
     long ret = syscall1(SYS_SETEGID, gid);
+    return ret < 0 ? -ret : 0;
+}
+int sys_setresuid(uid_t ruid, uid_t euid, uid_t suid) {
+    long ret = syscall3(SYS_SETRESUID, ruid, euid, suid);
+    return ret < 0 ? -ret : 0;
+}
+int sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid) {
+    long ret = syscall3(SYS_SETRESGID, rgid, egid, sgid);
     return ret < 0 ? -ret : 0;
 }
 int sys_getgroups(size_t size, gid_t *list, int *ret_count) {

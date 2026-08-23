@@ -960,6 +960,65 @@ static uint64_t sys_setegid(uint64_t gid, uint64_t b, uint64_t c,
     return set_group_id((uint32_t)gid, true);
 }
 
+/* setresuid()/setresgid(): each of the three arrives as -1 (all bits set,
+ * whatever truncating a 64-bit register to int32_t recovers regardless of
+ * how the ABI extended it) meaning "leave this one alone". An unprivileged
+ * process (euid != 0) may only move each requested ID to one already
+ * somewhere in its OLD {real, effective, saved} triple; root may set any
+ * of the three to anything. All three checks run against the ORIGINAL
+ * triple and either all requested changes apply or none do — a partial
+ * failure would leave the process in a set of IDs no caller ever asked
+ * for. */
+static uint64_t sys_setresuid(uint64_t ruid_in, uint64_t euid_in,
+                              uint64_t suid_in, struct aarch64_frame *f) {
+    (void)f;
+    int32_t new_r = (int32_t)ruid_in, new_e = (int32_t)euid_in,
+            new_s = (int32_t)suid_in;
+    struct proc *p = my_proc();
+
+    irq_spin_lock(&p->cred_lock);
+    uint32_t old_r = p->ruid, old_e = p->euid, old_s = p->suid;
+    bool privileged = old_e == 0;
+    bool ok = (new_r < 0 || privileged || (uint32_t)new_r == old_r
+                          || (uint32_t)new_r == old_e || (uint32_t)new_r == old_s)
+           && (new_e < 0 || privileged || (uint32_t)new_e == old_r
+                          || (uint32_t)new_e == old_e || (uint32_t)new_e == old_s)
+           && (new_s < 0 || privileged || (uint32_t)new_s == old_r
+                          || (uint32_t)new_s == old_e || (uint32_t)new_s == old_s);
+    if (ok) {
+        if (new_r >= 0) p->ruid = (uint32_t)new_r;
+        if (new_e >= 0) p->euid = (uint32_t)new_e;
+        if (new_s >= 0) p->suid = (uint32_t)new_s;
+    }
+    irq_spin_unlock(&p->cred_lock);
+    return ok ? 0 : (uint64_t)-EPERM;
+}
+
+static uint64_t sys_setresgid(uint64_t rgid_in, uint64_t egid_in,
+                              uint64_t sgid_in, struct aarch64_frame *f) {
+    (void)f;
+    int32_t new_r = (int32_t)rgid_in, new_e = (int32_t)egid_in,
+            new_s = (int32_t)sgid_in;
+    struct proc *p = my_proc();
+
+    irq_spin_lock(&p->cred_lock);
+    uint32_t old_r = p->rgid, old_e = p->egid, old_s = p->sgid;
+    bool privileged = p->euid == 0;
+    bool ok = (new_r < 0 || privileged || (uint32_t)new_r == old_r
+                          || (uint32_t)new_r == old_e || (uint32_t)new_r == old_s)
+           && (new_e < 0 || privileged || (uint32_t)new_e == old_r
+                          || (uint32_t)new_e == old_e || (uint32_t)new_e == old_s)
+           && (new_s < 0 || privileged || (uint32_t)new_s == old_r
+                          || (uint32_t)new_s == old_e || (uint32_t)new_s == old_s);
+    if (ok) {
+        if (new_r >= 0) p->rgid = (uint32_t)new_r;
+        if (new_e >= 0) p->egid = (uint32_t)new_e;
+        if (new_s >= 0) p->sgid = (uint32_t)new_s;
+    }
+    irq_spin_unlock(&p->cred_lock);
+    return ok ? 0 : (uint64_t)-EPERM;
+}
+
 static uint64_t sys_getgroups(uint64_t size, uint64_t list_addr, uint64_t c,
                               struct aarch64_frame *f) {
     (void)c; (void)f;
@@ -1777,6 +1836,8 @@ static const syscall_fn syscall_table[] = {
     [SYS_FCHOWN] = sys_fchown,
     [SYS_FUTIMENS] = sys_futimens,
     [SYS_FCHDIR] = sys_fchdir,
+    [SYS_SETRESUID] = sys_setresuid,
+    [SYS_SETRESGID] = sys_setresgid,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

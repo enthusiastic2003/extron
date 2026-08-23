@@ -143,11 +143,30 @@ BusyBox rebuild with an updated path (or a `/sh` -> `/bin/sh` symlink once
 something else lives at the real location) — left for a follow-up rather than
 risked alongside everything else in this stage.
 
+## setresuid()/setresgid()
+
+Each sets the real/effective/saved triple independently, `-1` in any slot
+meaning "leave it alone" — the tool a careful privilege drop needs and
+`setuid()`/`seteuid()` can't express, since neither lets an unprivileged
+process choose its own real id apart from its effective one, or park a value
+in the saved id to `setresuid()` back to later. An unprivileged process
+(`euid != 0`) may only move each requested id to one already present
+somewhere in its OLD real/effective/saved triple; root may set any of the
+three to anything. All three requested values are checked against the
+original triple before any of them is written — a partial apply would leave
+a process with a set of credentials nobody asked for. `mlibc_setresid_test.c`
+covers the root path, the unprivileged-boundary rejections, and the fact that
+losing euid also revokes the equivalent bypass for `setresgid()` — this
+kernel's only privilege signal is `euid == 0`, so a group triple set while
+still root does not survive a later drop to a non-root uid.
+
 ## Deliberately deferred
 
 - access-control lists, capabilities, file flags, and a user/group database;
-- complete identity APIs such as `setresuid()`/`setresgid()` and filesystem-ID
-  variants;
+- filesystem-ID variants (`setfsuid()`/`setfsgid()`) — a Linux-only extra used
+  almost exclusively by NFS-style servers checking access as a specific user
+  without becoming signalable/ptraceable as them; low value here;
+- a hardware-backed realtime clock (currently uptime plus a settable offset);
 - moving BusyBox and the other initrd binaries into `/bin` (see Stage 6);
 - persistent/block-backed storage and an unmount protocol.
 
