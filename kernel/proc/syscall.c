@@ -223,7 +223,7 @@ static uint64_t sys_futex_wait(uint64_t word_addr, uint64_t expected,
     struct proc *p = my_proc();
     if ((word_addr & (sizeof(int) - 1))
             || !user_buffer_ok(p, word_addr, sizeof(int)))
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     uint64_t deadline = 0;
     if (timeout_ms) {
         uint64_t hz = timer_ticks_per_second();
@@ -239,7 +239,7 @@ static uint64_t sys_futex_wake(uint64_t word_addr, uint64_t b, uint64_t c,
     struct proc *p = my_proc();
     if ((word_addr & (sizeof(int) - 1))
             || !user_buffer_ok(p, word_addr, sizeof(int)))
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     return (uint64_t)futex_wake(p, (int *)word_addr);
 }
 
@@ -255,13 +255,13 @@ static uint64_t sys_sigaction(uint64_t signo, uint64_t action_addr,
     (void)f;
     struct proc *p = my_proc();
     if (signo < 1 || signo > SIGNAL_MAX)
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     if (old_addr) {
         if (!user_buffer_ok(p, old_addr, sizeof(struct user_sigaction)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         struct signal_action old;
         if (signal_action_get(p, (int)signo, &old) != 0)
-            return (uint64_t)-1;
+            return (uint64_t)-EINVAL;
         struct user_sigaction *out = (struct user_sigaction *)old_addr;
         memset(out, 0, sizeof(*out));
         out->handler = old.handler;
@@ -271,7 +271,7 @@ static uint64_t sys_sigaction(uint64_t signo, uint64_t action_addr,
     }
     if (action_addr) {
         if (!user_buffer_ok(p, action_addr, sizeof(struct user_sigaction)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         const struct user_sigaction *in =
             (const struct user_sigaction *)action_addr;
         struct signal_action action = {
@@ -283,9 +283,9 @@ static uint64_t sys_sigaction(uint64_t signo, uint64_t action_addr,
         if (action.handler > SIGNAL_IGN
                 && (!user_buffer_ok(p, action.handler, 1)
                     || !user_buffer_ok(p, action.restorer, 1)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         if (signal_action_set(p, (int)signo, &action) != 0)
-            return (uint64_t)-1;
+            return (uint64_t)-EINVAL;
     }
     return 0;
 }
@@ -333,14 +333,14 @@ static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_addr,
     uint64_t set = 0, old = 0;
     if (set_addr) {
         if (!user_buffer_ok(p, set_addr, 16 * sizeof(uint64_t)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         set = *(const uint64_t *)set_addr;
     }
     if (old_addr && !user_buffer_ok(p, old_addr, 16 * sizeof(uint64_t)))
-        return (uint64_t)-1;
+        return (uint64_t)-EFAULT;
     if (signal_mask_update(my_thread(), (int)how,
                            set_addr ? &set : NULL, &old) != 0)
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     if (old_addr) {
         memset((void *)old_addr, 0, 16 * sizeof(uint64_t));
         *(uint64_t *)old_addr = old;
@@ -393,41 +393,41 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     (void)f;
     struct proc *p = my_proc();
     if (!file_is_tty(p, (int)fd))
-        return (uint64_t)-1;
+        return (uint64_t)-ENOTTY;
     if (request == TCGETS) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         tty_get_termios((struct tty_termios *)arg);
         return 0;
     }
     if (request == TCSETS || request == TCSETSW || request == TCSETSF) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         tty_set_termios((const struct tty_termios *)arg, request == TCSETSF);
         return 0;
     }
     if (request == TIOCGWINSZ) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         tty_get_winsize((struct tty_winsize *)arg);
         return 0;
     }
     if (request == TIOCGPGRP) {
         if (!user_buffer_ok(p, arg, sizeof(int)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         *(int *)arg = (int)tty_foreground_pgid();
         return 0;
     }
     if (request == TIOCSPGRP) {
         if (!user_buffer_ok(p, arg, sizeof(int)))
-            return (uint64_t)-1;
+            return (uint64_t)-EFAULT;
         int pgid = *(const int *)arg;
         if (pgid <= 0 || !proc_group_exists((uint64_t)pgid, p->sid))
-            return (uint64_t)-1;
+            return (uint64_t)-EPERM;
         tty_set_foreground_pgid((uint64_t)pgid);
         return 0;
     }
-    return (uint64_t)-1;
+    return (uint64_t)-ENOTTY;
 }
 
 static int poll_scan(struct extron_pollfd *fds, size_t count) {
@@ -483,10 +483,11 @@ static uint64_t sys_pipe(uint64_t fds_addr, uint64_t flags, uint64_t c,
                          struct aarch64_frame *f) {
     (void)c; (void)f;
     if (!user_buffer_ok(my_proc(), fds_addr, 2 * sizeof(int)))
-        return (uint64_t)-1;
+        return (uint64_t)-EFAULT;
     int fds[2];
-    if (file_pipe(my_proc(), fds, (int)flags) != 0)
-        return (uint64_t)-1;
+    int result = file_pipe(my_proc(), fds, (int)flags);
+    if (result != 0)
+        return (uint64_t)result;
     ((int *)fds_addr)[0] = fds[0];
     ((int *)fds_addr)[1] = fds[1];
     return 0;
@@ -496,7 +497,7 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t flags, uint64_t c,
                         struct aarch64_frame *f) {
     (void)c; (void)f;
     if (flags & ~O_CLOEXEC)
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     return (uint64_t)file_dup(my_proc(), (int)oldfd, 0,
                               !!(flags & O_CLOEXEC));
 }
@@ -505,7 +506,7 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t flags,
                          struct aarch64_frame *f) {
     (void)f;
     if (flags & ~O_CLOEXEC)
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
     return (uint64_t)file_dup2(my_proc(), (int)oldfd, (int)newfd,
                                !!(flags & O_CLOEXEC));
 }
@@ -527,7 +528,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t request, uint64_t arg,
         case F_SETFL:
             return (uint64_t)file_set_status_flags(my_proc(), (int)fd, (int)arg);
         default:
-            return (uint64_t)-1;
+            return (uint64_t)-EINVAL;
     }
 }
 
@@ -1080,7 +1081,7 @@ static uint64_t sys_getpgid(uint64_t pid, uint64_t b, uint64_t c,
     struct proc *caller = my_proc();
     struct proc *target = pid ? proc_lookup(pid) : caller;
     if (!target || target->sid != caller->sid)
-        return (uint64_t)-1;
+        return (uint64_t)-ESRCH;
     return target->pgid;
 }
 
@@ -1089,13 +1090,15 @@ static uint64_t sys_setpgid(uint64_t pid, uint64_t pgid, uint64_t c,
     (void)c; (void)f;
     struct proc *caller = my_proc();
     struct proc *target = pid ? proc_lookup(pid) : caller;
-    if (!target || (target != caller && target->parent != caller)
+    if (!target)
+        return (uint64_t)-ESRCH;
+    if ((target != caller && target->parent != caller)
             || target->sid != caller->sid || target->pid == target->sid)
-        return (uint64_t)-1;
+        return (uint64_t)-EPERM;
     if (!pgid)
         pgid = target->pid;
     if (pgid != target->pid && !proc_group_exists(pgid, caller->sid))
-        return (uint64_t)-1;
+        return (uint64_t)-EPERM;
     target->pgid = pgid;
     return 0;
 }
@@ -1105,7 +1108,7 @@ static uint64_t sys_setsid(uint64_t a, uint64_t b, uint64_t c,
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (p->pgid == p->pid)
-        return (uint64_t)-1;
+        return (uint64_t)-EPERM;
     p->sid = p->pid;
     p->pgid = p->pid;
     return p->sid;

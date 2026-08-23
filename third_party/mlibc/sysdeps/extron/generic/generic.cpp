@@ -353,12 +353,12 @@ int sys_sigaction(int signo, const struct sigaction *action,
         input = &installed;
     }
     long ret = syscall3(SYS_SIGACTION, signo, (long)input, (long)oldact);
-    return ret < 0 ? EINVAL : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     long ret = syscall3(SYS_SIGPROCMASK, how, (long)set, (long)oldset);
-    return ret < 0 ? EINVAL : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_thread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
@@ -472,14 +472,13 @@ int sys_fork(pid_t *child) {
  * wrapper (which never went through this file at all, so the gap was
  * invisible until something used the real libc entry point).
  *
- * The kernel's own SYS_WAIT (kernel/proc/syscall.c's sys_wait()) is
- * narrower than POSIX waitpid(): it always blocks, always reaps
- * whichever child becomes a zombie first, and has no notion of
- * targeting one specific pid or of WNOHANG. Rather than silently
- * pretending to support what it can't, anything outside that one
- * shape — a real pid instead of -1 ("any child"), or any flag at all —
- * is refused with ENOSYS, the same honest signal every other
- * partially-implemented sysdep in this file gives.
+ * The kernel's own SYS_WAIT (kernel/proc/syscall.c's sys_wait()) now
+ * takes a real pid selector (-1 for "any child") and WNOHANG/WUNTRACED/
+ * WCONTINUED, via proc_find_waitable_child() — this used to be narrower
+ * (blocking-only, "any child" only), which is what the paragraph here
+ * described until the job-control work generalized it. Only a flag
+ * outside that set is still refused (with a plain failure, not ENOSYS —
+ * there's nothing left this sysdep can't express).
  */
 int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
     (void)ru;
@@ -519,18 +518,19 @@ int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret
 
 int sys_getpgid(pid_t pid, pid_t *pgid) {
     long ret = syscall1(SYS_GETPGID, pid);
-    if (ret < 0) return ESRCH;
+    if (ret < 0) return -ret;
     *pgid = (pid_t)ret;
     return 0;
 }
 
 int sys_setpgid(pid_t pid, pid_t pgid) {
-    return syscall2(SYS_SETPGID, pid, pgid) < 0 ? EPERM : 0;
+    long ret = syscall2(SYS_SETPGID, pid, pgid);
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_setsid(pid_t *sid) {
     long ret = syscall0(SYS_SETSID);
-    if (ret < 0) return EPERM;
+    if (ret < 0) return -ret;
     *sid = (pid_t)ret;
     return 0;
 }
@@ -752,19 +752,19 @@ int sys_utimensat(int dirfd, const char *path, const struct timespec times[2],
 
 int sys_pipe(int *fds, int flags) {
     long ret = syscall2(SYS_PIPE, (long)fds, flags);
-    return ret < 0 ? EMFILE : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_dup(int fd, int flags, int *newfd) {
     long ret = syscall2(SYS_DUP, fd, flags);
-    if (ret < 0) return EBADF;
+    if (ret < 0) return -ret;
     *newfd = (int)ret;
     return 0;
 }
 
 int sys_dup2(int fd, int flags, int newfd) {
     long ret = syscall3(SYS_DUP2, fd, newfd, flags);
-    return ret < 0 ? EBADF : 0;
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_fcntl(int fd, int request, va_list args, int *result) {
@@ -783,7 +783,7 @@ int sys_fcntl(int fd, int request, va_list args, int *result) {
             return EINVAL;
     }
     long ret = syscall3(SYS_FCNTL, fd, request, argument);
-    if (ret < 0) return EBADF;
+    if (ret < 0) return -ret;
     *result = (int)ret;
     return 0;
 }
@@ -814,10 +814,11 @@ int sys_futex_wait(int *pointer, int expected, const struct timespec *time) {
     if (ret == -2) return EAGAIN;
     if (ret == -3) return ETIMEDOUT;
     if (ret == -4) return EINTR;
-    return ret < 0 ? EINVAL : 0;
+    return ret < 0 ? -ret : 0;
 }
 int sys_futex_wake(int *pointer) {
-    return syscall1(SYS_FUTEX_WAKE, (long)pointer) < 0 ? EINVAL : 0;
+    long ret = syscall1(SYS_FUTEX_WAKE, (long)pointer);
+    return ret < 0 ? -ret : 0;
 }
 
 int sys_futex_tid() {
@@ -839,7 +840,7 @@ int sys_clock_set(int clock, time_t secs, long nanos) {
 
 int sys_ioctl(int fd, unsigned long request, void *arg, int *result) {
     long ret = syscall3(SYS_IOCTL, fd, request, (long)arg);
-    if (ret < 0) return fd <= 2 ? EINVAL : ENOTTY;
+    if (ret < 0) return -ret;
     if (result) *result = (int)ret;
     return 0;
 }
