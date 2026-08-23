@@ -1,5 +1,6 @@
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
+#include <kernel/proc/futex.h>
 #include <kernel/mm/vmm.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/mm/paging.h>
@@ -23,6 +24,64 @@ _Static_assert(offsetof(struct cpu_context, tpidr_el0) == 0x78, "switch.S: tpidr
 _Static_assert(offsetof(struct cpu_context, v)    == 0x80, "switch.S: v[] offset");
 _Static_assert(sizeof(((struct cpu_context *)0)->v) == 32 * 16, "switch.S: v[] covers v0-v31");
 
+static int thread_init(struct thread *t, struct proc *p, uint64_t tid,
+                       virt_addr_t entry, virt_addr_t user_sp, uint64_t tls) {
+    *t = (struct thread){0};
+    t->tid = tid;
+    t->state = THREAD_UNUSED;
+    t->process = p;
+    t->entry = entry;
+    t->user_sp = user_sp;
+
+    /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
+     * have a guard page. kmalloc hands back byte-granularity memory from
+     * inside a shared heap block — there is no page boundary to unmap
+     * and no way to make an overflow fault, so a deep call chain would
+     * quietly chew through whatever liballoc placed below it.
+     *
+     * One extra page is allocated and immediately unmapped. Its bitmap
+     * bit stays set, so nothing else claims that VA, and the stack now
+     * has an unmapped page directly beneath it: overflow takes a Data
+     * Abort naming the address instead of corrupting a neighbour. */
+    virt_addr_t region = vmm_alloc_pages(THREAD_KERNEL_STACK_PAGES + 1);
+    if (!region)
+        return -1;
+
+    phys_addr_t guard_phys = kvirt_to_phys(region);
+    kunmap(region);
+    if (guard_phys)
+        pmm_free_page((void *)guard_phys);
+
+    t->kernel_stack_base = region + PAGE_SIZE;
+    t->kernel_stack_top  = region + (THREAD_KERNEL_STACK_PAGES + 1) * PAGE_SIZE;
+    kprintf("[THREAD] PID %lu TID %lu kernel stack: %p - %p (guard page at %p)\n",
+            (unsigned long)p->pid, (unsigned long)t->tid,
+            (void *)t->kernel_stack_base, (void *)t->kernel_stack_top,
+            (void *)region);
+
+    /* forkret-style bootstrap: pre-populate the saved context as if this
+     * proc had already been switched out once, with lr pointing at the
+     * trampoline instead of a real return address, and sp at a fresh,
+     * empty stack. schedule()'s first switch to this proc is then the
+     * exact same context_switch() call as every other switch — see
+     * proc_bootstrap_trampoline()'s comment in sched.c. */
+    t->context = (struct cpu_context){0};
+    t->context.lr = (uint64_t)proc_bootstrap_trampoline;
+    t->context.sp = t->kernel_stack_top;
+    t->context.tpidr_el0 = tls;
+    return 0;
+}
+
+static void thread_destroy(struct proc *p, struct thread *t) {
+    if (!t)
+        return;
+    virt_addr_t guard = t->kernel_stack_base - PAGE_SIZE;
+    vmm_free_pages(t->kernel_stack_base, THREAD_KERNEL_STACK_PAGES);
+    vmm_free_unmapped_page(guard);
+    if (t != &p->main_thread)
+        kfree(t);
+}
+
 void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
                 virt_addr_t user_sp, phys_addr_t ttbr0) {
     p->pid   = pid;
@@ -37,50 +96,10 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     file_table_init(p);
 
     struct thread *t = &p->main_thread;
-    *t = (struct thread){0};
-    t->tid = pid;
-    t->state = THREAD_UNUSED;
-    t->process = p;
-    t->entry = entry;
-    t->user_sp = user_sp;
+    if (thread_init(t, p, pid, entry, user_sp, 0) != 0)
+        panic("aarch64 proc_init: kernel stack allocation failed");
     p->threads = t;
     p->thread_count = 1;
-
-    /* vmm_alloc_pages() rather than kmalloc(), specifically so this can
-     * have a guard page. kmalloc hands back byte-granularity memory from
-     * inside a shared heap block — there is no page boundary to unmap
-     * and no way to make an overflow fault, so a deep call chain would
-     * quietly chew through whatever liballoc placed below it.
-     *
-     * One extra page is allocated and immediately unmapped. Its bitmap
-     * bit stays set, so nothing else claims that VA, and the stack now
-     * has an unmapped page directly beneath it: overflow takes a Data
-     * Abort naming the address instead of corrupting a neighbour. */
-    virt_addr_t region = vmm_alloc_pages(THREAD_KERNEL_STACK_PAGES + 1);
-    if (!region)
-        panic("aarch64 proc_init: kernel stack allocation failed");
-
-    phys_addr_t guard_phys = kvirt_to_phys(region);
-    kunmap(region);
-    if (guard_phys)
-        pmm_free_page((void *)guard_phys);
-
-    t->kernel_stack_base = region + PAGE_SIZE;
-    t->kernel_stack_top  = region + (THREAD_KERNEL_STACK_PAGES + 1) * PAGE_SIZE;
-    kprintf("[THREAD] PID %lu TID %lu kernel stack: %p - %p (guard page at %p)\n",
-            (unsigned long)pid, (unsigned long)t->tid,
-            (void *)t->kernel_stack_base, (void *)t->kernel_stack_top,
-            (void *)region);
-
-    /* forkret-style bootstrap: pre-populate the saved context as if this
-     * proc had already been switched out once, with lr pointing at the
-     * trampoline instead of a real return address, and sp at a fresh,
-     * empty stack. schedule()'s first switch to this proc is then the
-     * exact same context_switch() call as every other switch — see
-     * proc_bootstrap_trampoline()'s comment in sched.c. */
-    t->context = (struct cpu_context){0};
-    t->context.lr = (uint64_t)proc_bootstrap_trampoline;
-    t->context.sp = t->kernel_stack_top;
 }
 
 /*
@@ -108,13 +127,7 @@ void proc_destroy(struct proc *p) {
 
     for (struct thread *t = p->threads; t;) {
         struct thread *next = t->next_in_process;
-        /* The guard page sits one page below the base and is unmapped by
-         * construction, so it can't go through vmm_free_pages(). */
-        virt_addr_t guard = t->kernel_stack_base - PAGE_SIZE;
-        vmm_free_pages(t->kernel_stack_base, THREAD_KERNEL_STACK_PAGES);
-        vmm_free_unmapped_page(guard);
-        if (t != &p->main_thread)
-            kfree(t);
+        thread_destroy(p, t);
         t = next;
     }
 
@@ -137,14 +150,14 @@ static spinlock_t   proc_table_lock  = SPINLOCK_INIT;
 /* PIDs start at 1, not 0. fork() reports 0 to the child and the child's
  * pid to the parent, so a process that legitimately owned pid 0 would
  * make those two answers indistinguishable. */
-static uint64_t     next_pid         = 1;
+static uint64_t     next_id          = 1;
 
 void proc_table_init(void) {
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < MAX_PROCS; i++)
         proc_table[i] = NULL;
     proc_table_count = 0;
-    next_pid         = 1;
+    next_id          = 1;
     irq_spin_unlock(&proc_table_lock);
     kprintf("[PROC] Process table initialized (capacity %u)\n", (unsigned)MAX_PROCS);
 }
@@ -172,9 +185,124 @@ static void proc_table_remove_locked(struct proc *p) {
 
 uint64_t proc_alloc_pid(void) {
     irq_spin_lock(&proc_table_lock);
-    uint64_t pid = next_pid++;
+    uint64_t pid = next_id++;
     irq_spin_unlock(&proc_table_lock);
     return pid;
+}
+
+uint64_t proc_alloc_tid(void) {
+    return proc_alloc_pid();
+}
+
+struct thread *proc_thread_create(struct proc *p, virt_addr_t entry,
+                                  virt_addr_t user_sp, uint64_t tls,
+                                  virt_addr_t exit_word) {
+    if (!p || p->exited)
+        return NULL;
+    struct thread *t = kmalloc(sizeof(*t));
+    if (!t)
+        return NULL;
+    if (thread_init(t, p, proc_alloc_tid(), entry, user_sp, tls) != 0) {
+        kfree(t);
+        return NULL;
+    }
+    t->exit_word = exit_word;
+
+    irq_spin_lock(&proc_table_lock);
+    t->next_in_process = p->threads;
+    p->threads = t;
+    p->thread_count++;
+    irq_spin_unlock(&proc_table_lock);
+    sched_policy_add(t);
+    return t;
+}
+
+struct thread *proc_thread_lookup(struct proc *p, uint64_t tid) {
+    if (!p)
+        return NULL;
+    irq_spin_lock(&proc_table_lock);
+    struct thread *found = NULL;
+    for (struct thread *t = p->threads; t; t = t->next_in_process) {
+        if (t->tid == tid) {
+            found = t;
+            break;
+        }
+    }
+    irq_spin_unlock(&proc_table_lock);
+    return found;
+}
+
+int proc_thread_reap(struct proc *p, uint64_t tid) {
+    if (!p)
+        return -1;
+    irq_spin_lock(&proc_table_lock);
+    struct thread **link = &p->threads;
+    while (*link && (*link)->tid != tid)
+        link = &(*link)->next_in_process;
+    struct thread *t = *link;
+    if (!t || t == my_thread() || t == &p->main_thread
+            || t->state != THREAD_EXITED) {
+        irq_spin_unlock(&proc_table_lock);
+        return -1;
+    }
+    *link = t->next_in_process;
+    p->thread_count--;
+    irq_spin_unlock(&proc_table_lock);
+    sched_policy_remove(t);
+    thread_destroy(p, t);
+    return 0;
+}
+
+bool proc_thread_is_last_live(struct proc *p, struct thread *self) {
+    if (!p)
+        return true;
+    irq_spin_lock(&proc_table_lock);
+    bool last = true;
+    for (struct thread *t = p->threads; t; t = t->next_in_process) {
+        if (t != self && t->state != THREAD_EXITED) {
+            last = false;
+            break;
+        }
+    }
+    irq_spin_unlock(&proc_table_lock);
+    return last;
+}
+
+void proc_terminate_other_threads(struct proc *p, struct thread *self,
+                                  bool reap) {
+    if (!p)
+        return;
+
+    /* Called from a DAIF-masked syscall on this single-CPU kernel, so the
+     * list is stable here. Cancel futex membership before taking the process
+     * table lock; futex wait takes those locks in the opposite order. */
+    for (struct thread *t = p->threads; t; t = t->next_in_process) {
+        if (t == self)
+            continue;
+        sched_policy_remove(t);
+        futex_cancel_thread(t);
+    }
+
+    irq_spin_lock(&proc_table_lock);
+    struct thread **link = &p->threads;
+    while (*link) {
+        struct thread *t = *link;
+        if (t == self) {
+            link = &t->next_in_process;
+            continue;
+        }
+        t->state = THREAD_EXITED;
+        t->chan = NULL;
+        t->sleep_until = 0;
+        if (!reap || t == &p->main_thread) {
+            link = &t->next_in_process;
+            continue;
+        }
+        *link = t->next_in_process;
+        p->thread_count--;
+        thread_destroy(p, t);
+    }
+    irq_spin_unlock(&proc_table_lock);
 }
 
 void proc_table_add(struct proc *p) {

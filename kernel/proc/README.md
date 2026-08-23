@@ -16,33 +16,46 @@ TLB flushes.
 
 ## Current milestone
 
-Every process currently embeds one main thread. Its TID equals the PID, and
-the process keeps a thread list so wakeups, timed sleeps, diagnostics, and
-teardown already operate on thread objects. There is deliberately no
-userspace thread-creation ABI yet.
+Every process embeds its main thread (TID equals PID) and may own dynamically
+allocated worker threads with independent TIDs and guarded kernel stacks.
+Workers share the process address space, file table, cwd, and parentage while
+retaining separate CPU/FP/TLS state and user stacks.
 
-`fork()` creates a new process with one thread that resumes from the caller's
-trap frame. `execve()` replaces the current process image and updates the
-calling thread's entry/stack bookkeeping. Process exit closes process-owned
-descriptors and marks its sole thread exited; `wait()` later destroys every
-thread stack and the shared address space from the parent's context.
+Syscalls 29--34 provide `gettid`, thread create, thread exit, thread join, and
+private futex wait/wake. Thread creation accepts an entry trampoline, initial
+userspace SP, AArch64 TLS pointer, and userspace completion word. Thread exit
+sets that word to one with release ordering and wakes its futex waiters. Raw
+join waits for `THREAD_EXITED` and reclaims the dynamic kernel thread object.
+
+Extron's mlibc sysdeps connect those primitives to ordinary `pthread_create`,
+`pthread_join`, mutexes, condition variables, and per-thread TLS. No generic
+mlibc source is patched. mlibc currently has an upstream FIXME that leaves the
+TCB and userspace stack allocated after POSIX join; the kernel objects remain
+until process teardown unless userspace also invokes Extron's raw join/reap.
+
+`fork()` creates a new process containing only the calling thread and resumes
+from its trap frame. A successful `execve()` terminates all sibling threads,
+removes stale run-queue and futex membership, and then resumes only the caller
+in the replacement image. Process exit terminates every thread, closes shared
+descriptors once, and leaves a process zombie; `wait()` destroys all remaining
+thread stacks and the shared address space from the parent's context.
 
 PID reservation is separate from process-table publication. A process is
 fully initialized—including its thread list and kernel stack—before timer or
 wakeup code can discover it in the global table.
 
-## Next threading ABI
+## Known limits and next steps
 
-The next incremental steps are:
-
-1. allocate independent TIDs and dynamically allocated thread objects;
-2. add a clone-style syscall that shares the process address space and files,
-   accepts a user stack, and installs a distinct TLS pointer;
-3. separate thread exit from final process exit and implement join/clear-TID;
-4. implement futex wait/wake for libc synchronization;
-5. teach `execve()` to terminate sibling threads and preserve POSIX fork's
-   calling-thread-only behavior;
-6. connect the Extron mlibc sysdeps to mlibc's pthread implementation.
+- Futexes are private to one process and use a fixed 256-channel table. Shared
+  memory futexes will require physical-page-based keys.
+- The mlibc-created userspace stack has no guard page because Extron does not
+  yet implement anonymous `mmap`; it uses the existing anonymous allocator.
+- There are no cancellation signals, robust mutexes, scheduling attributes,
+  or SMP locking guarantees yet.
+- Add process-wide signal state and per-thread masks/delivery state before
+  implementing pthread cancellation.
+- Add an mlibc-supported stack unmap/reap path once the libc side resolves its
+  current join cleanup FIXME.
 
 Signals should build on this model: pending process signals belong to
 `struct proc`, while masks and delivery state belong to `struct thread`.

@@ -37,6 +37,19 @@
 #define SYS_DUP         26
 #define SYS_DUP2        27
 #define SYS_FCNTL       28
+#define SYS_GETTID      29
+#define SYS_THREAD_CREATE 30
+#define SYS_THREAD_EXIT 31
+#define SYS_THREAD_JOIN 32
+#define SYS_FUTEX_WAIT  33
+#define SYS_FUTEX_WAKE  34
+
+struct extron_thread_create_args {
+    uintptr_t entry;
+    uintptr_t user_sp;
+    uintptr_t tls;
+    uintptr_t exit_word;
+};
 
 /* x8 = number, x0-x2 = args, result in x0 — the AAPCS64/Linux
  * convention the kernel's syscall.h documents. "memory" clobber so the
@@ -80,5 +93,11 @@ long     sys_execve(const char *path, char *const argv[], char *const envp[]);
 /* Blocks until a child exits, reaps it, returns its pid; -1 when there
  * are no children left. *status gets the exit status unless NULL. */
 long     sys_wait(int *status);
+long     sys_gettid(void);
+long     sys_thread_create(const struct extron_thread_create_args *args);
+void     sys_thread_exit(void) __attribute__((noreturn));
+long     sys_thread_join(long tid);
+long     sys_futex_wait(int *word, int expected, uint64_t timeout_ms);
+long     sys_futex_wake(int *word);
 
 #endif

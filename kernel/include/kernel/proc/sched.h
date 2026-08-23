@@ -13,6 +13,7 @@
  * --------------------------------------------------------------- */
 void          sched_policy_init(void);
 void           sched_policy_add(struct thread *t);    /* mark runnable / re-enqueue */
+void           sched_policy_remove(struct thread *t); /* remove stale/offline entries */
 struct thread *sched_policy_pick_next(void);          /* pop next to run, or NULL */
 
 /* ---------------------------------------------------------------

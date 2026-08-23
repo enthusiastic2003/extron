@@ -43,6 +43,23 @@ void sched_policy_add(struct thread *t) {
     irq_spin_unlock(&run_queue_lock);
 }
 
+void sched_policy_remove(struct thread *t) {
+    if (!t)
+        return;
+    irq_spin_lock(&run_queue_lock);
+    for (size_t i = 0; i < run_queue_count;) {
+        if (run_queue[i] != t) {
+            i++;
+            continue;
+        }
+        for (size_t j = i; j + 1 < run_queue_count; j++)
+            run_queue[j] = run_queue[j + 1];
+        run_queue_count--;
+        run_queue[run_queue_count] = NULL;
+    }
+    irq_spin_unlock(&run_queue_lock);
+}
+
 struct thread *sched_policy_pick_next(void) {
     irq_spin_lock(&run_queue_lock);
 
@@ -51,11 +68,17 @@ struct thread *sched_policy_pick_next(void) {
         return NULL;
     }
 
-    struct thread *next = run_queue[0];
-    for (size_t j = 0; j + 1 < run_queue_count; j++)
-        run_queue[j] = run_queue[j + 1];
-    run_queue_count--;
-    run_queue[run_queue_count] = NULL;
+    struct thread *next;
+    do {
+        next = run_queue[0];
+        for (size_t j = 0; j + 1 < run_queue_count; j++)
+            run_queue[j] = run_queue[j + 1];
+        run_queue_count--;
+        run_queue[run_queue_count] = NULL;
+    } while (run_queue_count && next->state != THREAD_RUNNABLE);
+
+    if (next->state != THREAD_RUNNABLE)
+        next = NULL;
 
     irq_spin_unlock(&run_queue_lock);
     return next;

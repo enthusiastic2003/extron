@@ -44,6 +44,12 @@
 #define SYS_DUP         26
 #define SYS_DUP2        27
 #define SYS_FCNTL       28
+#define SYS_GETTID      29
+#define SYS_THREAD_CREATE 30
+#define SYS_THREAD_EXIT 31
+#define SYS_THREAD_JOIN 32
+#define SYS_FUTEX_WAIT  33
+#define SYS_FUTEX_WAKE  34
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

@@ -13,9 +13,8 @@ struct proc;
 
 /*
  * A process owns resources shared by its threads; a thread is the unit the
- * scheduler runs. The first implementation embeds exactly one main thread in
- * each process, but keeping these objects distinct makes signals, clone(),
- * join and futexes additive rather than another scheduler rewrite.
+ * scheduler runs. Each process embeds its main thread and links dynamically
+ * allocated workers created by the clone-style thread syscall.
  *
  * This aarch64 tree (kernel/) is now a standalone project, backed up
  * from x86's original kernel/ under backup/x86_tree/ — see that
@@ -98,6 +97,7 @@ struct thread {
     virt_addr_t         user_sp;             /* EL0 initial SP_EL0, used once on first launch */
     void                *chan;               /* wait channel, valid while THREAD_SLEEPING */
     uint64_t            sleep_until;         /* wake when timer_ticks() >= this; 0 = not timed */
+    virt_addr_t         exit_word;           /* userspace completion word, set to 1 at exit */
     struct thread       *next_in_process;
 };
 
@@ -177,6 +177,7 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f);
  * --------------------------------------------------------------- */
 void          proc_table_init(void);
 uint64_t      proc_alloc_pid(void);
+uint64_t      proc_alloc_tid(void);
 void          proc_table_add(struct proc *p);    /* publishes a fully initialized process */
 void          proc_table_remove(struct proc *p);
 struct proc  *proc_lookup(uint64_t pid);
@@ -196,6 +197,26 @@ void thread_set_running(struct thread *t);
 void thread_set_sleeping(struct thread *t);
 void thread_set_exited(struct thread *t);
 void proc_mark_exited(struct proc *p);
+
+/* Create another schedulable thread in p's existing address space. The
+ * caller has already validated the userspace entry, stack and TLS values.
+ * The returned object is linked into p and queued runnable. */
+struct thread *proc_thread_create(struct proc *p, virt_addr_t entry,
+                                  virt_addr_t user_sp, uint64_t tls,
+                                  virt_addr_t exit_word);
+
+/* Find/reap a thread belonging to p. Reaping only succeeds after exit and
+ * never frees the embedded main-thread object. */
+struct thread *proc_thread_lookup(struct proc *p, uint64_t tid);
+int            proc_thread_reap(struct proc *p, uint64_t tid);
+
+/* Used by process exit and successful exec. Every sibling is taken off the
+ * run queue; exec additionally destroys its kernel object immediately. */
+void proc_terminate_other_threads(struct proc *p, struct thread *self,
+                                  bool reap);
+
+/* True when no thread other than t remains capable of running. */
+bool proc_thread_is_last_live(struct proc *p, struct thread *t);
 
 /* ---------------------------------------------------------------
  * Sleep / wake — also ported from x86's proc.c, same algorithm

@@ -9,6 +9,7 @@
 #include <kernel/drivers/tty.h>
 #include <kernel/fs/tar.h>
 #include <kernel/proc/exec.h>
+#include <kernel/proc/futex.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
@@ -132,6 +133,7 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
     kprintf("[SYSCALL exit] pid=%lu status=%lu\n",
             p ? (unsigned long)p->pid : 0, (unsigned long)status);
     if (p) {
+        proc_terminate_other_threads(p, my_thread(), false);
         p->exit_status = (int)status;
         /* Descriptor lifetime ends at exit, not when the parent eventually
          * reaps the zombie. In particular this publishes pipe EOF now. */
@@ -154,6 +156,111 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
      * place until the next timer tick's schedule() sees it is no longer
      * RUNNING and sweeps it away. */
     return status;
+}
+
+struct user_thread_create_args {
+    uint64_t entry;
+    uint64_t user_sp;
+    uint64_t tls;
+    uint64_t exit_word;
+};
+
+static uint64_t sys_gettid(uint64_t a, uint64_t b, uint64_t c,
+                           struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    return my_thread() ? my_thread()->tid : (uint64_t)-1;
+}
+
+static uint64_t sys_thread_create(uint64_t args_addr, uint64_t b, uint64_t c,
+                                  struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, args_addr, sizeof(struct user_thread_create_args)))
+        return (uint64_t)-1;
+    struct user_thread_create_args args =
+        *(const struct user_thread_create_args *)args_addr;
+    if (!args.entry || !args.user_sp
+            || !user_buffer_ok(p, args.entry, 1)
+            || !user_buffer_ok(p, args.user_sp, 3 * sizeof(uint64_t))
+            || (args.tls && !user_buffer_ok(p, args.tls, 1))
+            || (args.exit_word
+                && !user_buffer_ok(p, args.exit_word, sizeof(int))))
+        return (uint64_t)-1;
+
+    struct thread *t = proc_thread_create(p, args.entry, args.user_sp,
+                                          args.tls, args.exit_word);
+    return t ? t->tid : (uint64_t)-1;
+}
+
+static uint64_t sys_thread_exit(uint64_t a, uint64_t b, uint64_t c,
+                                struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    struct thread *t = my_thread();
+    if (!p || !t)
+        return (uint64_t)-1;
+
+    if (t->exit_word) {
+        __atomic_store_n((int *)t->exit_word, 1, __ATOMIC_RELEASE);
+        futex_wake(p, (int *)t->exit_word);
+    }
+    bool last = proc_thread_is_last_live(p, t);
+    thread_set_exited(t);
+    wakeup(t); /* raw SYS_THREAD_JOIN waiters */
+    if (last) {
+        p->exit_status = 0;
+        file_table_close_all(p);
+        proc_mark_exited(p);
+        if (p->parent)
+            wakeup(p->parent);
+    }
+    schedule();
+    for (;;) __asm__ volatile ("");
+}
+
+static uint64_t sys_thread_join(uint64_t tid, uint64_t b, uint64_t c,
+                                struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!p || tid == my_thread()->tid)
+        return (uint64_t)-1;
+    for (;;) {
+        struct thread *target = proc_thread_lookup(p, tid);
+        if (!target)
+            return (uint64_t)-1;
+        if (target->state == THREAD_EXITED)
+            return proc_thread_reap(p, tid) == 0 ? 0 : (uint64_t)-1;
+        my_thread()->chan = target;
+        my_thread()->sleep_until = 0;
+        thread_set_sleeping(my_thread());
+        schedule();
+    }
+}
+
+static uint64_t sys_futex_wait(uint64_t word_addr, uint64_t expected,
+                               uint64_t timeout_ms, struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if ((word_addr & (sizeof(int) - 1))
+            || !user_buffer_ok(p, word_addr, sizeof(int)))
+        return (uint64_t)-1;
+    uint64_t deadline = 0;
+    if (timeout_ms) {
+        uint64_t hz = timer_ticks_per_second();
+        uint64_t delta = (timeout_ms * hz + 999) / 1000;
+        deadline = timer_ticks() + (delta ? delta : 1);
+    }
+    return (uint64_t)futex_wait(p, (int *)word_addr, (int)expected, deadline);
+}
+
+static uint64_t sys_futex_wake(uint64_t word_addr, uint64_t b, uint64_t c,
+                               struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if ((word_addr & (sizeof(int) - 1))
+            || !user_buffer_ok(p, word_addr, sizeof(int)))
+        return (uint64_t)-1;
+    return (uint64_t)futex_wake(p, (int *)word_addr);
 }
 
 /* fd 0 is the system console TTY. keyboard.c fills the raw
@@ -697,6 +804,11 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
     if (proc_exec_replace(p, path, args, argc, &img) != 0)
         return (uint64_t)-1;
 
+    /* POSIX exec keeps only its calling thread. No sibling can run while
+     * this DAIF-masked syscall replaces the address space, so removing and
+     * freeing them here closes the last path back into the old image. */
+    proc_terminate_other_threads(p, my_thread(), true);
+
     /* Start the new program from a clean register state rather than
      * inheriting the old one's. Anything left behind would be a value
      * from a program that no longer exists. */
@@ -802,6 +914,12 @@ static const syscall_fn syscall_table[] = {
     [SYS_DUP]        = sys_dup,
     [SYS_DUP2]       = sys_dup2,
     [SYS_FCNTL]      = sys_fcntl,
+    [SYS_GETTID]     = sys_gettid,
+    [SYS_THREAD_CREATE] = sys_thread_create,
+    [SYS_THREAD_EXIT] = sys_thread_exit,
+    [SYS_THREAD_JOIN] = sys_thread_join,
+    [SYS_FUTEX_WAIT] = sys_futex_wait,
+    [SYS_FUTEX_WAKE] = sys_futex_wake,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

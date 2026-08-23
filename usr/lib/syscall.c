@@ -72,3 +72,28 @@ long sys_execve(const char *path, char *const argv[], char *const envp[]) {
 long sys_wait(int *status) {
     return __syscall1(SYS_WAIT, status);
 }
+
+long sys_gettid(void) {
+    return __syscall0(SYS_GETTID);
+}
+
+long sys_thread_create(const struct extron_thread_create_args *args) {
+    return __syscall1(SYS_THREAD_CREATE, args);
+}
+
+void sys_thread_exit(void) {
+    __syscall0(SYS_THREAD_EXIT);
+    for (;;) __asm__ volatile ("");
+}
+
+long sys_thread_join(long tid) {
+    return __syscall1(SYS_THREAD_JOIN, tid);
+}
+
+long sys_futex_wait(int *word, int expected, uint64_t timeout_ms) {
+    return __syscall3(SYS_FUTEX_WAIT, (long)word, expected, (long)timeout_ms);
+}
+
+long sys_futex_wake(int *word) {
+    return __syscall1(SYS_FUTEX_WAKE, word);
+}

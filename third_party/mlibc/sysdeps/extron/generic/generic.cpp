@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdlib.h>            // exit() — the real termination path, see __mlibc_start_main
 #include <mlibc/elf/startup.h> // mlibc::entry_stack — argc/argv, parsed by __dlapi_enter()
+#include <mlibc/tcb.hpp>
 
 // ----------------------------------------------------------------
 // 1. Raw Syscall Wrappers — aarch64: x8 = number, x0-x2 = args, result
@@ -51,6 +52,12 @@
 #define SYS_DUP         26
 #define SYS_DUP2        27
 #define SYS_FCNTL       28
+#define SYS_GETTID      29
+#define SYS_THREAD_CREATE 30
+#define SYS_THREAD_EXIT 31
+#define SYS_THREAD_JOIN 32
+#define SYS_FUTEX_WAIT  33
+#define SYS_FUTEX_WAKE  34
 
 
 using main_fn = int (*)(int, char **);
@@ -173,6 +180,12 @@ static inline long syscall3(long n, long a1, long a2, long a3) {
 
 namespace mlibc {
 
+/* Static archives are only searched for unresolved strong symbols. mlibc's
+ * optional sysdep declarations are weak, so this anchor makes the separate
+ * threading translation unit (and its assembly trampoline) part of libc users
+ * that already pull this generic sysdep object in. */
+extern "C" void __extron_thread_sysdeps_anchor();
+
 pid_t sys_getpid() { return (pid_t)syscall0(SYS_GETPID); }
 pid_t sys_getppid() { return (pid_t)syscall0(SYS_GETPPID); }
 uid_t sys_getuid() { return 0; }
@@ -272,7 +285,11 @@ int sys_anon_free(void *pointer, size_t size) {
 // --- Threading & Execution ---
 
 int sys_tcb_set(void *pointer) {
-    long ret = syscall1(SYS_TCB_SET, (long)pointer);
+    __extron_thread_sysdeps_anchor();
+    /* AArch64's ABI thread pointer is 16 bytes before the TLS block, not
+     * the address of mlibc's Tcb object itself. */
+    auto tp = reinterpret_cast<char *>(pointer) + sizeof(Tcb) - 0x10;
+    long ret = syscall1(SYS_TCB_SET, (long)tp);
     if (ret < 0) return -ret;
     return 0;
 }
@@ -468,12 +485,27 @@ int sys_vm_unmap(void *pointer, size_t size) {
 }
 
 int sys_futex_wait(int *pointer, int expected, const struct timespec *time) {
-    (void)pointer; (void)expected; (void)time;
-    return ENOSYS;
+    uint64_t timeout_ms = 0;
+    if (time) {
+        if (time->tv_sec < 0 || time->tv_nsec < 0
+                || time->tv_nsec >= 1000000000L)
+            return EINVAL;
+        timeout_ms = static_cast<uint64_t>(time->tv_sec) * 1000
+                   + (static_cast<uint64_t>(time->tv_nsec) + 999999) / 1000000;
+        if (!timeout_ms)
+            timeout_ms = 1;
+    }
+    long ret = syscall3(SYS_FUTEX_WAIT, (long)pointer, expected, timeout_ms);
+    if (ret == -2) return EAGAIN;
+    if (ret == -3) return ETIMEDOUT;
+    return ret < 0 ? EINVAL : 0;
 }
 int sys_futex_wake(int *pointer) {
-    (void)pointer;
-    return ENOSYS;
+    return syscall1(SYS_FUTEX_WAKE, (long)pointer) < 0 ? EINVAL : 0;
+}
+
+int sys_futex_tid() {
+    return (int)syscall0(SYS_GETTID);
 }
 
 int sys_clock_get(int clock, time_t *secs, long *nanos) {
