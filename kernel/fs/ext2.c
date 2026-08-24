@@ -1082,6 +1082,20 @@ static int ext2_node_truncate(struct vfs_node *node, size_t size)
     struct ext2_disk_inode *di = &info->disk;
     uint32_t ptrs = m->block_size / 4;
 
+    /* Invalidate the indirect-block cache unconditionally before
+     * freeing anything below: every block this function frees can be
+     * handed straight back out by ext2_alloc_block()'s first-fit scan
+     * (e.g. a subsequent write to this same file, or an unrelated one),
+     * and a stale ind_l1/l2/l3 cache entry still tagged with that block
+     * number would silently hand back the wrong content on the next
+     * lookup instead of the new owner's data. Cheap to invalidate
+     * broadly here — worst case is one extra real read to repopulate
+     * it later. Only inode_bmap()'s cache is affected; m->scratch
+     * holds no cross-call state of its own. */
+    m->ind_l1_block = 0;
+    m->ind_l2_block = 0;
+    m->ind_l3_block = 0;
+
     /* Free direct blocks */
     for (int i = 0; i < 12; i++) {
         if (di->i_block[i]) {
@@ -1102,8 +1116,64 @@ static int ext2_node_truncate(struct vfs_node *node, size_t size)
         ext2_free_block(m, di->i_block[12]);
         di->i_block[12] = 0;
     }
-    
-    /* TODO: Double/triple indirect block freeing if we ever support them */
+
+    /* Free double indirect: read the dind table, and for each non-hole
+     * leaf-table pointer it holds, free every data block that leaf
+     * lists, then the leaf table itself, then finally the dind table.
+     * Only reachable today via a file that had blocks placed in this
+     * range from outside this kernel (inode_bmap_alloc() can't allocate
+     * this far itself yet — see ext2_plan.md's "Current state"), but
+     * unlink() must still be able to reclaim it. */
+    if (di->i_block[13]) {
+        uint32_t *dind = kmalloc(m->block_size);
+        if (dind && read_block(m, di->i_block[13], dind) == 0) {
+            for (uint32_t i = 0; i < ptrs; i++) {
+                if (!dind[i]) continue;
+                uint32_t *leaf = kmalloc(m->block_size);
+                if (leaf && read_block(m, dind[i], leaf) == 0) {
+                    for (uint32_t j = 0; j < ptrs; j++) {
+                        if (leaf[j]) ext2_free_block(m, leaf[j]);
+                    }
+                }
+                if (leaf) kfree(leaf);
+                ext2_free_block(m, dind[i]);
+            }
+        }
+        if (dind) kfree(dind);
+        ext2_free_block(m, di->i_block[13]);
+        di->i_block[13] = 0;
+    }
+
+    /* Free triple indirect: same idea, one level deeper — a tind table
+     * of dind-table pointers, each of those a dind table of leaf-table
+     * pointers, each leaf a table of data-block pointers. */
+    if (di->i_block[14]) {
+        uint32_t *tind = kmalloc(m->block_size);
+        if (tind && read_block(m, di->i_block[14], tind) == 0) {
+            for (uint32_t i = 0; i < ptrs; i++) {
+                if (!tind[i]) continue;
+                uint32_t *dind = kmalloc(m->block_size);
+                if (dind && read_block(m, tind[i], dind) == 0) {
+                    for (uint32_t j = 0; j < ptrs; j++) {
+                        if (!dind[j]) continue;
+                        uint32_t *leaf = kmalloc(m->block_size);
+                        if (leaf && read_block(m, dind[j], leaf) == 0) {
+                            for (uint32_t k = 0; k < ptrs; k++) {
+                                if (leaf[k]) ext2_free_block(m, leaf[k]);
+                            }
+                        }
+                        if (leaf) kfree(leaf);
+                        ext2_free_block(m, dind[j]);
+                    }
+                }
+                if (dind) kfree(dind);
+                ext2_free_block(m, tind[i]);
+            }
+        }
+        if (tind) kfree(tind);
+        ext2_free_block(m, di->i_block[14]);
+        di->i_block[14] = 0;
+    }
 
     di->i_size = 0;
     di->i_blocks = 0;
@@ -1556,9 +1626,28 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
         }
     }
 
-    /* Decrement link count */
-    if (target->disk.i_links_count > 0) target->disk.i_links_count--;
-    
+    /* Decrement link count. Directories can never have more than one
+     * hard link — ext2 disallows link() on a directory entirely (see
+     * ext2_rofs_link()'s unconditional -EROFS) — so once confirmed
+     * empty above, removing one always frees it outright; only
+     * regular files need the general decrement-then-check-for-zero
+     * dance, since they really can have multiple names. A fresh empty
+     * directory's baseline count is 2 (itself's '.' plus the parent's
+     * forward entry — see ext2_node_create()'s "new_dir->disk.i_links_
+     * count = 2"), so treating it like a file and decrementing by only
+     * 1 landed on 1, never reaching the free-on-zero branch below: the
+     * directory's own inode and data block (its '.'/'..' block) never
+     * got freed even after its parent's dirent was removed a few lines
+     * down, leaving a live, fully-formed, but unreachable directory
+     * behind — e2fsck calls this "unconnected": its own '..' still
+     * correctly names the parent, but the parent no longer names it
+     * back, and the leaked inode/block are never reused. */
+    if (target_is_dir) {
+        target->disk.i_links_count = 0;
+    } else if (target->disk.i_links_count > 0) {
+        target->disk.i_links_count--;
+    }
+
     if (target->disk.i_links_count == 0) {
         /* Free all blocks (truncate to 0) */
         struct vfs_node dummy;

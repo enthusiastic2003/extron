@@ -377,6 +377,7 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
 #define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
 #define TIOCGPGRP  0x540F
 #define TIOCSPGRP  0x5410
 #define POLLIN 0x0001
@@ -411,6 +412,12 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
             return (uint64_t)-EFAULT;
         tty_get_winsize((struct tty_winsize *)arg);
+        return 0;
+    }
+    if (request == TIOCSWINSZ) {
+        if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
+            return (uint64_t)-EFAULT;
+        tty_set_winsize((const struct tty_winsize *)arg);
         return 0;
     }
     if (request == TIOCGPGRP) {
@@ -1781,16 +1788,42 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
         }
     }
 
-    /* An argv with no argv[0] is legal to pass and useless to receive.
-     * Substitute the path, which is what the process would report as its
-     * own name anyway. */
     if (argc == 0) {
         args[0] = path;
         argc = 1;
     }
 
+    char        envbuf[EXEC_ENV_BYTES];
+    const char *envs[EXEC_MAX_ENVS];
+    int         envc = 0;
+    size_t      env_used = 0;
+
+    if (envp_addr) {
+        for (;;) {
+            if (envc >= EXEC_MAX_ENVS) {
+                kprintf("[SYSCALL execve] too many envs (max %d)\n", EXEC_MAX_ENVS);
+                return (uint64_t)-1;
+            }
+            uint64_t slot = envp_addr + (uint64_t)envc * sizeof(uint64_t);
+            if (!user_buffer_ok(p, slot, sizeof(uint64_t)))
+                return (uint64_t)-1;
+            uint64_t str = *(const uint64_t *)slot;
+            if (!str)
+                break;
+
+            long len = copy_user_string(p, str, envbuf + env_used,
+                                        EXEC_ENV_BYTES - env_used);
+            if (len < 0) {
+                kprintf("[SYSCALL execve] envp[%d] unreadable or too long\n", envc);
+                return (uint64_t)-1;
+            }
+            envs[envc++] = envbuf + env_used;
+            env_used += (size_t)len + 1;
+        }
+    }
+
     struct exec_image img;
-    if (proc_exec_replace(p, path, args, argc, &img) != 0)
+    if (proc_exec_replace(p, path, args, argc, envs, envc, &img) != 0)
         return (uint64_t)-1;
 
     /* POSIX exec keeps only its calling thread. No sibling can run while

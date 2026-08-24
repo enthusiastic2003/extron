@@ -28,7 +28,9 @@
  * new stack, so it cannot spill into the stack the process is about to
  * start using. */
 #define EXEC_MAX_ARGS  32
-#define EXEC_ARG_BYTES 1024   /* total bytes of argv strings */
+#define EXEC_ARG_BYTES 1024
+#define EXEC_MAX_ENVS  32
+#define EXEC_ENV_BYTES 2048   /* total bytes of argv strings */
 
 /* A fully built, not-yet-installed user address space. execve()'s whole
  * safety argument is that this can be constructed and thrown away
@@ -62,6 +64,7 @@ struct proc *proc_create_from_binary_argv(const char *binary_path,
  */
 int proc_exec_replace(struct proc *p, const char *binary_path,
                       const char *const *args, int argc,
+                      const char *const *envp, int envc,
                       struct exec_image *out);
 
 #endif

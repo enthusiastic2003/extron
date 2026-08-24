@@ -34,7 +34,7 @@
  * every argument present, every byte used, plus argc's own word, the
  * argv pointer array, argv's NULL terminator, envp's (empty) NULL
  * terminator, plus 16 bytes of alignment slack. */
-_Static_assert(EXEC_ARG_BYTES + (EXEC_MAX_ARGS + 3) * sizeof(uint64_t) + 16
+_Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES + (EXEC_MAX_ARGS + EXEC_MAX_ENVS + 3) * sizeof(uint64_t) + 16
                < PAGE_SIZE, "exec argument block must fit one stack page");
 
 /*
@@ -71,14 +71,21 @@ _Static_assert(EXEC_ARG_BYTES + (EXEC_MAX_ARGS + 3) * sizeof(uint64_t) + 16
  */
 static virt_addr_t build_arg_stack(phys_addr_t top_phys,
                                    const char *const *args, int argc,
+                                   const char *const *envp, int envc,
                                    virt_addr_t *out_argv_va) {
     uint8_t     *page    = (uint8_t *)phys_to_virt_hhdm(top_phys);
     virt_addr_t  page_va = USER_STACK_TOP - PAGE_SIZE;
     virt_addr_t  str_va[EXEC_MAX_ARGS];
+    virt_addr_t  env_va[EXEC_MAX_ENVS];
     size_t       off = PAGE_SIZE;
 
-    /* Strings first, from the top down, so the pointer array below them
-     * can be filled in with addresses that are already final. */
+    for (int i = envc - 1; i >= 0; i--) {
+        size_t len = strlen(envp[i]) + 1;
+        off -= len;
+        memcpy(page + off, envp[i], len);
+        env_va[i] = page_va + off;
+    }
+
     for (int i = argc - 1; i >= 0; i--) {
         size_t len = strlen(args[i]) + 1;
         off -= len;
@@ -87,23 +94,21 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     }
 
     off &= ~(size_t)7;
-    /* argc's own word, argc argv pointers, argv's NULL terminator,
-     * envp's (empty) NULL terminator. */
-    off -= (size_t)(argc + 3) * sizeof(uint64_t);
+    off -= (size_t)(argc + envc + 3) * sizeof(uint64_t);
     off &= ~(size_t)15;             /* AAPCS64: sp must be 16-byte aligned */
 
     uint64_t *sp_words = (uint64_t *)(page + off);
     sp_words[0] = (uint64_t)argc;
     for (int i = 0; i < argc; i++)
         sp_words[1 + i] = str_va[i];
-    sp_words[1 + argc]     = 0;     /* argv[argc] == NULL, as C requires */
-    sp_words[1 + argc + 1] = 0;     /* envp[0] == NULL: no environment yet */
+    sp_words[1 + argc] = 0;
+    
+    for (int i = 0; i < envc; i++)
+        sp_words[1 + argc + 1 + i] = env_va[i];
+    sp_words[1 + argc + 1 + envc] = 0;
 
-    /* x1 (our own crt0's argv register) points at the argv array
-     * specifically — one word past argc — not at sp itself. */
     *out_argv_va = page_va + off + sizeof(uint64_t);
-    return page_va + off;           /* sp: argc, then argv[], as mlibc's
-                                      * init_libc() constructor expects */
+    return page_va + off;
 }
 
 /*
@@ -180,6 +185,7 @@ static void *load_binary_bytes(struct proc *requester, const char *binary_path,
  */
 static int exec_image_build(struct proc *requester, const char *binary_path,
                             const char *const *args, int argc,
+                                   const char *const *envp, int envc,
                             struct exec_image *out) {
     size_t binary_size;
     void *binary = load_binary_bytes(requester, binary_path, &binary_size);
@@ -242,7 +248,7 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
                          USER_STACK_PAGES * PAGE_SIZE, true) != 0)
         goto fail;
 
-    out->user_sp = build_arg_stack(top_phys, args, argc, &out->argv);
+    out->user_sp = build_arg_stack(top_phys, args, argc, envp, envc, &out->argv);
     out->argc    = (uint64_t)argc;
 
     /* No MMIO mapping here any more. The UART used to be identity-mapped
@@ -266,7 +272,7 @@ struct proc *proc_create_from_binary_argv(const char *binary_path,
                                           const char *const *args, int argc) {
     struct exec_image img;
 
-    if (exec_image_build(NULL, binary_path, args, argc, &img) != 0)
+    if (exec_image_build(NULL, binary_path, args, argc, NULL, 0, &img) != 0)
         return NULL;
 
     struct proc *p = kmalloc(sizeof(struct proc));
@@ -295,11 +301,12 @@ struct proc *proc_create_from_binary(const char *binary_path) {
 
 int proc_exec_replace(struct proc *p, const char *binary_path,
                       const char *const *args, int argc,
+                                   const char *const *envp, int envc,
                       struct exec_image *out) {
     struct thread *t = my_thread();
     if (!p || !t || t->process != p)
         return -1;
-    if (exec_image_build(p, binary_path, args, argc, out) != 0)
+    if (exec_image_build(p, binary_path, args, argc, envp, envc, out) != 0)
         return -1;
 
     struct vm_space *old = p->mm;

@@ -316,3 +316,9 @@ void tty_set_foreground_pgid(uint64_t pgid) {
     console_tty.foreground_pgid = pgid;
     irq_spin_unlock(&console_tty.lock);
 }
+
+void tty_set_winsize(const struct tty_winsize *ws) {
+    irq_spin_lock(&console_tty.lock);
+    console_tty.winsize = *ws;
+    irq_spin_unlock(&console_tty.lock);
+}

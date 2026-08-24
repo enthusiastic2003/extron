@@ -51,7 +51,7 @@ KERNEL_IMG := $(BUILD)/kernel8.img
 # against real mlibc via MLIBC_GCC below, same as usr/mlibc_tests/*.c,
 # usr/doom/, and usr/busybox/.
 USER_C_SRC   := $(wildcard usr/*.c)
-USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad)
+USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad) usr/nano $(shell find usr/usr/local -type f 2>/dev/null)
 
 # --- mlibc-based userland tests (usr/mlibc_tests/) ---
 # Built with the real aarch64-extron cross toolchain against this repo's
@@ -66,7 +66,14 @@ MLIBC_GCC     ?= $(HOME)/extron-toolkit/toolchain/bin/aarch64-extron-gcc
 MLIBC_SYSROOT := usr/mlibc-sysroot
 MLIBC_LIBC    := $(MLIBC_SYSROOT)/lib/libc.a
 MLIBC_C_SRC   := $(wildcard usr/mlibc_tests/*.c)
-MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/%.elf,$(MLIBC_C_SRC))
+# Built into initrd's tests/ subdirectory rather than flat at the root —
+# this suite has grown to 20+ binaries, which was drowning out the
+# handful of things (sh, doom.elf, reboot.elf, hello.txt) an interactive
+# `ls /` actually cares about. seed_tar_file() (kernel/fs/ramfs.c) already
+# splits a tar member's name on '/' and creates intermediate directories
+# on the fly while seeding ramfs from the initrd, so "tests/foo.elf" in
+# the archive becomes a real /tests/foo.elf without any kernel change.
+MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/tests/%.elf,$(MLIBC_C_SRC))
 
 INITRD_ELF   := $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
                 $(MLIBC_ELF) \
@@ -127,7 +134,7 @@ $(BUILD)/initrd/%.elf: usr/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
 
-$(BUILD)/initrd/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
+$(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
 
@@ -161,8 +168,12 @@ $(INITRD): $(INITRD_ELF) $(INITRD_DATA)
 	# to every entry name (plus a directory entry itself), and tar.c's
 	# tar_open() does an exact-name match with no path normalization, so
 	# a caller asking for "hello.txt" would silently never find
-	# "./hello.txt".
-	tar -cf $@ -C $(BUILD)/initrd $(notdir $(INITRD_ELF) $(INITRD_DATA))
+	# "./hello.txt". Paths relative to $(BUILD)/initrd rather than
+	# $(notdir ...) — that would flatten tests/mlibc_foo.elf down to
+	# mlibc_foo.elf, undoing the whole point of the tests/ subdirectory.
+	# Root-level members (no subdirectory) resolve identically either way.
+	tar -cf $@ -C $(BUILD)/initrd \
+		$(patsubst $(BUILD)/initrd/%,%,$(INITRD_ELF) $(INITRD_DATA))
 
 run: $(KERNEL_IMG) $(INITRD)
 	qemu-system-aarch64 -M raspi4b -chardev stdio,id=serial0,signal=off -serial chardev:serial0 -display none -kernel $(KERNEL_IMG) -dtb boot/bcm2711-rpi-4-b.dtb -initrd $(INITRD)
