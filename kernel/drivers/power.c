@@ -26,7 +26,6 @@
 static inline void mmio_write(unsigned long addr, unsigned int val) {
     *(volatile unsigned int *)addr = val;
 }
-
 static inline unsigned int mmio_read(unsigned long addr) {
     return *(volatile unsigned int *)addr;
 }

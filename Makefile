@@ -165,7 +165,7 @@ $(INITRD): $(INITRD_ELF) $(INITRD_DATA)
 	tar -cf $@ -C $(BUILD)/initrd $(notdir $(INITRD_ELF) $(INITRD_DATA))
 
 run: $(KERNEL_IMG) $(INITRD)
-	qemu-system-aarch64 -M raspi4b -serial stdio -display none -kernel $(KERNEL_IMG) -dtb boot/bcm2711-rpi-4-b.dtb -initrd $(INITRD)
+	qemu-system-aarch64 -M raspi4b -chardev stdio,id=serial0,signal=off -serial chardev:serial0 -display none -kernel $(KERNEL_IMG) -dtb boot/bcm2711-rpi-4-b.dtb -initrd $(INITRD)
 
 clean:
 	rm -rf $(BUILD) $(INITRD)

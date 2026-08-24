@@ -186,6 +186,9 @@ static void kernel_aarch64_stage2(uint64_t mb2_addr) {
     timer_init(1000);
     kprintf("aarch64: generic timer armed at %u Hz, IRQ %d enabled.\n", timer_ticks_per_second(), GIC_PPI_NS_PHYS_TIMER);
 
+    extern void emmc_init(void);
+    emmc_init();
+
     exceptions_enable_irqs();
     kprintf("aarch64: IRQs unmasked at the CPU.\n");
 

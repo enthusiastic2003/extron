@@ -141,10 +141,11 @@ static void print_int(int64_t value, char color) {
     }
 }
 
-static void print_hex(uint64_t value, int width, char color) {
+static void print_hex(uint64_t value, int width, int uppercase, char color) {
     for (int i = width - 1; i >= 0; i--) {
         int digit = (value >> (i * 4)) & 0xF;
-        char c = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+        char base = uppercase ? 'A' : 'a';
+        char c = (digit < 10) ? ('0' + digit) : (base + digit - 10);
         putc(c, color);
     }
 }
@@ -159,6 +160,19 @@ void kvprintf(const char* fmt, char color, va_list args) {
         }
 
         i++;
+
+        int pad_zero = 0;
+        int width = 0;
+
+        if (fmt[i] == '0') {
+            pad_zero = 1;
+            i++;
+        }
+
+        while (fmt[i] >= '0' && fmt[i] <= '9') {
+            width = width * 10 + (fmt[i] - '0');
+            i++;
+        }
 
         // Track length modifiers (l or ll or z)
         int is_long = 0;
@@ -212,13 +226,15 @@ void kvprintf(const char* fmt, char color, va_list args) {
             }
 
             case 'x':
-            case 'X': { // Added support for uppercase %X as well
+            case 'X': {
+                int uppercase = (fmt[i] == 'X');
+                int hex_width = width > 0 ? width : (is_long_long || is_long ? 16 : 8);
                 if (is_long_long || is_long) {
                     uint64_t val = va_arg(args, uint64_t);
-                    print_hex(val, 16, color); // 16 nibbles for 64-bit
+                    print_hex(val, hex_width, uppercase, color);
                 } else {
                     unsigned int val = va_arg(args, unsigned int);
-                    print_hex(val, 8, color);  // 8 nibbles for 32-bit
+                    print_hex(val, hex_width, uppercase, color);
                 }
                 break;
             }
@@ -226,7 +242,7 @@ void kvprintf(const char* fmt, char color, va_list args) {
             case 'p': {
                 uint64_t val = (uint64_t)va_arg(args, void*);
                 puts_col("0x", color);
-                print_hex(val, 16, color);
+                print_hex(val, 16, 0, color);
                 break;
             }
 
@@ -237,6 +253,8 @@ void kvprintf(const char* fmt, char color, va_list args) {
             default:
                 // If it's an unrecognized specifier, just print it as text
                 putc('%', color);
+                if (pad_zero) putc('0', color);
+                if (width > 0) print_int(width, color);
                 putc(fmt[i], color);
                 break;
         }

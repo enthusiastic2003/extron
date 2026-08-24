@@ -1,6 +1,13 @@
 build/
 initrd.tar
 
+# ext2_host/'s own build products (see its Makefile) — the synthetic
+# test image and the compiled test binary. Both regenerate with
+# `make -C ext2_host test`; only the harness sources are tracked.
+ext2_host/ext2_test
+ext2_host/ext2.img
+ext2_host/mnt_ext2_test/
+
 # HDMI capture frames (tools/capture.sh). Debugging artefacts, and PNGs
 # of a 1280x720 screen add up fast — keep them out of history. Commit an
 # individual frame deliberately if one ever documents something worth

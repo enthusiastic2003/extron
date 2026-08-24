@@ -147,9 +147,14 @@ void kernel_stage2(uint64_t mb2_addr) {
         vfs_mkdir(&fs_root, "/bin", 0755, &root_cred);
         vfs_mkdir(&fs_root, "/etc", 0755, &root_cred);
         vfs_mkdir(&fs_root, "/tmp", 01777, &root_cred);
+        vfs_mkdir(&fs_root, "/mnt", 0755, &root_cred);
+        vfs_mkdir(&fs_root, "/mnt/sd", 0755, &root_cred);
         vfs_path_release(&fs_root);
     }
     devfs_init();
+    
+    extern void emmc_mount_ext2(void);
+    emmc_mount_ext2();
 
     tar_list();
     struct tar_file f;

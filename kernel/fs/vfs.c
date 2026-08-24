@@ -526,7 +526,12 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
                           : VFS_ACCESS_READ;
             result = vfs_check_access(node, cred, requested);
         }
-        if (result == 0 && (flags & O_TRUNC) && access != 0) {
+        /* O_TRUNC changes regular-file contents. It is ignored for
+         * devices such as /dev/tty, /dev/null, and /dev/zero; attempting
+         * to call a device's absent truncate operation would incorrectly
+         * reject shell redirections like `echo s > /dev/tty`. */
+        if (result == 0 && (flags & O_TRUNC) && access != 0
+            && node->type == VFS_NODE_REGULAR) {
             result = node->ops && node->ops->truncate
                 ? node->ops->truncate(node, 0) : -EINVAL;
             if (result == 0 && cred && cred->uid != 0)
