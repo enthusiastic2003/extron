@@ -214,6 +214,62 @@ more `vfs_fs_ops` table exactly like `ramfs_fs_ops`/`devfs_fs_ops`:
   development, treat that as a nice-to-have accelerant, never as the thing
   that gets this signed off.
 
+## Current state (post-v1): write support landed, with real limitations
+
+Everything above was written before any write path existed. Two later
+commits (`ef92bfc`, `141f98f`) added real write support on top of the
+read-only v1 — block/inode allocation, directory entry insertion/removal,
+file creation and deletion, and CMD25 writes in the EMMC driver. That
+work is real and pass its own smoke test on hardware, but it should not
+be read as "write support, done" — it has sharp edges worth knowing
+before relying on it:
+
+- **Writes are capped at single-indirect blocks.** `inode_bmap_alloc()`
+  (the allocating counterpart to `inode_bmap()`, kernel/fs/ext2.c) only
+  allocates direct and single-indirect blocks; it returns `-ENOSYS` for
+  double/triple-indirect. With 4K blocks that's roughly a 4MB ceiling on
+  anything *this kernel* grows via `write()`/`create()` — past that,
+  writes start failing outright. Reads are **not** affected: the
+  read-only `inode_bmap()` still walks all four tiers, so a large file
+  placed on the partition from the host side (before it goes on the
+  card) reads back in full regardless of size.
+- **No locking.** `m->scratch`/`ind_l1`/`ind_l2`/`ind_l3` are single
+  buffers per mount with zero synchronization, and there's no shared
+  inode cache — two independently-opened handles to the same directory
+  each hold their own in-memory copy of things like `i_links_count`, and
+  whichever syncs to disk last silently wins. Fine for the current
+  single-writer reality (one interactive shell); the first thing that
+  runs two concurrent writers against `/mnt/sd` will corrupt real
+  on-disk state, not just return a wrong read.
+- **No crash safety.** Plain ext2 has no journal, and a single
+  higher-level operation (e.g. `create()`) is five or more independent
+  writes (inode bitmap, block group descriptor, superblock, new inode,
+  parent directory block) with no ordering guarantee. A power cycle
+  mid-operation — routine on this hardware, given the card gets
+  physically swapped constantly — can leave the partition inconsistent,
+  and this project has no fsck to repair it.
+- **`ext2_node_truncate()` only supports truncating to size 0.** Any
+  other target size returns `-ENOSYS`; there's no partial-shrink path.
+  (Matches the single-indirect ceiling above: the `TODO` for freeing
+  double/triple-indirect blocks on truncate is currently dead code,
+  since nothing can allocate that far yet either.)
+- **`ext2_alloc_block()`'s last-group free-bit boundary** uses
+  `total_blocks % blocks_per_group` without subtracting
+  `first_data_block`, which is off by one on a 1KB-block filesystem's
+  final partial group. Dormant for the common 4K-block case, where
+  `first_data_block == 0`.
+- ~~Inode leak on a failed `create()`~~ — fixed: `ext2_node_create()`
+  now calls `ext2_free_inode()` if `ext2_add_dirent()` fails, instead of
+  leaving the freshly allocated inode marked used with nothing pointing
+  at it.
+
+None of this means the direction was wrong — it's a reasonable v1 of
+exactly the scope discussed at the time (small files, one writer, a
+stable power supply). Treat the double/triple-indirect write gap and
+the lack of locking as the two things to revisit before depending on
+this for anything bigger than small config/save files from a single
+process.
+
 ## Risks / open questions
 
 - The EMMC2 MMIO base address and the exact clock-setup sequence are the
@@ -234,12 +290,15 @@ more `vfs_fs_ops` table exactly like `ramfs_fs_ops`/`devfs_fs_ops`:
 
 ## Non-goals for v1 (explicitly deferred)
 
-- **Write support** — block/inode allocation, free-bitmap maintenance,
-  group descriptor updates, `s_state`/mount-count bookkeeping ext2 itself
-  expects a real driver to touch. A completely separate, larger piece of
-  work layered on top of a solid read path, not attempted here.
+This section describes the plan as it stood before write support was
+added — kept for history. See "Current state (post-v1)" above for what
+actually landed and what's still missing.
+
+- ~~**Write support**~~ — landed (`ef92bfc`, `141f98f`), with the
+  limitations described above: single-indirect ceiling, no locking, no
+  crash safety, truncate-to-zero only.
 - **ext3/4 features** — journaling, extents, 64bit, `metadata_csum`,
   `dir_index`/htree directories. Real ext2 (revision 0/1, no journal) only.
 - **GPT** partition tables — MBR only, matching the existing card layout.
-- **Any locking/concurrency** design for a mutable filesystem — moot while
-  read-only.
+- **Any locking/concurrency** design for a mutable filesystem — still
+  genuinely missing, no longer moot now that the filesystem is mutable.

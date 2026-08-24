@@ -1432,7 +1432,10 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     
     ret = ext2_add_dirent(m, dir, name, ino, ext2_type);
     if (ret < 0) {
-        /* TODO: Free the inode if dirent fails */
+        /* Otherwise this inode stays marked used in the bitmap forever
+         * with no directory entry pointing at it — a permanent leak,
+         * since this project has no fsck to reclaim it later. */
+        ext2_free_inode(m, ino, type == VFS_NODE_DIRECTORY);
         return ret;
     }
     
