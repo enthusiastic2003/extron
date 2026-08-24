@@ -15,6 +15,8 @@
 struct ext2_block_dev {
     int (*read_sectors)(struct ext2_block_dev *dev,
                         uint64_t lba, size_t count, void *buf);
+    int (*write_sectors)(struct ext2_block_dev *dev,
+                         uint64_t lba, size_t count, const void *buf);
     uint64_t sector_count;
     uint32_t sector_size;   /* 512, virtually always */
 };

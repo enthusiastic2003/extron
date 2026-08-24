@@ -3,6 +3,11 @@
 #include <kernel/mm/paging.h>
 #include <kernel/console.h>
 #include <kernel/klibc/string.h>
+#include <kernel/proc/sched.h>
+#include <kernel/proc/proc.h>
+#include <arch/gic.h>
+#include <arch/exceptions.h>
+
 
 #define EMMC_MMIO_PHYS 0xFE340000ULL
 
@@ -42,8 +47,49 @@
 #define INT_READ_RDY        (1 << 5)
 #define INT_ERR             (1 << 15)
 
+
 static volatile uint8_t *emmc_base;
 static uint32_t rca;
+
+static void delay_cycles(volatile int cycles);
+static volatile uint32_t emmc_irq_status = 0;
+static void *emmc_io_wait = (void *)&emmc_irq_status;
+
+static void emmc_irq_handler(struct aarch64_frame *f) {
+    (void)f;
+    uint32_t stat = *(volatile uint32_t *)(emmc_base + 0x30 /* SDHCI_INTSTAT */);
+    *(volatile uint32_t *)(emmc_base + 0x30) = stat; /* ack */
+    emmc_irq_status |= stat;
+    wakeup(emmc_io_wait);
+}
+
+static uint32_t emmc_wait_for_interrupt(uint32_t mask) {
+    if (!my_thread()) {
+        /* Early boot, scheduler not running, poll hardware directly */
+        int retries = 1000000;
+        while (!((emmc_irq_status) & (mask | INT_ERR)) && retries--) {
+            uint32_t raw = *(volatile uint32_t *)(emmc_base + 0x30);
+            if (raw & (mask | INT_ERR)) {
+                *(volatile uint32_t *)(emmc_base + 0x30) = raw;
+                emmc_irq_status |= raw;
+            }
+            delay_cycles(100);
+        }
+    } else {
+        /* Scheduler running, sleep on our channel */
+        while (!((emmc_irq_status) & (mask | INT_ERR))) {
+            struct thread *t = my_thread();
+            t->chan = emmc_io_wait;
+            t->sleep_until = 0;
+            thread_set_sleeping(t);
+            schedule();
+        }
+    }
+    uint32_t res = emmc_irq_status & (mask | INT_ERR);
+    emmc_irq_status &= ~(mask | INT_ERR);
+    return res;
+}
+
 
 static inline void mmio_write32(uint32_t off, uint32_t val) {
     *(volatile uint32_t *)(emmc_base + off) = val;
@@ -99,27 +145,38 @@ static void sd_set_clock_divisor(uint16_t divisor) {
  *  0x10: Index check
  *  0x20: Data present
  */
+/*
+ * NOTE ON INTERRUPT HANDLING (The "0x00000000 Timeout" Bug):
+ * Previously, sd_cmd() manually polled the SDHCI_INTSTAT hardware register. 
+ * This worked perfectly during early boot (emmc_init) because CPU interrupts 
+ * were masked, so the hardware register retained its values. However, once 
+ * exceptions_enable_irqs() was called, the physical interrupt would fire 
+ * immediately upon command completion. Our emmc_irq_handler would run, read 
+ * INTSTAT, and clear the hardware register to 0. When sd_cmd() resumed its 
+ * polling loop, it would read 0x00000000 from the hardware, miss the event 
+ * completely, and eventually time out.
+ * 
+ * FIX: All command and data wait loops MUST use emmc_wait_for_interrupt(), 
+ * which checks the software-maintained `emmc_irq_status` variable. This ensures 
+ * events aren't lost when the IRQ handler clears the hardware register.
+ */
 static int sd_cmd(uint32_t cmd_idx, uint32_t arg, uint32_t trnmod, uint32_t flags) {
-    mmio_write32(SDHCI_INTSTAT, 0xFFFFFFFF); /* Clear previous interrupts */
+    mmio_write32(SDHCI_INTSTAT, 0xFFFFFFFF); /* Clear previous hardware interrupts */
+    emmc_irq_status = 0;                     /* Clear previous software status */
     mmio_write32(SDHCI_ARG, arg);
     mmio_write16(SDHCI_TRNMOD, trnmod);
     mmio_write16(SDHCI_CMD, (cmd_idx << 8) | flags);
 
-    int timeout = 1000000;
-    while (timeout--) {
-        uint32_t status = mmio_read32(SDHCI_INTSTAT);
-        if (status & INT_ERR) {
-            kprintf("eMMC: Command %u error! INTSTAT = 0x%x\n", cmd_idx, status);
-            return -1;
-        }
-        if (status & INT_CMD_DONE) {
-            mmio_write32(SDHCI_INTSTAT, INT_CMD_DONE);
-            return 0;
-        }
-        delay_cycles(100);
+    uint32_t status = emmc_wait_for_interrupt(INT_CMD_DONE);
+    if (status & INT_ERR) {
+        kprintf("eMMC: Command %u error! INTSTAT = 0x%x\n", cmd_idx, status);
+        return -1;
     }
-    kprintf("eMMC: Command %u timeout! INTSTAT = 0x%x\n", cmd_idx, mmio_read32(SDHCI_INTSTAT));
-    return -1;
+    if (!(status & INT_CMD_DONE)) {
+        kprintf("eMMC: Command %u timeout!\n", cmd_idx);
+        return -1;
+    }
+    return 0;
 }
 
 static int sd_acmd(uint32_t cmd_idx, uint32_t arg, uint32_t flags) {
@@ -144,6 +201,10 @@ void emmc_init(void) {
     }
 
     emmc_base = (volatile uint8_t *)(NEW_HDDM + EMMC_MMIO_PHYS);
+
+    /* Register IRQ 158 (GIC SPI 126) for BCM2711 EMMC2 */
+    register_irq_handler(158, emmc_irq_handler);
+    gic_enable_irq(158);
 
     /* Software Reset */
     mmio_write8(SDHCI_SRST, SRST_ALL);
@@ -321,16 +382,16 @@ int emmc_read_sectors(uint64_t lba, size_t count, void *buf) {
 
     for (size_t i = 0; i < count; i++) {
         /* Wait for this block's data to be ready */
-        int retries = 100000;
-        while (!(mmio_read32(SDHCI_INTSTAT) & INT_READ_RDY) && retries--) {
-            delay_cycles(100);
+        uint32_t stat = emmc_wait_for_interrupt(INT_READ_RDY);
+        if (stat & INT_ERR) {
+            kprintf("eMMC: Read error at LBA %llu\n", (unsigned long long)lba);
+            return -1;
         }
-        if (retries <= 0) {
+        if (!(stat & INT_READ_RDY)) {
             kprintf("eMMC: Read ready timeout at LBA %llu (sector %zu/%zu)\n",
                     (unsigned long long)lba, i, count);
             return -1;
         }
-        mmio_write32(SDHCI_INTSTAT, INT_READ_RDY);
 
         /* Read the 512 bytes */
         uint32_t *d32 = (uint32_t *)dst;
@@ -342,17 +403,66 @@ int emmc_read_sectors(uint64_t lba, size_t count, void *buf) {
 
     /* Transfer Complete fires once for the whole command (the
      * controller sends Auto CMD12 itself for the multi-block case). */
-    int retries = 100000;
-    while (!(mmio_read32(SDHCI_INTSTAT) & INT_DATA_DONE) && retries--) {
-        delay_cycles(100);
+    uint32_t stat = emmc_wait_for_interrupt(INT_DATA_DONE);
+    if (stat & INT_ERR) {
+        kprintf("eMMC: Data error at LBA %llu\n", (unsigned long long)lba);
+        return -1;
     }
-    if (retries <= 0) {
+    if (!(stat & INT_DATA_DONE)) {
         kprintf("eMMC: Data-done timeout at LBA %llu (count=%zu)\n",
                 (unsigned long long)lba, count);
         return -1;
     }
-    mmio_write32(SDHCI_INTSTAT, INT_DATA_DONE);
 
+    return 0;
+}
+
+int emmc_write_sectors(uint64_t lba, size_t count, const void *buf) {
+    if (count == 0) return 0;
+    const uint8_t *src = (const uint8_t *)buf;
+
+    mmio_write16(SDHCI_BLKSZ, 512);
+    mmio_write16(SDHCI_BLKCNT, (uint16_t)count);
+
+    uint32_t cmd_idx = (count == 1) ? 24 : 25; /* WRITE_BLOCK / WRITE_MULTIPLE_BLOCK */
+    uint32_t trnmod  = (count == 1) ? 0x00     /* dir=write only */
+                                    : 0x26;    /* BCE | Auto CMD12 | dir=write | multi */
+
+    if (sd_cmd(cmd_idx, (uint32_t)lba, trnmod, 0x3A) < 0) {
+        kprintf("eMMC: Write command failed at LBA %llu (count=%zu)\n",
+                (unsigned long long)lba, count);
+        return -1;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        uint32_t stat = emmc_wait_for_interrupt(INT_WRITE_RDY);
+        if (stat & INT_ERR) {
+            kprintf("eMMC: Write error at LBA %llu\n", (unsigned long long)lba);
+            return -1;
+        }
+        if (!(stat & INT_WRITE_RDY)) {
+            kprintf("eMMC: Write ready timeout at LBA %llu (sector %zu/%zu)\n",
+                    (unsigned long long)lba, i, count);
+            return -1;
+        }
+
+        /* Write the 512 bytes */
+        const uint32_t *d32 = (const uint32_t *)src;
+        for (int j = 0; j < 128; j++) {
+            mmio_write32(SDHCI_DATA, *d32++);
+        }
+        src += 512;
+    }
+
+    uint32_t stat = emmc_wait_for_interrupt(INT_DATA_DONE);
+    if (stat & INT_ERR) {
+        kprintf("eMMC: Write data error at LBA %llu\n", (unsigned long long)lba);
+        return -1;
+    }
+    if (!(stat & INT_DATA_DONE)) {
+        kprintf("eMMC: Write data-done timeout at LBA %llu\n", (unsigned long long)lba);
+        return -1;
+    }
     return 0;
 }
 
@@ -372,6 +482,11 @@ struct mbr_partition {
 static int emmc_block_dev_read(struct ext2_block_dev *dev, uint64_t lba, size_t count, void *buf) {
     (void)dev;
     return emmc_read_sectors(lba, count, buf);
+}
+
+static int emmc_block_dev_write(struct ext2_block_dev *dev, uint64_t lba, size_t count, const void *buf) {
+    (void)dev;
+    return emmc_write_sectors(lba, count, buf);
 }
 
 void emmc_mount_ext2(void) {
@@ -407,6 +522,7 @@ void emmc_mount_ext2(void) {
     struct ext2_block_dev *dev = kmalloc(sizeof(*dev));
     if (!dev) return;
     dev->read_sectors = emmc_block_dev_read;
+    dev->write_sectors = emmc_block_dev_write;
     dev->sector_size = 512;
     dev->sector_count = 0; /* Unused by ext2_read_data */
 
