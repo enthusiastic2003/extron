@@ -343,34 +343,56 @@ static void check_create_write_and_delete(void) {
     check("unlinking an already-removed file reports ENOENT",
           unlink(file_a) == -1 && errno == ENOENT);
 
-    /* --- ops that are still unconditionally read-only-only --- */
+    /* --- test rename, symlink, and chmod --- */
     char src[300], dst[300];
     snprintf(src, sizeof(src), TEST_DIR "/rename-src");
     snprintf(dst, sizeof(dst), TEST_DIR "/rename-dst");
     int rfd = open(src, O_CREAT | O_EXCL | O_WRONLY, 0644);
-    check("create a file to probe the still-unimplemented ops", rfd >= 0);
-    if (rfd >= 0) close(rfd);
+    check("create a file to probe the new ops", rfd >= 0);
+    if (rfd >= 0) { write(rfd, "RENAME", 6); close(rfd); }
 
+    /* Test rename */
+    check("rename() moves the file to the new destination", rename(src, dst) == 0);
     errno = 0;
-    check("rename() on ext2 currently reports EROFS (not yet implemented)",
-          rename(src, dst) == -1 && errno == EROFS);
+    check("stat on the old name reports ENOENT", stat(src, &st) == -1 && errno == ENOENT);
+    check("stat on the new name succeeds", stat(dst, &st) == 0 && st.st_size == 6);
 
+    /* Test chmod */
+    check("chmod() changes the permissions of the file", chmod(dst, 0600) == 0);
+    check("stat verifies the new permissions", stat(dst, &st) == 0 && (st.st_mode & 0777) == 0600);
+
+    /* Test symlink */
     char link_target[300];
     snprintf(link_target, sizeof(link_target), TEST_DIR "/a-symlink");
-    errno = 0;
-    check("symlink() on ext2 currently reports EROFS (not yet implemented)",
-          symlink("whatever", link_target) == -1 && errno == EROFS);
+    check("symlink() creates a fast symlink successfully", symlink("rename-dst", link_target) == 0);
+    
+    struct stat lst;
+    check("lstat() identifies the symlink", lstat(link_target, &lst) == 0 && S_ISLNK(lst.st_mode));
+    
+    char link_buf[64];
+    long rb = readlink(link_target, link_buf, sizeof(link_buf) - 1);
+    if (rb >= 0) link_buf[rb] = '\0';
+    check("readlink() returns the correct target string", rb == 10 && strcmp(link_buf, "rename-dst") == 0);
+    
+    /* Follow the symlink with stat */
+    check("stat() follows the symlink to the target", stat(link_target, &st) == 0 && st.st_size == 6);
 
-    snprintf(link_target, sizeof(link_target), TEST_DIR "/a-hardlink");
-    errno = 0;
-    check("link() on ext2 currently reports EROFS (not yet implemented)",
-          link(src, link_target) == -1 && errno == EROFS);
+    /* Test slow symlink (>60 chars) */
+    char long_link_target[300];
+    snprintf(long_link_target, sizeof(long_link_target), TEST_DIR "/a-long-symlink");
+    const char *long_target_str = "this_is_a_very_long_target_string_that_exceeds_sixty_characters_to_force_a_block_allocation";
+    check("symlink() creates a slow symlink successfully", symlink(long_target_str, long_link_target) == 0);
+    
+    char long_link_buf[200];
+    rb = readlink(long_link_target, long_link_buf, sizeof(long_link_buf) - 1);
+    if (rb >= 0) long_link_buf[rb] = '\0';
+    check("readlink() reads back the long target string from the block", rb == (long)strlen(long_target_str) && strcmp(long_link_buf, long_target_str) == 0);
 
-    errno = 0;
-    check("chmod() on ext2 currently reports EROFS (no setattr op yet)",
-          chmod(src, 0600) == -1 && errno == EROFS);
+    /* Cleanup */
+    unlink(dst);
+    unlink(link_target);
+    unlink(long_link_target);
 
-    unlink(src);
 }
 
 int main(void) {
