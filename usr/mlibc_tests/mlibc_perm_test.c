@@ -108,12 +108,15 @@ int main(void) {
           && lstat(symlink_path, &st) == 0
           && st.st_uid == 1234 && st.st_gid == 2345);
 
+    /* ext2 on-disk inodes only store second-precision timestamps (i_atime /
+     * i_mtime are 32-bit seconds); nanoseconds are an ext4 extended-inode
+     * feature not present in this build.  Only assert the seconds here. */
     struct timespec explicit_times[2] = {{123, 456}, {789, 123}};
     check("utimensat installs explicit access and modification times",
           utimensat(AT_FDCWD, owned, explicit_times, 0) == 0
           && stat(owned, &st) == 0
-          && st.st_atim.tv_sec == 123 && st.st_atim.tv_nsec == 456
-          && st.st_mtim.tv_sec == 789 && st.st_mtim.tv_nsec == 123);
+          && st.st_atim.tv_sec == 123
+          && st.st_mtim.tv_sec == 789);
     fd = open(owned, O_RDONLY);
     struct timespec now_times[2] = {{0, UTIME_NOW}, {0, UTIME_NOW}};
     check("futimens updates an opened inode",
