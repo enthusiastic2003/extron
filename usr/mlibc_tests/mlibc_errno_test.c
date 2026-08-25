@@ -72,7 +72,7 @@ static void test_ioctl(void) {
     check("ioctl() with an unrecognized tty request reports ENOTTY",
           ioctl(STDIN_FILENO, 0x99999999UL, NULL) == -1 && errno == ENOTTY);
 
-    int fd = open("/hello.txt", O_RDONLY);
+    int fd = open("/opt/tests/hello.txt", O_RDONLY);
     check("open a plain file for the non-tty ioctl check", fd >= 0);
     struct termios term;
     errno = 0;
@@ -107,7 +107,7 @@ static void test_dup_family(void) {
     int extra[40];
     int count = 0;
     while (count < 40) {
-        int fd = open("/hello.txt", O_RDONLY);
+        int fd = open("/opt/tests/hello.txt", O_RDONLY);
         if (fd < 0) break;
         extra[count++] = fd;
     }

@@ -43,6 +43,11 @@ fi
 if [ -d "$INITRD_DIR/tests" ]; then
     cp -r "$INITRD_DIR/tests"/* "$ROOTFS_DIR/opt/tests/" 2>/dev/null || true
 fi
+# hello.txt is used as a fixture by several regression tests via relative path.
+# Place it in /opt/tests/ so tests running from that directory find it.
+if [ -f "$INITRD_DIR/hello.txt" ]; then
+    cp "$INITRD_DIR/hello.txt" "$ROOTFS_DIR/opt/tests/hello.txt"
+fi
 
 # Distribute home/root binaries and files
 for f in pty.elf reboot.elf getenv_test.elf hello.txt; do

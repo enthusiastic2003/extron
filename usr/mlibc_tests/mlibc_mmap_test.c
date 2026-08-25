@@ -93,7 +93,7 @@ static void test_bad_arguments(void) {
     void *r = mmap(NULL, 4096, PROT_READ, MAP_FIXED | MAP_ANONYMOUS, -1, 0);
     check("MAP_FIXED is refused, not silently ignored", r == MAP_FAILED);
 
-    int fd = open("/hello.txt", O_RDONLY);
+    int fd = open("/opt/tests/hello.txt", O_RDONLY);
     check("open a plain ramfs file for the ENODEV check", fd >= 0);
     void *r2 = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
     check("mmap() on a file with no mmap op fails, doesn't corrupt state",

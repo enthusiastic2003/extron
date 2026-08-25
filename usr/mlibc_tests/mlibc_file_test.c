@@ -328,14 +328,14 @@ int main(void) {
     snprintf(relative_link, sizeof(relative_link), "%s/relative-link", nested_a);
     snprintf(hardlink_path, sizeof(hardlink_path), "%s/hard-link", test_directory);
     check("symlink creates a symbolic link",
-          symlink("/hello.txt", symlink_path) == 0);
+          symlink("/opt/tests/hello.txt", symlink_path) == 0);
     char link_buffer[64] = {0};
     check("readlink returns the stored target without a terminator",
-          readlink(symlink_path, link_buffer, sizeof(link_buffer)) == 10
-          && !memcmp(link_buffer, "/hello.txt", 10));
+          readlink(symlink_path, link_buffer, sizeof(link_buffer)) == 20
+          && !memcmp(link_buffer, "/opt/tests/hello.txt", 20));
     check("lstat identifies the symlink itself",
           lstat(symlink_path, &path_info) == 0 && S_ISLNK(path_info.st_mode)
-          && path_info.st_size == 10);
+          && path_info.st_size == 20);
     check("stat follows the symlink",
           stat(symlink_path, &path_info) == 0 && S_ISREG(path_info.st_mode)
           && path_info.st_size == 22);
@@ -435,7 +435,7 @@ int main(void) {
           directory_fd >= 0
           && unlinkat(directory_fd, "at-empty", AT_REMOVEDIR) == 0);
     check("absolute *at paths ignore the supplied directory fd",
-          fstatat(-999, "/hello.txt", &path_info, 0) == 0
+          fstatat(-999, "/opt/tests/hello.txt", &path_info, 0) == 0
           && S_ISREG(path_info.st_mode));
     int nondirectory_fd = open(regular_path, O_RDONLY);
     errno = 0;

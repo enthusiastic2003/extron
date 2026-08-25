@@ -23,7 +23,7 @@ static void check(const char *what, int ok) {
 int main(void) {
     printf("\n[vfsexec_test] === execve() resolves through the VFS ===\n");
 
-    const char *source = "/tests/mlibc_badptr_test.elf";
+    const char *source = "/opt/tests/mlibc_badptr_test.elf";
     const char *dest = "/tmp/vfsexec_copy.elf";
 
     int in = open(source, O_RDONLY);
