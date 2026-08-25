@@ -102,6 +102,33 @@ static virt_addr_t find_gap_locked(struct vm_space *mm, size_t span,
 }
 
 /*
+ * Like find_gap_locked(), but checks a caller-specified range instead
+ * of searching for one: succeeds only if [base, base+size) doesn't
+ * overlap any existing VMA (real MAP_FIXED silently discards what's
+ * there instead — see vm_allocate_region_at()'s own comment for why
+ * that's deferred). On success *out_prev is the node the new one
+ * should be linked after (NULL = list head), matching
+ * find_gap_locked()'s own convention so both can feed the same
+ * insertion logic. Caller holds mm->lock.
+ */
+static bool check_fixed_locked(struct vm_space *mm, virt_addr_t base,
+                               size_t size, struct vma **out_prev) {
+    virt_addr_t end = base + size;
+    struct vma *prev = NULL;
+    struct vma *cur  = mm->vmas;
+
+    while (cur) {
+        if (cur->base + cur->size <= base) { prev = cur; cur = cur->next; continue; }
+        if (cur->base >= end)
+            break;
+        return false;                     /* genuinely overlaps */
+    }
+
+    *out_prev = prev;
+    return true;
+}
+
+/*
  * Record a mapping somebody else created, so the address space knows
  * about it.
  *
@@ -254,6 +281,74 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags) {
     return cursor;
 }
 
+virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
+                                  size_t size, int flags) {
+    if (!mm || size == 0 || (addr & (PAGE_SIZE - 1)))
+        return 0;
+    if (size > (size_t)-1 - (PAGE_SIZE - 1))
+        return 0;
+
+    size = align_up(size, PAGE_SIZE);
+    if (addr < mm->heap_start || addr + size < addr || addr + size > mm->heap_end)
+        return 0;
+
+    irq_spin_lock(&mm->lock);
+
+    struct vma *prev;
+    if (!check_fixed_locked(mm, addr, size, &prev)) {
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+    struct vma *cur = prev ? prev->next : mm->vmas;
+
+    uint64_t pflags = arch_translate_vm_flags(flags);
+    size_t mapped = 0;
+    for (; mapped < size; mapped += PAGE_SIZE) {
+        void *page = pmm_alloc_page();
+        if (!page)
+            break;
+        memset(phys_to_virt_hhdm((phys_addr_t)page), 0, PAGE_SIZE);
+        if (map_page(mm->ttbr0, addr + mapped, (phys_addr_t)page, pflags) != 0) {
+            pmm_free_page(page);
+            break;
+        }
+    }
+
+    if (mapped < size) {
+        for (size_t off = 0; off < mapped; off += PAGE_SIZE) {
+            phys_addr_t phys = virt_to_phys(mm->ttbr0, addr + off);
+            unmap_page(mm->ttbr0, addr + off);
+            if (phys)
+                pmm_free_page((void *)phys);
+        }
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    struct vma *node = kmalloc(sizeof(struct vma));
+    if (!node) {
+        for (size_t off = 0; off < size; off += PAGE_SIZE) {
+            phys_addr_t phys = virt_to_phys(mm->ttbr0, addr + off);
+            unmap_page(mm->ttbr0, addr + off);
+            if (phys)
+                pmm_free_page((void *)phys);
+        }
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+    node->base       = addr;
+    node->size       = size;
+    node->owns_pages = true;
+    node->next       = cur;
+    if (prev)
+        prev->next = node;
+    else
+        mm->vmas = node;
+
+    irq_spin_unlock(&mm->lock);
+    return addr;
+}
+
 /* Frees the region whose base == addr. `size` is not trusted beyond
  * this being a real request — the VMA's own recorded size is what
  * actually gets unmapped/freed, so a mismatched caller can't corrupt
@@ -365,6 +460,60 @@ virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, in
 
     irq_spin_unlock(&mm->lock);
     return cursor + page_off;
+}
+
+virt_addr_t vm_map_region_at(struct vm_space *mm, virt_addr_t addr,
+                             phys_addr_t phys, size_t size, int flags) {
+    if (!mm || size == 0 || (addr & (PAGE_SIZE - 1)))
+        return 0;
+
+    size_t      page_off  = (size_t)(phys & (PAGE_SIZE - 1));
+    phys_addr_t phys_base = phys - page_off;
+    if (size > (size_t)-1 - page_off - (PAGE_SIZE - 1))
+        return 0;
+    size_t span = align_up(page_off + size, PAGE_SIZE);
+    if (addr < mm->heap_start || addr + span < addr || addr + span > mm->heap_end)
+        return 0;
+
+    irq_spin_lock(&mm->lock);
+
+    struct vma *prev;
+    if (!check_fixed_locked(mm, addr, span, &prev)) {
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+    struct vma *cur = prev ? prev->next : mm->vmas;
+
+    uint64_t pflags = arch_translate_vm_flags(flags);
+    size_t mapped = 0;
+    for (; mapped < span; mapped += PAGE_SIZE) {
+        if (map_page(mm->ttbr0, addr + mapped, phys_base + mapped, pflags) != 0)
+            break;
+    }
+
+    if (mapped < span) {
+        for (size_t off = 0; off < mapped; off += PAGE_SIZE)
+            unmap_page(mm->ttbr0, addr + off);
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    struct vma *node = kmalloc(sizeof(struct vma));
+    if (!node) {
+        for (size_t off = 0; off < span; off += PAGE_SIZE)
+            unmap_page(mm->ttbr0, addr + off);
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+
+    node->base       = addr;
+    node->size       = span;
+    node->owns_pages = false;
+    node->next       = cur;
+    if (prev) prev->next = node; else mm->vmas = node;
+
+    irq_spin_unlock(&mm->lock);
+    return addr + page_off;
 }
 
 /*

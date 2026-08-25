@@ -89,10 +89,67 @@ static void test_framebuffer_device(void) {
     }
 }
 
-static void test_bad_arguments(void) {
-    void *r = mmap(NULL, 4096, PROT_READ, MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-    check("MAP_FIXED is refused, not silently ignored", r == MAP_FAILED);
+/*
+ * MAP_FIXED (kernel/mm/uvm.c's vm_allocate_region_at()/vm_map_region_at(),
+ * dynamic-linking groundwork stage 2 — stage 1 was the auxiliary
+ * vector). Placement at a caller-chosen address is real now, but real
+ * MAP_FIXED's "silently discard whatever already overlaps" behavior
+ * isn't: this version requires the target range to already be
+ * completely free, and fails instead of clobbering something a
+ * caller might not have expected to lose.
+ */
+static void test_map_fixed(void) {
+    /* Address 0 (NULL) sits below this allocator's window
+     * ([0x10000000, 0x20000000) today) no matter what — MAP_FIXED
+     * there fails for being out of range, not because MAP_FIXED
+     * itself is unsupported. */
+    void *out_of_range = mmap(NULL, 4096, PROT_READ,
+                              MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("MAP_FIXED at an out-of-range address fails", out_of_range == MAP_FAILED);
 
+    void *misaligned = mmap((void *)0x10001001, 4096, PROT_READ,
+                            MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("MAP_FIXED with a misaligned hint fails", misaligned == MAP_FAILED);
+
+    /* Probe for a real, currently-free address the ordinary way first
+     * — mirroring how a dynamic linker actually uses MAP_FIXED: reserve
+     * space with a plain mmap() to learn where it's free, then place
+     * things precisely inside it. */
+    size_t length = 3 * 4096;
+    void *probe = mmap(NULL, length, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("probe mmap() to find a real free address succeeds", probe != MAP_FAILED);
+    if (probe == MAP_FAILED) return;
+    check("munmap() the probe so its address is free again",
+          munmap(probe, length) == 0);
+
+    void *fixed = mmap(probe, 4096, PROT_READ | PROT_WRITE,
+                       MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("MAP_FIXED at a genuinely free address succeeds", fixed != MAP_FAILED);
+    check("MAP_FIXED returns exactly the requested address", fixed == probe);
+    if (fixed == MAP_FAILED) return;
+
+    unsigned char *bytes = fixed;
+    int zeroed = 1;
+    for (size_t i = 0; i < 4096; i++)
+        if (bytes[i] != 0) zeroed = 0;
+    check("MAP_FIXED anonymous mapping is zeroed", zeroed);
+
+    bytes[0] = 0x5A;
+    check("a write through a MAP_FIXED mapping reads back", bytes[0] == 0x5A);
+
+    /* A second MAP_FIXED request landing on the live mapping above
+     * must fail rather than silently clobber it — see this function's
+     * own header comment. */
+    void *overlap = mmap(fixed, 4096, PROT_READ,
+                         MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("MAP_FIXED onto an already-mapped range fails (no clobber support yet)",
+          overlap == MAP_FAILED);
+
+    check("munmap() of the MAP_FIXED region succeeds", munmap(fixed, 4096) == 0);
+}
+
+static void test_bad_arguments(void) {
     int fd = open("/opt/tests/hello.txt", O_RDONLY);
     check("open a plain ramfs file for the ENODEV check", fd >= 0);
     void *r2 = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -106,6 +163,7 @@ int main(void) {
 
     test_anonymous();
     test_framebuffer_device();
+    test_map_fixed();
     test_bad_arguments();
 
     printf("[mmap_test] === %d failure(s) ===\n", failures);

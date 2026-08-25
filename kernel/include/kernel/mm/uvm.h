@@ -74,6 +74,19 @@ int               vm_insert_region(struct vm_space *mm, virt_addr_t base,
  * returns the base VA, or 0 on failure (no gap big enough, or OOM). */
 virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags);
 
+/* Like vm_allocate_region(), but at a caller-chosen address instead of
+ * first-fit — MAP_FIXED's anonymous case. `addr` must already be
+ * page-aligned and fall entirely within [heap_start, heap_end); the
+ * range must also be completely free of any existing VMA. Real
+ * MAP_FIXED silently discards whatever mapping already overlaps the
+ * target range instead of failing — that requires splitting/trimming
+ * arbitrary VMAs, which is deferred, so this fails instead of
+ * clobbering something a caller may not have expected to lose. Returns
+ * `addr` on success, or 0 on failure (misaligned, out of range,
+ * overlaps something, or OOM). */
+virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
+                                  size_t size, int flags);
+
 /* Frees the region whose base == addr — unmaps and frees its physical
  * pages, removes it from the list. `size` isn't trusted beyond a sanity
  * check; the VMA's own recorded size is what's actually freed, so a
@@ -89,5 +102,14 @@ void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size);
  * not-owned, so freeing the region unmaps without returning them to the
  * PMM. Returns 0 if no gap is big enough or a mapping fails. */
 virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, int flags);
+
+/* Like vm_map_region(), but at a caller-chosen address instead of
+ * first-fit — MAP_FIXED's file/device-backed case. Same placement
+ * rules as vm_allocate_region_at(): `addr` page-aligned, in range, and
+ * free of any overlap. Returns `addr + (phys's own intra-page offset)`
+ * on success (matching vm_map_region()'s own convention when `phys`
+ * isn't page-aligned), or 0 on failure. */
+virt_addr_t vm_map_region_at(struct vm_space *mm, virt_addr_t addr,
+                             phys_addr_t phys, size_t size, int flags);
 
 #endif

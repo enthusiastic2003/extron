@@ -654,21 +654,26 @@ struct mmap_request {
 };
 
 /*
- * MAP_ANONYMOUS: vm_allocate_region() picks a free VA and hands back
- * fresh, zeroed pages — the same call SYS_ANON_ALLOC already makes,
- * just reachable through the real mmap() ABI now.
+ * MAP_ANONYMOUS: vm_allocate_region()/vm_allocate_region_at() picks a
+ * free VA (or uses the caller's exact one) and hands back fresh,
+ * zeroed pages — the same call SYS_ANON_ALLOC already makes, just
+ * reachable through the real mmap() ABI now.
  *
  * Otherwise: the fd's vfs_node must offer memory to map at all
  * (ops->mmap — ramfs files, console, null, and zero don't), which then
- * goes through vm_map_region() exactly like the framebuffer and initrd
- * views already do — existing physical memory, not fresh pages, so
- * unmapping it later must not hand it back to the PMM (vm_map_region()
- * already records that correctly via owns_pages).
+ * goes through vm_map_region()/vm_map_region_at() exactly like the
+ * framebuffer and initrd views already do — existing physical memory,
+ * not fresh pages, so unmapping it later must not hand it back to the
+ * PMM (vm_map_region() already records that correctly via
+ * owns_pages).
  *
- * No MAP_FIXED (no placement control over vm_allocate_region()'s
- * first-fit yet) and no demand paging (everything here is either
- * eagerly allocated or already-resident device memory) — both
- * deliberately deferred, not silently pretended to work.
+ * MAP_FIXED requires the target range to be page-aligned and
+ * completely free of any existing mapping — real MAP_FIXED silently
+ * discards whatever overlaps instead, which needs splitting/trimming
+ * arbitrary VMAs and is deferred (see vm_allocate_region_at()'s own
+ * comment). No demand paging either (everything here is either
+ * eagerly allocated or already-resident device memory) — deliberately
+ * deferred, not silently pretended to work.
  */
 static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
                          struct aarch64_frame *f) {
@@ -678,9 +683,10 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
         return (uint64_t)-EFAULT;
     struct mmap_request req = *(struct mmap_request *)request_addr;
 
-    if (req.flags & MAP_FIXED)
-        return (uint64_t)-ENOSYS;
     if (!(req.flags & (MAP_SHARED | MAP_PRIVATE)))
+        return (uint64_t)-EINVAL;
+    bool fixed = req.flags & MAP_FIXED;
+    if (fixed && (req.hint & (PAGE_SIZE - 1)))
         return (uint64_t)-EINVAL;
 
     int vm_flags = VM_USER;
@@ -689,7 +695,9 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
     if (req.prot & PROT_EXEC)  vm_flags |= VM_EXEC;
 
     if (req.flags & MAP_ANONYMOUS) {
-        virt_addr_t va = vm_allocate_region(p->mm, req.size, vm_flags);
+        virt_addr_t va = fixed
+            ? vm_allocate_region_at(p->mm, (virt_addr_t)req.hint, req.size, vm_flags)
+            : vm_allocate_region(p->mm, req.size, vm_flags);
         return va ? (uint64_t)va : (uint64_t)-ENOMEM;
     }
 
@@ -710,7 +718,9 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
         return (uint64_t)result;
     if (!cacheable)
         vm_flags |= VM_NOCACHE;
-    virt_addr_t va = vm_map_region(p->mm, (phys_addr_t)phys, mapped_size, vm_flags);
+    virt_addr_t va = fixed
+        ? vm_map_region_at(p->mm, (virt_addr_t)req.hint, (phys_addr_t)phys, mapped_size, vm_flags)
+        : vm_map_region(p->mm, (phys_addr_t)phys, mapped_size, vm_flags);
     return va ? (uint64_t)va : (uint64_t)-ENOMEM;
 }
 
