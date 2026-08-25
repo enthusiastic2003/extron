@@ -51,6 +51,14 @@ for f in pty.elf reboot.elf resize.elf getenv_test.elf hello.txt; do
     fi
 done
 
+# Distribute terminfo and other usr/local files
+if [ -d "$INITRD_DIR/usr" ]; then
+    cp -r "$INITRD_DIR/usr"/* "$ROOTFS_DIR/usr/" 2>/dev/null || true
+fi
+if [ -d "$INITRD_DIR/local" ]; then
+    cp -r "$INITRD_DIR/local"/* "$ROOTFS_DIR/usr/local/" 2>/dev/null || true
+fi
+
 # Calculate required size in MB (with some buffer)
 DIR_SIZE_KB=$(du -sk "$ROOTFS_DIR" | cut -f1)
 IMG_SIZE_MB=$(( (DIR_SIZE_KB / 1024) + 16 )) # 16MB extra space
