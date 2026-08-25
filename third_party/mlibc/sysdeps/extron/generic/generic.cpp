@@ -94,6 +94,7 @@
 #define SYS_SETRESGID   68
 #define SYS_MMAP        69
 #define SYS_MUNMAP      70
+#define SYS_PAUSE       72
 
 
 using main_fn = int (*)(int, char **);
@@ -543,6 +544,18 @@ int sys_execve(const char *path, char *const argv[], char *const envp[]) {
     return 0;
 }
 
+int sys_pause() {
+    // The kernel side (kernel/proc/syscall.c's sys_pause()) only ever
+    // returns via a signal — there is no successful-completion path for
+    // pause() at all, per POSIX (see unistd.cpp's own __ensure on this) —
+    // so the raw syscall's result is always a negative errno (-EINTR),
+    // never 0. cp_syscall3, not the plain syscall helper, since a
+    // thread blocked in pause() must be a valid pthread_cancel() target
+    // like any other blocking call.
+    long ret = cp_syscall3(SYS_PAUSE, 0, 0, 0);
+    return (int)-ret;
+}
+
 int sys_sleep(time_t *secs, long *nanos) {
     long ret = cp_syscall3(SYS_SLEEP, *secs, nanos ? *nanos : 0, 0);
     if (ret < 0) {
@@ -949,14 +962,26 @@ int sys_pselect(int num_fds, fd_set *read_set, fd_set *write_set,
 }
 }
 
+/* Both belong in namespace mlibc (posix-sysdeps.hpp declares these
+ * weak symbols there) and both call the 4-argument mlibc::sys_ioctl()
+ * defined above (fd, request, arg-pointer-filled-by-the-driver,
+ * out-pointer-for-the-raw-syscall-result) — neither held before this
+ * fix: these were sitting at global scope, meaning they never actually
+ * overrode the weak mlibc::sys_unlockpt()/mlibc::sys_ptsname()
+ * defaults at all, and called a nonexistent 3-argument sys_ioctl() on
+ * top of that, which failed to even compile. */
+namespace mlibc {
+
 int sys_unlockpt(int fd) {
     int zero = 0;
-    return sys_ioctl(fd, 0x40045431 /* TIOCSPTLCK */, &zero);
+    int result;
+    return sys_ioctl(fd, 0x40045431 /* TIOCSPTLCK */, &zero, &result);
 }
 
 int sys_ptsname(int fd, char *buffer, size_t length) {
     int pty_num;
-    if (sys_ioctl(fd, 0x80045430 /* TIOCGPTN */, &pty_num) != 0) {
+    int result;
+    if (sys_ioctl(fd, 0x80045430 /* TIOCGPTN */, &pty_num, &result) != 0) {
         return ENOTTY;
     }
     
@@ -986,3 +1011,5 @@ int sys_ptsname(int fd, char *buffer, size_t length) {
     buffer[i] = '\0';
     return 0;
 }
+
+} // namespace mlibc

@@ -580,6 +580,28 @@ static uint64_t sys_sleep(uint64_t seconds, uint64_t nanos, uint64_t arg3,
     return signal_pending_unblocked(t) ? (uint64_t)-4 : 0; /* EINTR */
 }
 
+/* pause(): block indefinitely — sleep_until=0 marks this an untimed
+ * sleep (kernel/include/kernel/proc/proc.h's own doc comment on the
+ * field, and proc.c's tick-expiry check explicitly requires it nonzero
+ * before considering a sleeper timed out), so nothing but an explicit
+ * wakeup() or a deliverable signal ever ends it. Signal delivery's own
+ * wake_recipient() (kernel/proc/signal.c) already forces exactly this
+ * thread state — THREAD_SLEEPING, chan=NULL — back onto the run queue
+ * the moment an unblocked signal arrives, so there is nothing else to
+ * wire up here. pause() has no successful-completion return value per
+ * POSIX; it always resumes via a signal, hence the unconditional
+ * -EINTR once schedule() returns. */
+static uint64_t sys_pause(uint64_t a, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    struct thread *t = my_thread();
+    t->chan = NULL;
+    t->sleep_until = 0;
+    thread_set_sleeping(t);
+    schedule();
+    return (uint64_t)-EINTR;
+}
+
 static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
                               struct aarch64_frame *f) {
     (void)a;
@@ -1966,6 +1988,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_MMAP] = sys_mmap,
     [SYS_MUNMAP] = sys_munmap,
     [SYS_REBOOT] = sys_reboot,
+    [SYS_PAUSE]  = sys_pause,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

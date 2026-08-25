@@ -87,6 +87,7 @@
 #define SYS_MMAP        69
 #define SYS_MUNMAP      70
 #define SYS_REBOOT      71
+#define SYS_PAUSE       72
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

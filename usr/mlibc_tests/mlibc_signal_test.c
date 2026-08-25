@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -125,6 +126,35 @@ int main(void) {
     wait(&status);
     failures += pass("default SIGTERM action terminates child",
                      WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
+
+    if (pipe(ready) != 0)
+        return 1;
+    sig_atomic_t usr1_count_before_fork = usr1_count;
+    child = fork();
+    if (!child) {
+        close(ready[0]);
+        signal(SIGUSR1, usr1_handler);
+        write(ready[1], "r", 1);
+        close(ready[1]);
+        errno = 0;
+        int prc = pause();
+        /* pause() has no successful-completion return value at all —
+         * it only ever unblocks via a signal — so checking usr1_count
+         * advanced by exactly one (not just "== 1": fork() copies
+         * whatever usr1_count already reached from the raise()/sigprocmask
+         * checks earlier in this same process) also confirms the
+         * handler actually ran, rather than pause() merely returning
+         * early for some other reason. */
+        _Exit(prc == -1 && errno == EINTR
+              && usr1_count == usr1_count_before_fork + 1 ? 55 : 1);
+    }
+    close(ready[1]);
+    read(ready[0], &byte, 1);
+    close(ready[0]);
+    kill(child, SIGUSR1);
+    wait(&status);
+    failures += pass("pause() blocks until a signal, then returns -1/EINTR",
+                     WIFEXITED(status) && WEXITSTATUS(status) == 55);
 
     printf("[signal_test] === %d failure(s) ===\n", failures);
     return failures ? 1 : 0;
