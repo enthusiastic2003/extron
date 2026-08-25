@@ -80,28 +80,75 @@ _Static_assert(offsetof(struct ext2_disk_inode, i_blocks) == 28, "");
  * sectors into a temporary buffer.  Allocates; suitable for infrequent
  * reads (superblock, inodes).
  */
+
+static int ext2_sec_cache_get(struct ext2_mount *m, uint64_t lba, int *idx)
+{
+    int oldest = 0;
+    uint32_t oldest_tick = 0xFFFFFFFF;
+    
+    for (int i = 0; i < 128; i++) {
+        if (m->sec_cache[i].valid && m->sec_cache[i].lba == lba) {
+            m->sec_cache[i].tick = ++m->sec_cache_tick;
+            *idx = i;
+            return 0;
+        }
+        if (!m->sec_cache[i].valid) {
+            oldest = i;
+            oldest_tick = 0;
+        } else if (m->sec_cache[i].tick < oldest_tick) {
+            oldest = i;
+            oldest_tick = m->sec_cache[i].tick;
+        }
+    }
+    
+    if (m->sec_cache[oldest].valid && m->sec_cache[oldest].dirty) {
+        m->dev->write_sectors(m->dev, m->sec_cache[oldest].lba, 1, m->sec_cache[oldest].data);
+    }
+    
+    m->sec_cache[oldest].lba = lba;
+    m->sec_cache[oldest].valid = true;
+    m->sec_cache[oldest].dirty = false;
+    m->sec_cache[oldest].tick = ++m->sec_cache_tick;
+    
+    int ret = m->dev->read_sectors(m->dev, lba, 1, m->sec_cache[oldest].data);
+    if (ret < 0) {
+        m->sec_cache[oldest].valid = false;
+        return ret;
+    }
+    *idx = oldest;
+    return 0;
+}
+
+static void ext2_sync_cache(struct ext2_mount *m)
+{
+    for (int i = 0; i < 128; i++) {
+        if (m->sec_cache[i].valid && m->sec_cache[i].dirty) {
+            m->dev->write_sectors(m->dev, m->sec_cache[i].lba, 1, m->sec_cache[i].data);
+            m->sec_cache[i].dirty = false;
+        }
+    }
+}
+
 static int read_bytes(struct ext2_mount *m, uint64_t byte_offset,
                       void *buf, size_t count)
 {
     uint32_t ss = m->dev->sector_size;
-    uint64_t sec_start = byte_offset / ss;
+    if (ss != 512) return -ENOSYS;
+    uint64_t sec_start = m->part_lba + (byte_offset / ss);
     size_t   sec_off   = (size_t)(byte_offset % ss);
-    size_t   nsec      = (sec_off + count + ss - 1) / ss;
-    size_t   raw_size  = nsec * ss;
+    uint8_t *dst = (uint8_t *)buf;
 
-    uint8_t *raw = (uint8_t *)kmalloc(raw_size);
-    if (!raw)
-        return -ENOMEM;
-
-    int ret = m->dev->read_sectors(m->dev, m->part_lba + sec_start,
-                                   nsec, raw);
-    if (ret < 0) {
-        kfree(raw);
-        return ret;
+    while (count > 0) {
+        int idx;
+        if (ext2_sec_cache_get(m, sec_start, &idx) < 0) return -EIO;
+        size_t chunk = ss - sec_off;
+        if (chunk > count) chunk = count;
+        memcpy(dst, m->sec_cache[idx].data + sec_off, chunk);
+        dst += chunk;
+        count -= chunk;
+        sec_start++;
+        sec_off = 0;
     }
-
-    memcpy(buf, raw + sec_off, count);
-    kfree(raw);
     return 0;
 }
 
@@ -109,52 +156,35 @@ static int write_bytes(struct ext2_mount *m, uint64_t byte_offset,
                        const void *buf, size_t count)
 {
     uint32_t ss = m->dev->sector_size;
-    uint64_t sec_start = byte_offset / ss;
+    if (ss != 512) return -ENOSYS;
+    uint64_t sec_start = m->part_lba + (byte_offset / ss);
     size_t   sec_off   = (size_t)(byte_offset % ss);
-    size_t   nsec      = (sec_off + count + ss - 1) / ss;
-    size_t   raw_size  = nsec * ss;
+    const uint8_t *src = (const uint8_t *)buf;
 
-    uint8_t *raw = (uint8_t *)kmalloc(raw_size);
-    if (!raw) return -ENOMEM;
-
-    int ret = m->dev->read_sectors(m->dev, m->part_lba + sec_start, nsec, raw);
-    if (ret < 0) {
-        kfree(raw);
-        return ret;
+    while (count > 0) {
+        int idx;
+        if (ext2_sec_cache_get(m, sec_start, &idx) < 0) return -EIO;
+        size_t chunk = ss - sec_off;
+        if (chunk > count) chunk = count;
+        memcpy(m->sec_cache[idx].data + sec_off, src, chunk);
+        m->sec_cache[idx].dirty = true;
+        src += chunk;
+        count -= chunk;
+        sec_start++;
+        sec_off = 0;
     }
-
-    memcpy(raw + sec_off, buf, count);
-
-    if (!m->dev->write_sectors) {
-        kfree(raw);
-        return -ENOSYS;
-    }
-
-    ret = m->dev->write_sectors(m->dev, m->part_lba + sec_start, nsec, raw);
-    kfree(raw);
-    return ret;
+    return 0;
 }
-
-/*
- * Read a full filesystem block into `buf`.  `buf` must be at least
- * m->block_size bytes.  Block-aligned by construction (block_size is
- * always a multiple of sector_size).
- */
-
 
 static int read_block(struct ext2_mount *m, uint32_t block_no, void *buf)
 {
-    if (block_no == 0)
-        return -EINVAL;
-
-    uint64_t byte_off = (uint64_t)block_no * m->block_size;
-    uint32_t ss = m->dev->sector_size;
-    uint64_t sec_start = byte_off / ss;
-    size_t   nsec      = m->block_size / ss;
-
-    return m->dev->read_sectors(m->dev, m->part_lba + sec_start, nsec, buf);
+    return read_bytes(m, (uint64_t)block_no * m->block_size, buf, m->block_size);
 }
 
+static int write_block(struct ext2_mount *m, uint32_t block_no, const void *buf)
+{
+    return write_bytes(m, (uint64_t)block_no * m->block_size, buf, m->block_size);
+}
 /* ==================================================================== */
 /*  Inode lookup                                                        */
 /* ==================================================================== */
@@ -197,12 +227,6 @@ static int read_disk_inode(struct ext2_mount *m, uint32_t ino,
     return read_bytes(m, inode_byte, out, sizeof(*out));
 }
 
-static int write_block(struct ext2_mount *m, uint32_t block_no, const void *buf)
-{
-    if (block_no == 0) return -EINVAL;
-    uint64_t byte_off = (uint64_t)block_no * m->block_size;
-    return write_bytes(m, byte_off, buf, m->block_size);
-}
 
 static int ext2_sync_bgd(struct ext2_mount *m, uint32_t group, const struct ext2_bgd *bgd)
 {
@@ -732,7 +756,8 @@ long ext2_write_data(struct ext2_mount *m, struct ext2_inode_info *info,
         ext2_sync_inode(m, info);
     }
 
-    return (long)total_written;
+        ext2_sync_cache(m);
+return (long)total_written;
 }
 
 long ext2_read_data(struct ext2_mount *m, struct ext2_inode_info *info,
@@ -1368,7 +1393,8 @@ static int ext2_root(struct vfs_mount *mount, struct vfs_dentry **out)
 
     struct vfs_node *node = make_vfs_node(info);
     if (!node) {
-        ext2_free_inode_info(info);
+            ext2_sync_cache(m);
+ext2_free_inode_info(info);
         return -ENOMEM;
     }
 
