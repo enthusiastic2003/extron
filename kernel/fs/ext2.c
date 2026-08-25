@@ -1345,8 +1345,11 @@ static int ext2_node_setattr(struct vfs_node *node, const struct vfs_setattr *at
     }
 
     if (dirty) {
-        return ext2_sync_inode(info->mount, info);
+        int ret = ext2_sync_inode(info->mount, info);
+        ext2_sync_cache(info->mount);
+        return ret;
     }
+    ext2_sync_cache(info->mount);
     return 0;
 }
 static const struct vfs_node_ops ext2_node_ops = {
@@ -1729,6 +1732,7 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
         return ret;
     }
     *out = d;
+    ext2_sync_cache(m);
     return 0;
 }
 
@@ -1816,6 +1820,7 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
         ext2_sync_inode(m, dir);
     }
 
+    ext2_sync_cache(m);
     return ret;
 }
 
@@ -1875,6 +1880,7 @@ static int ext2_node_symlink(struct vfs_mount *vfs_m, struct vfs_dentry *parent_
         ext2_free_inode_info(new_lnk);
     }
     
+    ext2_sync_cache(m);
     return 0;
 }
 
@@ -1965,6 +1971,7 @@ static int ext2_node_rename(struct vfs_mount *vfs_m, struct vfs_dentry *old_pare
     }
 
     ext2_free_inode_info(target);
+    ext2_sync_cache(m);
     return 0;
 }
 
