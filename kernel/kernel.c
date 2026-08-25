@@ -145,17 +145,6 @@ void kernel_stage2(uint64_t mb2_addr) {
      * below still names a root-level initrd file directly — but exec
      * now resolves through the VFS, so anything placed under /bin at
      * runtime is immediately runnable. */
-    struct vfs_path fs_root;
-    struct vfs_cred root_cred = {0};
-    if (vfs_root_path(&fs_root) == 0) {
-        vfs_mkdir(&fs_root, "/dev", 0755, &root_cred);
-        vfs_mkdir(&fs_root, "/bin", 0755, &root_cred);
-        vfs_mkdir(&fs_root, "/etc", 0755, &root_cred);
-        vfs_mkdir(&fs_root, "/tmp", 01777, &root_cred);
-        vfs_mkdir(&fs_root, "/mnt", 0755, &root_cred);
-        vfs_mkdir(&fs_root, "/mnt/sd", 0755, &root_cred);
-        vfs_path_release(&fs_root);
-    }
     devfs_init();
     
 
@@ -242,7 +231,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* Start the interactive system environment. BusyBox is a static mlibc
      * binary whose applets re-exec through /sh; the ramfs provides its
      * writable working tree while retaining initrd files as COW views. */
-    struct proc *shell = proc_create_from_binary("/sh");
+    struct proc *shell = proc_create_from_binary("/bin/sh");
     if (!shell)
         panic("kernel_stage2: failed to create BusyBox ash");
     sched_policy_add(&shell->main_thread);

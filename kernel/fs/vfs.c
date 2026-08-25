@@ -1,3 +1,4 @@
+#include <kernel/console.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/errno.h>
 #include <kernel/mm/kheap.h>
@@ -241,7 +242,7 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
             }
             result = vfs_check_access(current.dentry->node, cred,
                                       VFS_ACCESS_EXEC);
-            if (result < 0) {
+            if (result < 0) {  
                 vfs_path_release(&current);
                 return result;
             }
@@ -264,7 +265,7 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
             return -ENOTDIR;
         }
         result = vfs_check_access(current.dentry->node, cred, VFS_ACCESS_EXEC);
-        if (result < 0) {
+        if (result < 0) {  
             vfs_path_release(&current);
             return result;
         }
@@ -274,7 +275,7 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
         struct vfs_dentry *child = NULL;
         result = current.mount->ops->lookup_child(
             current.mount, current.dentry, component, &child);
-        if (result < 0) {
+        if (result < 0) {  
             vfs_path_release(&current);
             return result;
         }
@@ -574,7 +575,7 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
         return -ENOTDIR;
     }
     result = parent_access(&parent, cred);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&parent);
         return result;
     }
@@ -607,7 +608,7 @@ int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode,
         return -ENOTDIR;
     }
     result = parent_access(&parent, cred);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&parent);
         return result;
     }
@@ -659,7 +660,7 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory,
         return -EROFS;
     }
     result = parent_access(&parent, cred);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&parent);
         return result;
     }
@@ -667,7 +668,7 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory,
     struct vfs_dentry *target = NULL;
     result = parent.mount->ops->lookup_child(parent.mount, parent.dentry,
                                               leaf, &target);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&parent);
         return result;
     }
@@ -700,7 +701,7 @@ int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
     if (result < 0)
         return result;
     result = walk(new_base, new_path, true, cred, &new_parent, new_leaf);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&old_parent);
         return result;
     }
@@ -787,7 +788,7 @@ int vfs_link(const struct vfs_path *old_base, const char *old_path,
         return result;
     char leaf[VFS_NAME_MAX + 1];
     result = walk(new_base, new_path, true, cred, &parent, leaf);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&source);
         return result;
     }
@@ -824,7 +825,7 @@ int vfs_symlink(const struct vfs_path *cwd, const char *target,
     if (result < 0)
         return result;
     result = parent_access(&parent, cred);
-    if (result < 0) {
+    if (result < 0) {  
         vfs_path_release(&parent);
         return result;
     }
