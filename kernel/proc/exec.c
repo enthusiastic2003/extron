@@ -21,6 +21,18 @@
  * far below the userspace heap at 0x10000000. */
 #define USER_STACK_VA 0x1000000
 
+/* Fixed load address for a PT_INTERP interpreter (a dynamic linker),
+ * loaded via parse_and_load_binary()'s bias parameter rather than at
+ * its own p_vaddr the way the main ET_EXEC image is — an interpreter
+ * is normally ET_DYN, so its p_vaddr values are file-relative, not
+ * real addresses. Comfortably clear of the main image's own growth
+ * room (DOOM's second PT_LOAD already reaches 0x557018; see
+ * USER_STACK_VA's comment above) and far below the stack at
+ * 0x1000000 — this project doesn't do dynamic/ASLR-style placement
+ * anywhere yet, everything lives at a fixed, well-known address, and
+ * the interpreter is no different. */
+#define INTERP_BASE 0x900000
+
 /* One page was enough while every payload was hand-written assembly with
  * no call depth and no locals. C code blows through that immediately —
  * a single printf frame with a format buffer can approach it — and there
@@ -83,6 +95,7 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
                                    const char *const *args, int argc,
                                    const char *const *envp, int envc,
                                    const struct elf_aux_info *aux,
+                                   virt_addr_t interp_base,
                                    uint32_t uid, uint32_t euid,
                                    uint32_t gid, uint32_t egid,
                                    virt_addr_t *out_argv_va) {
@@ -126,11 +139,23 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
      * this function's own header comment above) reads unconditionally.
      * Nothing currently parses past envp's NULL (mlibc's generic
      * parse_exec_stack() stops there for a static binary), so this is
-     * purely forward-looking: a future dynamic linker built from
-     * mlibc's own vendored rtld needs exactly this to bootstrap itself
-     * instead of re-parsing its own ELF header. AT_BASE is 0 because
-     * there's no interpreter to report yet — this kernel doesn't load
-     * PT_INTERP at all so far. */
+     * still forward-looking for now — a future dynamic linker built
+     * from mlibc's own vendored rtld needs exactly this to bootstrap
+     * itself instead of re-parsing its own ELF header.
+     *
+     * AT_PHDR/AT_PHENT/AT_PHNUM describe the MAIN PROGRAM's phdrs, not
+     * the interpreter's, even when one is loaded — `aux` is always
+     * exec_image_build()'s first parse_and_load_binary() call, never
+     * the interpreter's own. That's deliberate and matches real
+     * ld.so/kernel behavior: the whole point of AT_PHDR is letting the
+     * interpreter find the *main program's* PT_DYNAMIC segment (its
+     * needed-library list, symbol tables) directly in memory without
+     * re-reading that file from disk. The interpreter finds its own
+     * phdrs a different way (a self-relocation trick every real ld.so
+     * already does at startup, using its own program counter — nothing
+     * this kernel needs to supply). `interp_base` is INTERP_BASE when
+     * exec_image_build() loaded a PT_INTERP interpreter for this
+     * program, 0 otherwise; that's what AT_BASE reports. */
     size_t auxv_base = 1 + argc + 1 + envc + 1;
     size_t a = 0;
     #define AUXV(t, v) do { \
@@ -142,7 +167,7 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     AUXV(AT_PHENT,  aux->phentsize);
     AUXV(AT_PHNUM,  aux->phnum);
     AUXV(AT_PAGESZ, PAGE_SIZE);
-    AUXV(AT_BASE,   0);
+    AUXV(AT_BASE,   interp_base);
     AUXV(AT_ENTRY,  aux->entry);
     AUXV(AT_UID,    uid);
     AUXV(AT_EUID,   euid);
@@ -261,11 +286,41 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
 
     struct elf_aux_info aux;
     int load_result = parse_and_load_binary((virt_addr_t)binary, binary_size,
-                                            ttbr0, &aux, mm);
+                                            ttbr0, 0, &aux, mm);
     kfree(binary);
     if (load_result != 0) {
         kprintf("[EXEC] ELF load failed for %s\n", binary_path);
         goto fail;
+    }
+
+    /* PT_INTERP: don't jump into the main image directly — load the
+     * named interpreter too (at INTERP_BASE, since it's normally
+     * ET_DYN) and start there instead. AT_ENTRY (in `aux`, already
+     * populated above) keeps pointing at the real program's own entry
+     * point regardless, exactly what the interpreter needs once it's
+     * done bootstrapping itself to jump into the program it was
+     * actually asked to run. */
+    virt_addr_t real_start = aux.entry;
+    virt_addr_t interp_base = 0;
+    if (aux.has_interp) {
+        size_t interp_size;
+        void *interp_bin = load_binary_bytes(requester, aux.interp_path, &interp_size);
+        if (!interp_bin) {
+            kprintf("[EXEC] interpreter '%s' not found for %s\n",
+                    aux.interp_path, binary_path);
+            goto fail;
+        }
+        struct elf_aux_info interp_aux;
+        int interp_result = parse_and_load_binary((virt_addr_t)interp_bin, interp_size,
+                                                   ttbr0, INTERP_BASE, &interp_aux, mm);
+        kfree(interp_bin);
+        if (interp_result != 0) {
+            kprintf("[EXEC] interpreter '%s' failed to load for %s\n",
+                    aux.interp_path, binary_path);
+            goto fail;
+        }
+        real_start  = interp_aux.entry;
+        interp_base = INTERP_BASE;
     }
 
     phys_addr_t top_phys = 0;
@@ -308,8 +363,9 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
         irq_spin_unlock(&requester->cred_lock);
     }
 
-    out->entry   = aux.entry;
+    out->entry   = real_start;
     out->user_sp = build_arg_stack(top_phys, args, argc, envp, envc, &aux,
+                                   interp_base,
                                    aux_uid, aux_euid, aux_gid, aux_egid,
                                    &out->argv);
     out->argc    = (uint64_t)argc;

@@ -9,7 +9,14 @@
 #include<kernel/mm/uvm.h>
 #include<kernel/proc/elf_loader.h>
 
-Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
+/* `require_fixed_base`: true for a normal, non-PIE executable at its
+ * own address (the first PT_LOAD's p_vaddr must equal
+ * ELF_USER_EXPECTED_BASE, as always); false when the caller is about
+ * to apply its own load bias (a PIE interpreter) — in that case
+ * p_vaddr is a file-relative offset from 0, not a real address, and
+ * any value is legal. */
+Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size,
+                                      bool require_fixed_base) {
     if (!buffer)
         return ELF_ERR_NULL;
 
@@ -58,14 +65,29 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
         return ELF_ERR_PHENTSIZE;
     
     const Elf64_Phdr *phdr = (const Elf64_Phdr *)((const uint8_t *)buffer + ehdr->e_phoff);
-    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD) {
-            if (phdr[i].p_vaddr != ELF_USER_EXPECTED_BASE)
-                return ELF_ERR_BASE;
-            break;
+    if (require_fixed_base) {
+        for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+            if (phdr[i].p_type == PT_LOAD) {
+                if (phdr[i].p_vaddr != ELF_USER_EXPECTED_BASE)
+                    return ELF_ERR_BASE;
+                break;
+            }
         }
     }
 
+    /* 10. PT_INTERP, if present, must name a path this loader can
+     * actually copy out and later resolve through the VFS: its bytes
+     * must lie within the buffer, and fit (with room for a NUL) in
+     * the fixed-size buffer struct elf_aux_info offers for it. */
+    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_INTERP)
+            continue;
+        if (phdr[i].p_filesz == 0 ||
+            phdr[i].p_filesz > (uint64_t)ELF_INTERP_PATH_MAX - 1 ||
+            phdr[i].p_offset + phdr[i].p_filesz > size)
+            return ELF_ERR_INTERP;
+        break;
+    }
 
     return ELF_OK;
 }
@@ -73,12 +95,17 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
 int parse_and_load_binary(virt_addr_t binary_mem_loc,
                           size_t buffer_size,
                           pml4_t user_pml4,
+                          virt_addr_t bias,
                           struct elf_aux_info *out_aux,
                           struct vm_space *mm) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)binary_mem_loc;
 
-    /* Validate ELF */
-    Elf64_ValidationResult result = elf64_validate(ehdr, buffer_size);
+    /* Validate ELF. bias == 0 means a normal fixed-base executable —
+     * elf64_validate() enforces the first PT_LOAD sits at
+     * ELF_USER_EXPECTED_BASE in that case, so there is no separate
+     * re-check of that here; a nonzero bias skips the fixed-base
+     * check entirely, since p_vaddr is file-relative in that case. */
+    Elf64_ValidationResult result = elf64_validate(ehdr, buffer_size, bias == 0);
     if(result != ELF_OK) {
         kprintf("[LOADER] ELF validation failed: %d\n", result);
         return result;
@@ -87,21 +114,30 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
     const Elf64_Phdr *phdr =
         (const Elf64_Phdr *)((uint8_t *)ehdr + ehdr->e_phoff);
 
-    /* Verify first PT_LOAD base */
-    bool found_first_load = false;
+    memset(out_aux, 0, sizeof(*out_aux));
+    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_INTERP)
+            continue;
+        /* Bounds already checked by elf64_validate() above. */
+        memcpy(out_aux->interp_path,
+               (const uint8_t *)binary_mem_loc + phdr[i].p_offset,
+               phdr[i].p_filesz);
+        out_aux->interp_path[phdr[i].p_filesz] = '\0';
+        out_aux->has_interp = true;
+        break;
+    }
 
-    for(Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
-        if(phdr[i].p_type == PT_LOAD && !found_first_load) {
-            if(phdr[i].p_vaddr != ELF_USER_EXPECTED_BASE) {
-                kprintf(
-                    "[LOADER] First PT_LOAD at 0x%llx, expected 0x%llx\n",
-                    phdr[i].p_vaddr,
-                    (uint64_t)ELF_USER_EXPECTED_BASE
-                );
-                return -10;
-            }
-
-            found_first_load = true;
+    /* The program header table's runtime address for AT_PHDR: the
+     * first PT_LOAD's own p_vaddr (ELF_USER_EXPECTED_BASE when
+     * bias == 0, enforced above; typically 0 for a PIE interpreter,
+     * but read rather than assumed) plus e_phoff plus bias — true only
+     * because e_phoff always falls inside that first segment's file
+     * range at its very start (p_offset == 0), which is how every
+     * toolchain lays out an ELF, PIE or not. */
+    Elf64_Addr first_load_vaddr = 0;
+    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            first_load_vaddr = phdr[i].p_vaddr;
             break;
         }
     }
@@ -110,7 +146,15 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
         if(phdr[i].p_type != PT_LOAD)
             continue;
 
-        Elf64_Addr  vaddr  = phdr[i].p_vaddr;
+        /* A zero-memsz PT_LOAD has nothing to map and nothing for
+         * vm_insert_region() to record (it rejects size == 0 outright) —
+         * some linker configurations emit one anyway (e.g. a freestanding
+         * -nostdlib link with no .data/.bss at all still gets an empty
+         * second LOAD segment, as seen with mlibc_fake_interp.elf). */
+        if (phdr[i].p_memsz == 0)
+            continue;
+
+        Elf64_Addr  vaddr  = phdr[i].p_vaddr + bias;
         Elf64_Off   offset = phdr[i].p_offset;
         Elf64_Xword filesz = phdr[i].p_filesz;
         Elf64_Xword memsz  = phdr[i].p_memsz;
@@ -224,14 +268,14 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
         }
     }
 
-    out_aux->entry     = ehdr->e_entry;
-    out_aux->phdr_va   = ELF_USER_EXPECTED_BASE + ehdr->e_phoff;
+    out_aux->entry     = ehdr->e_entry + bias;
+    out_aux->phdr_va   = first_load_vaddr + ehdr->e_phoff + bias;
     out_aux->phnum     = ehdr->e_phnum;
     out_aux->phentsize = ehdr->e_phentsize;
 
     kprintf(
         "[LOADER] Binary loaded, entry point: 0x%llx\n",
-        ehdr->e_entry
+        out_aux->entry
     );
 
     return 0;

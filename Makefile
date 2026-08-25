@@ -77,6 +77,7 @@ MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/tests/%.elf,$(ML
 
 INITRD_ELF   := $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
                 $(MLIBC_ELF) \
+                $(BUILD)/initrd/tests/mlibc_fake_interp.elf \
                 $(BUILD)/initrd/doom.elf \
                 $(BUILD)/initrd/sh
 
@@ -137,6 +138,28 @@ $(BUILD)/initrd/%.elf: usr/%.c $(MLIBC_LIBC)
 $(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
+
+# mlibc_ptinterp_victim.elf regression fixture: compiled exactly like every
+# other usr/mlibc_tests/*.c above, then tools/add_pt_interp.py splices a
+# PT_INTERP segment onto the compiled binary pointing at
+# /opt/tests/mlibc_fake_interp.elf (see that script and both .c files'
+# own header comments for why — this project has no real ld.so to link
+# against yet, so there's no ordinary way to produce a real PT_INTERP
+# segment). Make prefers this specific target rule over the tests/%.elf
+# pattern rule above for this one file, so the pattern rule is untouched.
+$(BUILD)/initrd/tests/mlibc_ptinterp_victim.elf: usr/mlibc_tests/mlibc_ptinterp_victim.c $(MLIBC_LIBC) tools/add_pt_interp.py
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@.tmp -static -O1
+	python3 tools/add_pt_interp.py $@.tmp /opt/tests/mlibc_fake_interp.elf $@
+	rm -f $@.tmp
+
+# mlibc_fake_interp.elf: hand-written freestanding AArch64 (raw syscalls,
+# no mlibc startup/TLS/auxv parsing at all) standing in for a real
+# dynamic linker in the PT_INTERP fixture above — see that file's own
+# header comment for why it can't just be an ordinary mlibc test binary.
+$(BUILD)/initrd/tests/mlibc_fake_interp.elf: usr/mlibc_tests/mlibc_fake_interp.S
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) -nostdlib -static -o $@ $<
 
 $(BUILD)/initrd/%: usr/%
 	mkdir -p $(dir $@)

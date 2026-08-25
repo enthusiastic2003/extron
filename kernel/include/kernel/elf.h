@@ -145,7 +145,8 @@ typedef enum {
     ELF_ERR_PHOFF       = -8,  /* Program header table out of bounds */
     ELF_ERR_PHENTSIZE   = -9,  /* Program header entry size mismatch */
     ELF_ERR_ENTRY       = -10, /* Entry point is null */
-    ELF_ERR_BASE        = -11
+    ELF_ERR_BASE        = -11,
+    ELF_ERR_INTERP      = -12  /* PT_INTERP segment out of bounds or too long */
 } Elf64_ValidationResult;
 
 
