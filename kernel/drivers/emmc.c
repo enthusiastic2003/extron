@@ -490,6 +490,8 @@ static int emmc_block_dev_write(struct ext2_block_dev *dev, uint64_t lba, size_t
 }
 
 void emmc_mount_ext2(void) {
+    extern bool try_ramdisk_mount(void);
+    if (try_ramdisk_mount()) return;
     uint8_t sector0[512];
     if (emmc_read_sectors(0, 1, sector0) < 0) {
         kprintf("eMMC: Failed to read MBR for partition parsing.\n");

@@ -51,7 +51,7 @@ KERNEL_IMG := $(BUILD)/kernel8.img
 # against real mlibc via MLIBC_GCC below, same as usr/mlibc_tests/*.c,
 # usr/doom/, and usr/busybox/.
 USER_C_SRC   := $(wildcard usr/*.c)
-USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad) usr/nano $(shell find usr/usr/local -type f 2>/dev/null)
+USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad) usr/nano usr/ext2.img $(shell find usr/usr/local -type f 2>/dev/null)
 
 # --- mlibc-based userland tests (usr/mlibc_tests/) ---
 # Built with the real aarch64-extron cross toolchain against this repo's
