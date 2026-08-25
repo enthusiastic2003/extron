@@ -1465,12 +1465,6 @@ static int ext2_rofs(struct vfs_mount *m, struct vfs_dentry *p, const char *n,
 }
 
 
-static int ext2_rofs_link(struct vfs_mount *m, struct vfs_node *n,
-                          struct vfs_dentry *p, const char *name,
-                          struct vfs_dentry **out) {
-    (void)m;(void)n;(void)p;(void)name;(void)out;
-    return -EROFS;
-}
 
 
 static void ext2_destroy_dentry(struct vfs_dentry *dentry)
@@ -1825,6 +1819,43 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
 }
 
 
+
+static int ext2_node_link(struct vfs_mount *vfs_m, struct vfs_node *target_node,
+                          struct vfs_dentry *parent_dentry, const char *name,
+                          struct vfs_dentry **out)
+{
+    struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
+    struct ext2_inode_info *target = (struct ext2_inode_info *)target_node->private;
+    struct ext2_inode_info *dir = (struct ext2_inode_info *)parent_dentry->node->private;
+    
+    uint16_t mode = target->disk.i_mode & EXT2_S_IFMT;
+    if (mode == EXT2_S_IFDIR)
+        return -EPERM;
+        
+    uint8_t ext2_type = EXT2_FT_UNKNOWN;
+    if (mode == EXT2_S_IFREG) ext2_type = EXT2_FT_REG_FILE;
+    else if (mode == EXT2_S_IFCHR) ext2_type = EXT2_FT_CHRDEV;
+    else if (mode == EXT2_S_IFBLK) ext2_type = EXT2_FT_BLKDEV;
+    else if (mode == EXT2_S_IFIFO) ext2_type = EXT2_FT_FIFO;
+    else if (mode == EXT2_S_IFSOCK) ext2_type = EXT2_FT_SOCK;
+    else if (mode == EXT2_S_IFLNK) ext2_type = EXT2_FT_SYMLINK;
+    
+    int ret = ext2_add_dirent(m, dir, name, target->ino, ext2_type);
+    if (ret < 0) return ret;
+    
+    target->disk.i_links_count++;
+    ext2_sync_inode(m, target);
+    ext2_sync_cache(m);
+    
+    if (out) {
+        struct vfs_dentry *d = kmalloc(sizeof(*d));
+        vfs_dentry_init(d, target_node, parent_dentry, name, NULL);
+        *out = d;
+    }
+    
+    return 0;
+}
+
 static int ext2_node_symlink(struct vfs_mount *vfs_m, struct vfs_dentry *parent_dentry,
                              const char *name, const char *target,
                              uint32_t uid, uint32_t gid,
@@ -1981,7 +2012,7 @@ const struct vfs_fs_ops ext2_fs_ops = {
     .create         = ext2_node_create,
     .remove         = ext2_node_remove,
     .rename         = ext2_node_rename,
-    .link           = ext2_rofs_link,
+    .link           = ext2_node_link,
     .symlink        = ext2_node_symlink,
     .destroy_dentry = ext2_destroy_dentry,
 };
