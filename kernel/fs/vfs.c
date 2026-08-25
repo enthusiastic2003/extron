@@ -18,6 +18,77 @@
 static struct vfs_mount mounts[VFS_MAX_MOUNTS];
 static size_t mount_count;
 
+#define VFS_DCACHE_BUCKETS 256
+#define VFS_ICACHE_BUCKETS 256
+
+static struct vfs_dentry *dcache[VFS_DCACHE_BUCKETS];
+static spinlock_t dcache_lock = SPINLOCK_INIT;
+
+static struct vfs_node *icache[VFS_ICACHE_BUCKETS];
+static spinlock_t icache_lock = SPINLOCK_INIT;
+
+static uint32_t hash_dentry(struct vfs_dentry *parent, const char *name) {
+    uint32_t hash = (uint32_t)(uintptr_t)parent;
+    while (*name) hash = (hash * 31) + *name++;
+    return hash % VFS_DCACHE_BUCKETS;
+}
+
+static uint32_t hash_node(struct vfs_mount *mount, uint64_t ino) {
+    uint32_t hash = (uint32_t)(uintptr_t)mount ^ (uint32_t)ino ^ (uint32_t)(ino >> 32);
+    return hash % VFS_ICACHE_BUCKETS;
+}
+
+struct vfs_node *vfs_cache_lookup_node(struct vfs_mount *mount, uint64_t ino) {
+    uint32_t hash = hash_node(mount, ino);
+    irq_spin_lock(&icache_lock);
+    struct vfs_node *curr = icache[hash];
+    while (curr) {
+        if (curr->owner_mount == mount && curr->inode_num == ino) {
+            irq_spin_lock(&curr->ref_lock);
+            if (curr->refs > 0) {
+                curr->refs++;
+                irq_spin_unlock(&curr->ref_lock);
+                irq_spin_unlock(&icache_lock);
+                return curr;
+            }
+            irq_spin_unlock(&curr->ref_lock);
+        }
+        curr = curr->hash_next;
+    }
+    irq_spin_unlock(&icache_lock);
+    return NULL;
+}
+
+void vfs_cache_insert_node(struct vfs_node *node) {
+    if (node->inode_num == 0) return;
+    uint32_t hash = hash_node(node->owner_mount, node->inode_num);
+    irq_spin_lock(&icache_lock);
+    node->hash_next = icache[hash];
+    icache[hash] = node;
+    irq_spin_unlock(&icache_lock);
+}
+
+struct vfs_dentry *vfs_cache_lookup_dentry(struct vfs_dentry *parent, const char *name) {
+    uint32_t hash = hash_dentry(parent, name);
+    irq_spin_lock(&dcache_lock);
+    struct vfs_dentry *curr = dcache[hash];
+    while (curr) {
+        if (curr->parent == parent && strcmp(curr->name, name) == 0 && curr->linked) {
+            irq_spin_lock(&curr->ref_lock);
+            if (curr->refs > 0) {
+                curr->refs++;
+                irq_spin_unlock(&curr->ref_lock);
+                irq_spin_unlock(&dcache_lock);
+                return curr;
+            }
+            irq_spin_unlock(&curr->ref_lock);
+        }
+        curr = curr->hash_next;
+    }
+    irq_spin_unlock(&dcache_lock);
+    return NULL;
+}
+
 void vfs_node_init(struct vfs_node *node, const struct vfs_node_ops *ops,
                    void *private, enum vfs_node_type type) {
     memset(node, 0, sizeof(*node));
@@ -25,6 +96,7 @@ void vfs_node_init(struct vfs_node *node, const struct vfs_node_ops *ops,
     node->private = private;
     node->type = type;
     node->ref_lock = (spinlock_t)SPINLOCK_INIT;
+    node->refs = 1;
 }
 
 void vfs_node_retain(struct vfs_node *node) {
@@ -39,8 +111,24 @@ void vfs_node_release(struct vfs_node *node) {
     irq_spin_lock(&node->ref_lock);
     bool last = node->refs && --node->refs == 0;
     irq_spin_unlock(&node->ref_lock);
-    if (last && node->ops && node->ops->destroy)
-        node->ops->destroy(node);
+    
+    if (last) {
+        if (node->inode_num != 0) {
+            uint32_t hash = hash_node(node->owner_mount, node->inode_num);
+            irq_spin_lock(&icache_lock);
+            struct vfs_node **curr = &icache[hash];
+            while (*curr) {
+                if (*curr == node) {
+                    *curr = node->hash_next;
+                    break;
+                }
+                curr = &(*curr)->hash_next;
+            }
+            irq_spin_unlock(&icache_lock);
+        }
+        if (node->ops && node->ops->destroy)
+            node->ops->destroy(node);
+    }
 }
 
 int vfs_dentry_init(struct vfs_dentry *dentry, struct vfs_node *node,
@@ -58,9 +146,20 @@ int vfs_dentry_init(struct vfs_dentry *dentry, struct vfs_node *node,
     dentry->refs = 1; /* namespace membership */
     dentry->linked = 1;
     memcpy(dentry->name, name, length + 1);
+    /* Take a new reference to the node on behalf of this dentry.
+     * Callers that allocated the node purely for this dentry must
+     * release their own reference afterward. */
     vfs_node_retain(node);
-    if (parent)
+    if (parent) {
         vfs_dentry_retain(parent);
+        dentry->owner_mount = parent->owner_mount;
+
+        irq_spin_lock(&dcache_lock);
+        uint32_t hash = hash_dentry(parent, name);
+        dentry->hash_next = dcache[hash];
+        dcache[hash] = dentry;
+        irq_spin_unlock(&dcache_lock);
+    }
     return 0;
 }
 
@@ -80,6 +179,28 @@ void vfs_dentry_release(struct vfs_dentry *dentry) {
     struct vfs_node *node = dentry->node;
     struct vfs_dentry *parent = dentry->parent;
     struct vfs_mount *mount = dentry->owner_mount;
+
+    /* Unlink from the dcache hash chain before freeing — mirrors
+     * vfs_node_release()'s icache unlink below. Without this, the
+     * dentry stays reachable from its hash bucket after destroy_dentry()
+     * frees it: the next lookup that hashes to the same bucket walks
+     * straight into freed memory. Root dentries (parent == NULL) were
+     * never inserted (see vfs_dentry_init()'s `if (parent)` guard), so
+     * there's nothing to unlink for those. */
+    if (parent) {
+        uint32_t hash = hash_dentry(parent, dentry->name);
+        irq_spin_lock(&dcache_lock);
+        struct vfs_dentry **curr = &dcache[hash];
+        while (*curr) {
+            if (*curr == dentry) {
+                *curr = dentry->hash_next;
+                break;
+            }
+            curr = &(*curr)->hash_next;
+        }
+        irq_spin_unlock(&dcache_lock);
+    }
+
     if (mount && mount->ops && mount->ops->destroy_dentry)
         mount->ops->destroy_dentry(dentry);
     vfs_node_release(node);
@@ -272,12 +393,14 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
         char component[VFS_NAME_MAX + 1];
         memcpy(component, start, length);
         component[length] = '\0';
-        struct vfs_dentry *child = NULL;
-        result = current.mount->ops->lookup_child(
-            current.mount, current.dentry, component, &child);
-        if (result < 0) {  
-            vfs_path_release(&current);
-            return result;
+        struct vfs_dentry *child = vfs_cache_lookup_dentry(current.dentry, component);
+        if (!child) {
+            result = current.mount->ops->lookup_child(
+                current.mount, current.dentry, component, &child);
+            if (result < 0) {  
+                vfs_path_release(&current);
+                return result;
+            }
         }
         child->owner_mount = current.mount;
         if (child->node->type == VFS_NODE_SYMLINK
@@ -665,12 +788,14 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory,
         return result;
     }
 
-    struct vfs_dentry *target = NULL;
-    result = parent.mount->ops->lookup_child(parent.mount, parent.dentry,
-                                              leaf, &target);
-    if (result < 0) {  
-        vfs_path_release(&parent);
-        return result;
+    struct vfs_dentry *target = vfs_cache_lookup_dentry(parent.dentry, leaf);
+    if (!target) {
+        result = parent.mount->ops->lookup_child(parent.mount, parent.dentry,
+                                                  leaf, &target);
+        if (result < 0) {  
+            vfs_path_release(&parent);
+            return result;
+        }
     }
     size_t length = strlen(path);
     if (length && path[length - 1] == '/'
@@ -680,10 +805,16 @@ int vfs_unlink(const struct vfs_path *cwd, const char *path, int directory,
         result = -EBUSY;
     else
         result = sticky_access(parent.dentry->node, target->node, cred);
-    vfs_dentry_release(target);
-    if (result == 0)
+    if (result == 0) {
         result = parent.mount->ops->remove(parent.mount, parent.dentry,
                                             leaf, directory);
+        if (result == 0) {
+            irq_spin_lock(&dcache_lock);
+            target->linked = 0;
+            irq_spin_unlock(&dcache_lock);
+        }
+    }
+    vfs_dentry_release(target);
     vfs_path_release(&parent);
     return result;
 }
@@ -719,28 +850,50 @@ int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
     if (result < 0)
         goto out;
 
-    struct vfs_dentry *source = NULL;
-    result = old_parent.mount->ops->lookup_child(old_parent.mount,
-                                                  old_parent.dentry,
-                                                  old_leaf, &source);
-    if (result < 0)
-        goto out;
+    struct vfs_dentry *source = vfs_cache_lookup_dentry(old_parent.dentry, old_leaf);
+    if (!source) {
+        result = old_parent.mount->ops->lookup_child(old_parent.mount,
+                                                      old_parent.dentry,
+                                                      old_leaf, &source);
+        if (result < 0)
+            goto out;
+    }
+    
     enum vfs_node_type source_type = source->node->type;
     size_t old_length = strlen(old_path);
     if (old_length && old_path[old_length - 1] == '/'
-            && source->node->type != VFS_NODE_DIRECTORY)
+            && source->node->type != VFS_NODE_DIRECTORY) {
         result = -ENOTDIR;
-    else if (vfs_is_mountpoint(old_parent.mount, source))
+    } else if (vfs_is_mountpoint(old_parent.mount, source)) {
         result = -EBUSY;
-    else
+    } else {
         result = sticky_access(old_parent.dentry->node, source->node, cred);
-    vfs_dentry_release(source);
-    if (result < 0)
+    }
+    if (result < 0) {
+        vfs_dentry_release(source);
         goto out;
+    }
+    
+    /* Descendant check: cannot rename a directory into itself or its descendant */
+    if (source_type == VFS_NODE_DIRECTORY) {
+        struct vfs_dentry *d = new_parent.dentry;
+        while (d) {
+            if (d == source) {
+                result = -EINVAL;
+                vfs_dentry_release(source);
+                goto out;
+            }
+            d = d->parent;
+        }
+    }
 
-    struct vfs_dentry *destination = NULL;
-    int destination_result = new_parent.mount->ops->lookup_child(
-        new_parent.mount, new_parent.dentry, new_leaf, &destination);
+    struct vfs_dentry *destination = vfs_cache_lookup_dentry(new_parent.dentry, new_leaf);
+    int destination_result = 0;
+    if (!destination) {
+        destination_result = new_parent.mount->ops->lookup_child(
+            new_parent.mount, new_parent.dentry, new_leaf, &destination);
+    }
+    
     if (destination_result == 0) {
         size_t new_length = strlen(new_path);
         if (new_length && new_path[new_length - 1] == '/'
@@ -751,21 +904,77 @@ int vfs_rename_at(const struct vfs_path *old_base, const char *old_path,
         else
             result = sticky_access(new_parent.dentry->node,
                                    destination->node, cred);
-        vfs_dentry_release(destination);
-        if (result < 0)
+        if (result < 0) {
+            vfs_dentry_release(destination);
+            vfs_dentry_release(source);
             goto out;
+        }
+        /* destination stays retained (not released here) until after
+         * the rename attempt below, so we can safely mark it unlinked
+         * in the dcache once we know it was actually replaced — see
+         * the destination_result == 0 block after ops->rename(). */
     } else if (destination_result != -ENOENT) {
         result = destination_result;
+        vfs_dentry_release(source);
         goto out;
     } else {
         size_t new_length = strlen(new_path);
         if (new_length && new_path[new_length - 1] == '/') {
             result = source_type == VFS_NODE_DIRECTORY ? -ENOENT : -ENOTDIR;
+            vfs_dentry_release(source);
             goto out;
         }
     }
+    
     result = old_parent.mount->ops->rename(old_parent.mount,
         old_parent.dentry, old_leaf, new_parent.dentry, new_leaf);
+        
+    if (result == 0) {
+        /* Update dcache so getcwd follows the rename */
+        struct vfs_dentry *old_parent_dentry = source->parent;
+        struct vfs_dentry *new_parent_dentry = new_parent.dentry;
+        
+        vfs_dentry_retain(new_parent_dentry);
+        
+        irq_spin_lock(&dcache_lock);
+        uint32_t old_hash = hash_dentry(old_parent_dentry, old_leaf);
+        struct vfs_dentry **curr = &dcache[old_hash];
+        while (*curr) {
+            if (*curr == source) {
+                *curr = source->hash_next;
+                break;
+            }
+            curr = &(*curr)->hash_next;
+        }
+        source->parent = new_parent_dentry;
+        size_t len = strlen(new_leaf);
+        memcpy(source->name, new_leaf, len + 1);
+        uint32_t new_hash = hash_dentry(new_parent_dentry, new_leaf);
+        source->hash_next = dcache[new_hash];
+        dcache[new_hash] = source;
+        irq_spin_unlock(&dcache_lock);
+        
+        if (old_parent_dentry) {
+            vfs_dentry_release(old_parent_dentry);
+        }
+    }
+    if (destination_result == 0) {
+        /* The on-disk rename (if it succeeded) already replaced this
+         * file/directory — invalidate its dentry so the dcache stops
+         * handing it out as a live match for (new_parent, new_leaf),
+         * even though its refcount may still be pinned above 0 by an
+         * open file descriptor (matching vfs_unlink()'s "linked = 0"
+         * treatment of a removed-but-still-open target). Without this,
+         * the stale dentry — and the now-freed inode it points at —
+         * stays fully cache-visible indefinitely. */
+        if (result == 0) {
+            irq_spin_lock(&dcache_lock);
+            destination->linked = 0;
+            irq_spin_unlock(&dcache_lock);
+        }
+        vfs_dentry_release(destination);
+    }
+    vfs_dentry_release(source);
 
 out:
     vfs_path_release(&new_parent);

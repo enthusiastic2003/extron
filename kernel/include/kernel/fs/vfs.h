@@ -102,6 +102,10 @@ struct vfs_node {
     enum vfs_node_type type;
     spinlock_t ref_lock;
     size_t refs;
+    
+    struct vfs_node *hash_next;
+    uint64_t inode_num;
+    struct vfs_mount *owner_mount;
 };
 
 /* A dentry is a name in one directory, deliberately separate from its node.
@@ -115,6 +119,8 @@ struct vfs_dentry {
     size_t refs;
     int linked;
     char name[VFS_NAME_MAX + 1];
+    
+    struct vfs_dentry *hash_next;
 };
 
 struct vfs_path {
@@ -157,6 +163,10 @@ void vfs_dentry_retain(struct vfs_dentry *dentry);
 void vfs_dentry_release(struct vfs_dentry *dentry);
 void vfs_path_retain(struct vfs_path *path);
 void vfs_path_release(struct vfs_path *path);
+
+struct vfs_node *vfs_cache_lookup_node(struct vfs_mount *mount, uint64_t ino);
+void vfs_cache_insert_node(struct vfs_node *node);
+struct vfs_dentry *vfs_cache_lookup_dentry(struct vfs_dentry *parent, const char *name);
 
 void vfs_init(void);
 int vfs_mount_root(const struct vfs_fs_ops *ops, void *private);
