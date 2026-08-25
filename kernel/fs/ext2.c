@@ -1101,9 +1101,25 @@ static long ext2_node_readlink(struct vfs_node *node, void *buf, size_t size)
     return ext2_read_symlink(info->mount, info, buf, size);
 }
 
+static void ext2_free_inode(struct ext2_mount *m, uint32_t ino, bool is_dir);
+static int ext2_node_truncate(struct vfs_node *node, size_t size);
+
 static void ext2_node_destroy(struct vfs_node *node)
 {
     struct ext2_inode_info *info = (struct ext2_inode_info *)node->private;
+    if (info->disk.i_links_count == 0
+        && (info->disk.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) {
+        /* Regular file unlinked while still referenced elsewhere (an
+         * open fd, or our own transient lookup) — real reclaim was
+         * deferred until now, the point where nothing holds this node
+         * anymore, so an already-open descriptor could keep reading
+         * the old content in the meantime. Directories are reclaimed
+         * immediately in ext2_node_remove() instead — see its comment. */
+        struct vfs_node dummy;
+        dummy.private = info;
+        ext2_node_truncate(&dummy, 0);
+        ext2_free_inode(info->mount, info->ino, false);
+    }
     ext2_free_inode_info(info);
     kfree(node);
 }
@@ -1760,16 +1776,28 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     struct vfs_node *parent = parent_dentry->node;
     struct ext2_inode_info *dir = (struct ext2_inode_info *)parent->private;
 
-    struct ext2_inode_info *target = lookup_child(m, dir, name, strlen(name));
-    if (!target) return -ENOENT;
+    uint32_t ino = lookup_child_ino(m, dir, name, strlen(name));
+    if (!ino) return -ENOENT;
+
+    /* Fetch the shared, icache-cached node rather than an independent
+     * lookup_child() copy: any other still-open file descriptor or
+     * directory descriptor for this same inode holds this exact
+     * struct, so mutating it here (link count, size, block pointers)
+     * is immediately visible there too — matching real unlink()/
+     * rmdir() semantics for an inode that's still open elsewhere,
+     * instead of leaving that open reference looking at a stale,
+     * never-updated copy. */
+    struct vfs_node *target_node = get_ext2_vfs_node(vfs_m, m, ino);
+    if (!target_node) return -EIO;
+    struct ext2_inode_info *target = (struct ext2_inode_info *)target_node->private;
 
     bool target_is_dir = ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
     if (is_dir && !target_is_dir) {
-        ext2_free_inode_info(target);
+        vfs_node_release(target_node);
         return -ENOTDIR;
     }
     if (!is_dir && target_is_dir) {
-        ext2_free_inode_info(target);
+        vfs_node_release(target_node);
         return -EISDIR;
     }
 
@@ -1790,7 +1818,7 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
             }
         }
         if (!empty) {
-            ext2_free_inode_info(target);
+            vfs_node_release(target_node);
             return -ENOTEMPTY;
         }
     }
@@ -1812,22 +1840,40 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
      * correctly names the parent, but the parent no longer names it
      * back, and the leaked inode/block are never reused. */
     if (target_is_dir) {
+        /* Directories can't have hardlinks (ext2_rofs_link() always
+         * refuses one), so removing the only reference is always
+         * terminal — reclaim its block(s) and inode right away. There
+         * is no "keep serving the old listing while a descriptor is
+         * still open" expectation for a removed directory the way
+         * there is for an unlinked regular file below: an already-open
+         * directory descriptor should see it empty immediately (see
+         * mlibc_file_test.c's "open directory descriptor survives
+         * rmdir", which reads back nothing rather than a stale
+         * '.'/'..' listing) — sharing the icache node (target_node)
+         * makes that visible immediately to that descriptor. */
         target->disk.i_links_count = 0;
-    } else if (target->disk.i_links_count > 0) {
-        target->disk.i_links_count--;
-    }
-
-    if (target->disk.i_links_count == 0) {
-        /* Free all blocks (truncate to 0) */
         struct vfs_node dummy;
         dummy.private = target;
         ext2_node_truncate(&dummy, 0);
-        /* Free the inode */
-        ext2_free_inode(m, target->ino, is_dir);
+        ext2_free_inode(m, target->ino, 1);
     } else {
+        if (target->disk.i_links_count > 0)
+            target->disk.i_links_count--;
+        /* Reclaiming a regular file's data is deferred to
+         * ext2_node_destroy() — run once every holder of this node,
+         * including any fd still open on it, has released it — even
+         * though i_links_count may already be 0 here. POSIX unlink()
+         * guarantees an already-open descriptor keeps reading the old
+         * content until it closes ("open descriptor survives unlink"),
+         * not until the last *name* disappears; syncing i_links_count
+         * now still makes fstat() report 0 links immediately, which is
+         * the separate, correct-to-show-right-away half of this. */
         ext2_sync_inode(m, target);
     }
-    ext2_free_inode_info(target);
+    /* Drop our lookup reference — the node (and target, its private
+     * data) is only actually destroyed once every holder releases,
+     * e.g. after an open fd still using it also closes. */
+    vfs_node_release(target_node);
 
     /* Remove from parent directory */
     int ret = ext2_remove_dirent(m, dir, name);

@@ -307,8 +307,8 @@ int main(void) {
     check("rmdir can detach a directory still used as cwd",
           rmdir(absolute_removed) == 0);
     errno = 0;
-    // check("getcwd reports detached cwd as ENOENT",
-    //       getcwd(cwd, sizeof(cwd)) == NULL && errno == ENOENT);
+    check("getcwd reports detached cwd as ENOENT",
+          getcwd(cwd, sizeof(cwd)) == NULL && errno == ENOENT);
     check("dot-dot escapes a detached cwd", chdir("..") == 0);
     snprintf(expected_cwd, sizeof(expected_cwd), "%s", test_directory);
     check("cwd recovers at retained parent",
