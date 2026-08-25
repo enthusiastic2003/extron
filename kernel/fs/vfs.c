@@ -1,5 +1,4 @@
 #include <kernel/fs/vfs.h>
-#include <kernel/fs/ramfs.h>
 #include <kernel/errno.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/klibc/string.h>
@@ -102,7 +101,6 @@ void vfs_path_release(struct vfs_path *path) {
 void vfs_init(void) {
     memset(mounts, 0, sizeof(mounts));
     mount_count = 0;
-    ramfs_init();
 }
 
 int vfs_mount_root(const struct vfs_fs_ops *ops, void *private) {
@@ -139,12 +137,26 @@ static int replace_path(struct vfs_path *path, struct vfs_mount *mount,
     return 0;
 }
 
+static bool dentries_equal(struct vfs_dentry *a, struct vfs_dentry *b) {
+    if (a == b) return true;
+    if (!a || !b || !a->node || !b->node) return false;
+    if (a->node->ops != b->node->ops) return false;
+    struct vfs_attr attr_a = {0}, attr_b = {0};
+    if (a->node->ops->getattr && b->node->ops->getattr) {
+        if (a->node->ops->getattr(a->node, &attr_a) == 0 &&
+            b->node->ops->getattr(b->node, &attr_b) == 0) {
+            return attr_a.ino == attr_b.ino;
+        }
+    }
+    return false;
+}
+
 static void follow_mount(struct vfs_path *path) {
     for (size_t i = 1; i < mount_count; i++) {
         struct vfs_mount *mounted = &mounts[i];
         if (mounted->has_covered
                 && mounted->covered.mount == path->mount
-                && mounted->covered.dentry == path->dentry) {
+                && dentries_equal(mounted->covered.dentry, path->dentry)) {
             replace_path(path, mounted, mounted->root);
             return;
         }
@@ -618,7 +630,7 @@ static bool vfs_is_mountpoint(struct vfs_mount *mount,
     for (size_t i = 1; i < mount_count; i++)
         if (mounts[i].has_covered
                 && mounts[i].covered.mount == mount
-                && mounts[i].covered.dentry == dentry)
+                && dentries_equal(mounts[i].covered.dentry, dentry))
             return true;
     return false;
 }

@@ -1,3 +1,4 @@
+#include <kernel/console.h>
 #include <kernel/drivers/pty.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/fs/devfs.h>
@@ -225,10 +226,10 @@ static int devfs_lookup_child(struct vfs_mount *mount, struct vfs_dentry *parent
     for (size_t i = 0; i < ENTRY_COUNT; i++)
         if (strcmp(entries[i].name, name) == 0) {
             vfs_dentry_retain(&entries[i].dentry);
-            *out = &entries[i].dentry;
+            *out = &entries[i].dentry; 
             return 0;
         }
-    return -ENOENT;
+     return -ENOENT;
 }
 
 /* /dev is a fixed namespace: no file is ever created, removed, renamed, or
@@ -303,6 +304,6 @@ void devfs_init(void) {
     struct vfs_path root;
     if (vfs_root_path(&root) < 0)
         return;
-    vfs_mount_at(&root, "/dev", &devfs_fs_ops, NULL);
+    int res = vfs_mount_at(&root, "/dev", &devfs_fs_ops, NULL); if(res != 0) kprintf("DEVFS MOUNT FAILED %d\n", res);
     vfs_path_release(&root);
 }

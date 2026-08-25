@@ -1457,12 +1457,6 @@ static int ext2_lookup_child_vfs(struct vfs_mount *mount,
     return 0;
 }
 
-static int ext2_rofs(struct vfs_mount *m, struct vfs_dentry *p, const char *n,
-                     enum vfs_node_type t, uint32_t mo, uint32_t u, uint32_t g,
-                     struct vfs_dentry **out) {
-    (void)m;(void)p;(void)n;(void)t;(void)mo;(void)u;(void)g;(void)out;
-    return -EROFS;
-}
 
 
 

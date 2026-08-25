@@ -9,7 +9,6 @@
 #include <stddef.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/drivers/timer.h>
-#include <kernel/fs/tar.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/devfs.h>
 #include <kernel/proc/proc.h>
@@ -131,8 +130,13 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* Proves the initrd delivery pipeline end-to-end: DTB /chosen ->
      * fdt_get_initrd_region() (aarch64-specific) -> a real or synthesized
      * multiboot2 MODULE tag -> tar_init(). */
-    tar_init(mb2_addr);
     vfs_init();
+
+    extern bool try_ramdisk_mount(uint64_t mb2_addr);
+    if (!try_ramdisk_mount(mb2_addr)) {
+        extern void emmc_mount_ext2(void);
+        emmc_mount_ext2();
+    }
 
     /* Conventional top-level layout. /dev must exist as a plain ramfs
      * directory before devfs_init() can mount over it — vfs_mount_at()
@@ -154,21 +158,9 @@ void kernel_stage2(uint64_t mb2_addr) {
     }
     devfs_init();
     
-    extern void emmc_mount_ext2(void);
-    emmc_mount_ext2();
 
-    tar_list();
-    struct tar_file f;
-    if (tar_open("hello.txt", &f)) {
-        kprintf("hello.txt (%u bytes): \"", (unsigned)f.size);
-        const char *bytes = (const char *)f.data;
-        for (size_t i = 0; i < f.size; i++) {
-            kprintf("%c", bytes[i]);
-        }
-        kprintf("\"\n");
-    } else {
-        kprintf("hello.txt not found in initrd.\n");
-    }
+
+
 
     /* The original 2-proc round-robin scheduler proof (user_test.elf,
      * driven by map_test_counter_page()/timer_set_counter_watch()) is
@@ -250,7 +242,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* Start the interactive system environment. BusyBox is a static mlibc
      * binary whose applets re-exec through /sh; the ramfs provides its
      * writable working tree while retaining initrd files as COW views. */
-    struct proc *shell = proc_create_from_binary("sh");
+    struct proc *shell = proc_create_from_binary("/sh");
     if (!shell)
         panic("kernel_stage2: failed to create BusyBox ash");
     sched_policy_add(&shell->main_thread);

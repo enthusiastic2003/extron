@@ -51,7 +51,7 @@ KERNEL_IMG := $(BUILD)/kernel8.img
 # against real mlibc via MLIBC_GCC below, same as usr/mlibc_tests/*.c,
 # usr/doom/, and usr/busybox/.
 USER_C_SRC   := $(wildcard usr/*.c)
-USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad) usr/nano usr/ext2.img $(shell find usr/usr/local -type f 2>/dev/null)
+USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad) usr/nano $(shell find usr/usr/local -type f 2>/dev/null)
 
 # --- mlibc-based userland tests (usr/mlibc_tests/) ---
 # Built with the real aarch64-extron cross toolchain against this repo's
@@ -112,7 +112,7 @@ DOOM_CFLAGS := --sysroot="$(abspath $(MLIBC_SYSROOT))" -O2 -Wall -Wextra \
                -I$(DOOM_DIR) -DNORMALUNIX -DLINUX \
                -Wno-unused-but-set-variable
 INITRD_DATA  := $(patsubst usr/%,$(BUILD)/initrd/%,$(USER_DATA))
-INITRD       := initrd.tar
+INITRD       := initrd.ext2
 
 all: $(KERNEL_IMG) $(INITRD)
 
@@ -164,16 +164,7 @@ $(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC
 	cp $(BUSYBOX_DIR)/busybox $@
 
 $(INITRD): $(INITRD_ELF) $(INITRD_DATA)
-	# Explicit filenames, not "-C dir ." — the latter adds a "./" prefix
-	# to every entry name (plus a directory entry itself), and tar.c's
-	# tar_open() does an exact-name match with no path normalization, so
-	# a caller asking for "hello.txt" would silently never find
-	# "./hello.txt". Paths relative to $(BUILD)/initrd rather than
-	# $(notdir ...) — that would flatten tests/mlibc_foo.elf down to
-	# mlibc_foo.elf, undoing the whole point of the tests/ subdirectory.
-	# Root-level members (no subdirectory) resolve identically either way.
-	tar -cf $@ -C $(BUILD)/initrd \
-		$(patsubst $(BUILD)/initrd/%,%,$(INITRD_ELF) $(INITRD_DATA))
+	./build_ext2_root.sh
 
 run: $(KERNEL_IMG) $(INITRD)
 	qemu-system-aarch64 -M raspi4b -chardev stdio,id=serial0,signal=off -serial chardev:serial0 -display none -kernel $(KERNEL_IMG) -dtb boot/bcm2711-rpi-4-b.dtb -initrd $(INITRD)

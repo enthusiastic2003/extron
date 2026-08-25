@@ -9,7 +9,6 @@
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/power.h>
-#include <kernel/fs/tar.h>
 #include <kernel/proc/exec.h>
 #include <kernel/proc/futex.h>
 #include <kernel/fs/file.h>
@@ -780,46 +779,7 @@ static uint64_t sys_clock_set(uint64_t clock, uint64_t seconds,
  * arch_translate_vm_flags() marks it NX — data should never be
  * executable, and a WAD is the archetypal attacker-controlled blob.
  */
-static uint64_t sys_map_initrd(uint64_t name_addr, uint64_t name_len,
-                               uint64_t out_size_addr,
-                               struct aarch64_frame *frame) {
-    (void)frame;
-    struct proc *p = my_proc();
-
-    /* TAR_NAME_MAX-ish: tar's own name field is 100 bytes, so anything
-     * longer cannot name a real entry. Bounding here also keeps the
-     * copy below on a fixed-size stack buffer. */
-    char name[101];
-    if (name_len >= sizeof(name))
-        return 0;
-    if (!user_buffer_ok(p, name_addr, name_len) ||
-        !user_buffer_ok(p, out_size_addr, sizeof(uint64_t)))
-        return 0;
-
-    /* Copy in before use: the name is validated as a range, but reading
-     * it twice (once to check, once to use) is the shape TOCTOU bugs
-     * take, and tar_open() would otherwise hold a user pointer. */
-    memcpy(name, (const void *)name_addr, name_len);
-    name[name_len] = '\0';
-
-    struct tar_file f;
-    if (!tar_open(name, &f)) {
-        kprintf("[SYSCALL map_initrd] '%s' not found\n", name);
-        return 0;
-    }
-
-    /* tar_open() hands back an HHDM pointer (kernel/fs/tar.c sets
-     * tar_start = mod_start + NEW_HDDM), so the physical address is just
-     * that minus the offset. */
-    phys_addr_t phys = (phys_addr_t)((uint64_t)f.data - NEW_HDDM);
-
-    virt_addr_t va = vm_map_region(p->mm, phys, f.size, VM_READ | VM_USER);
-    if (!va)
-        return 0;
-
-    *(uint64_t *)out_size_addr = (uint64_t)f.size;
-    return (uint64_t)va;
-}
+static uint64_t sys_map_initrd(uint64_t a, uint64_t b, uint64_t c, struct aarch64_frame *frame) { return (uint64_t)-38; }
 
 /*
  * Copy a NUL-terminated string out of user memory.
