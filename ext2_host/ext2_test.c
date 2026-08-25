@@ -310,6 +310,43 @@ static void test_symlink_short(struct ext2_mount *m)
     ext2_free_inode_info(info);
 }
 
+static void test_symlink_with_xattr(struct ext2_mount *m)
+{
+    /* Regression test: a symlink whose target is short enough for the
+     * fast/inline path (< 60 bytes) but which also has a real extended
+     * attribute block attached (i_file_acl != 0) — exactly what any
+     * file or symlink written by a host tool under SELinux (or
+     * anything else that sets an xattr) looks like on disk. i_blocks
+     * alone is nonzero here purely because of the xattr block's own
+     * sector count, NOT because a real data block was allocated for
+     * the target. A fast-path check that only looks at i_blocks == 0
+     * misses this, falls through to the slow/block-pointer path, and
+     * misreads the raw inline target bytes as if they were indirect
+     * block pointers instead. */
+    struct ext2_inode_info *info = ext2_lookup_path(m, "/link_with_xattr");
+    check(info != NULL, "lookup /link_with_xattr succeeds");
+    if (!info) return;
+
+    check((info->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK,
+          "link_with_xattr is a symlink");
+    check(info->disk.i_file_acl != 0,
+          "link_with_xattr has a real xattr block (i_file_acl=%u)",
+          info->disk.i_file_acl);
+    check(info->disk.i_blocks != 0,
+          "link_with_xattr's i_blocks is nonzero purely from the xattr block (i_blocks=%u)",
+          info->disk.i_blocks);
+
+    char target[256];
+    memset(target, 0, sizeof(target));
+    long n = ext2_read_symlink(m, info, target, sizeof(target));
+    check(n > 0, "readlink returned %ld", n);
+    check(strcmp(target, "hello.txt") == 0,
+          "link_with_xattr target is still 'hello.txt' despite the xattr block (got '%s')",
+          target);
+
+    ext2_free_inode_info(info);
+}
+
 static void test_symlink_long(struct ext2_mount *m)
 {
     struct ext2_inode_info *info = ext2_lookup_path(m, "/link_long");
@@ -422,6 +459,7 @@ int main(int argc, char *argv[])
     test_readdir(m);
     test_readdir_subdir(m);
     test_symlink_short(m);
+    test_symlink_with_xattr(m);
     test_symlink_long(m);
     test_enoent(m);
     test_eisdir(m);

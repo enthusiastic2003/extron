@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "=== Creating $IMG ==="
 dd if=/dev/zero of="$IMG" bs=1M count=16 status=none
-mkfs.ext2 -q -b 1024 "$IMG"
+mkfs.ext2 -q -b 1024 -I 128 "$IMG"
 
 # --- Populate test files via debugfs ---
 
@@ -37,11 +37,22 @@ write $TMP/big.bin big.bin
 write $TMP/big.bin.md5 big.bin.md5
 write $TMP/permfile.txt permfile.txt
 symlink link_short hello.txt
+symlink link_with_xattr hello.txt
 EOF
 
 # Long symlink target — 61 chars, exceeds the 60-byte fast-path threshold
 LONG_TARGET=$(python3 -c "print('a' * 61, end='')")
 debugfs -w "$IMG" -R "symlink link_long $LONG_TARGET" 2>/dev/null
+
+# A short (fast-path-eligible) symlink target, but with an extended
+# attribute attached — reproduces what any file/symlink written by a
+# host tool under SELinux (or anything else that sets an xattr) looks
+# like on disk. i_blocks alone is 0 for a genuinely block-free inode,
+# but an xattr charges the inode for its own block, so i_blocks becomes
+# nonzero even though the symlink target is still stored inline. A
+# fast-path check that only looks at i_blocks == 0 misses this and
+# misreads the raw inline target bytes as if they were block pointers.
+debugfs -w "$IMG" -R "ea_set link_with_xattr user.test someval" 2>/dev/null
 
 echo "=== $IMG created ==="
 echo "Contents:"

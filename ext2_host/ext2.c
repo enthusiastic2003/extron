@@ -900,9 +900,24 @@ long ext2_read_symlink(struct ext2_mount *m, struct ext2_inode_info *info,
     uint32_t target_len = info->disk.i_size;
 
     /* Fast-path: target stored directly in i_block[] (up to 60 bytes).
-     * The reliable indicator is i_blocks == 0: no data blocks were
-     * allocated, so the data must be in the inode itself. */
-    if (info->disk.i_blocks == 0 && target_len <= 60) {
+     * i_blocks alone is NOT a reliable indicator: it counts every
+     * sector charged to the inode, including its extended-attribute
+     * block (i_file_acl) if it has one — and any file/symlink written
+     * under SELinux (or anything else that sets an xattr) gets one
+     * automatically. A genuinely fast/inline symlink with an xattr
+     * block attached still has i_blocks == block_size/512 (8 for a 4K
+     * filesystem), never 0, even though its target is stored inline
+     * and no real data block was ever allocated. Subtracting the
+     * xattr block's own sector count first (mirroring Linux's own
+     * ext2_inode_is_fast_symlink()) is what makes the check reliable.
+     * Getting this wrong doesn't just misreport a symlink: it falls
+     * through to the slow path below and treats the inline target
+     * bytes as if they were real block pointers, producing a wildly
+     * out-of-range "block number" (e.g. "busybox" read as a raw
+     * little-endian uint32 is ~2.04 billion) that then times out
+     * trying to read a nonexistent sector on real hardware. */
+    uint32_t ea_blocks = info->disk.i_file_acl ? (m->block_size / 512) : 0;
+    if (info->disk.i_blocks - ea_blocks == 0 && target_len <= 60) {
         size_t copy = target_len;
         if (copy > bufsize)
             copy = bufsize;
