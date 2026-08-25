@@ -1186,6 +1186,37 @@ static long ext2_node_write(struct vfs_node *node, size_t off, const void *buf, 
     return ext2_write_data(info->mount, info, off, buf, count);
 }
 
+
+static int ext2_node_setattr(struct vfs_node *node, const struct vfs_setattr *attr) {
+    struct ext2_inode_info *info = (struct ext2_inode_info *)node->private;
+    bool dirty = false;
+
+    if (attr->valid & VFS_SET_MODE) {
+        info->disk.i_mode = (info->disk.i_mode & EXT2_S_IFMT) | (attr->mode & 07777);
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_UID) {
+        info->disk.i_uid = attr->uid;
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_GID) {
+        info->disk.i_gid = attr->gid;
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_ATIME) {
+        info->disk.i_atime = attr->atime.sec;
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_MTIME) {
+        info->disk.i_mtime = attr->mtime.sec;
+        dirty = true;
+    }
+
+    if (dirty) {
+        return ext2_sync_inode(info->mount, info);
+    }
+    return 0;
+}
 static const struct vfs_node_ops ext2_node_ops = {
 
     .read     = ext2_node_read,
@@ -1195,7 +1226,7 @@ static const struct vfs_node_ops ext2_node_ops = {
     .getattr  = ext2_node_getattr,
     .readlink = ext2_node_readlink,
     .destroy  = ext2_node_destroy,
-    /* write / truncate / setattr / mmap — NULL (read-only) */
+    .setattr = ext2_node_setattr,
 };
 
 /* --- Helpers for VFS fs_ops --- */
@@ -1296,30 +1327,15 @@ static int ext2_rofs(struct vfs_mount *m, struct vfs_dentry *p, const char *n,
     (void)m;(void)p;(void)n;(void)t;(void)mo;(void)u;(void)g;(void)out;
     return -EROFS;
 }
-static int ext2_rofs_rm(struct vfs_mount *m, struct vfs_dentry *p,
-                        const char *n, int d) {
-    (void)m;(void)p;(void)n;(void)d;
-    return -EROFS;
-}
-static int ext2_rofs_ren(struct vfs_mount *m, struct vfs_dentry *op,
-                         const char *on, struct vfs_dentry *np,
-                         const char *nn) {
-    (void)m;(void)op;(void)on;(void)np;(void)nn;
-    return -EROFS;
-}
+
+
 static int ext2_rofs_link(struct vfs_mount *m, struct vfs_node *n,
                           struct vfs_dentry *p, const char *name,
                           struct vfs_dentry **out) {
     (void)m;(void)n;(void)p;(void)name;(void)out;
     return -EROFS;
 }
-static int ext2_rofs_symlink(struct vfs_mount *m, struct vfs_dentry *p,
-                             const char *name, const char *target,
-                             uint32_t u, uint32_t g,
-                             struct vfs_dentry **out) {
-    (void)m;(void)p;(void)name;(void)target;(void)u;(void)g;(void)out;
-    return -EROFS;
-}
+
 
 static void ext2_destroy_dentry(struct vfs_dentry *dentry)
 {
@@ -1670,14 +1686,163 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     return ret;
 }
 
+
+static int ext2_node_symlink(struct vfs_mount *vfs_m, struct vfs_dentry *parent_dentry,
+                             const char *name, const char *target,
+                             uint32_t uid, uint32_t gid,
+                             struct vfs_dentry **out)
+{
+    struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
+    struct ext2_inode_info *dir = (struct ext2_inode_info *)parent_dentry->node->private;
+    
+    uint32_t ino;
+    int ret = ext2_alloc_inode(m, EXT2_S_IFLNK | 0777, uid, gid, &ino);
+    if (ret < 0) return ret;
+    
+    ret = ext2_add_dirent(m, dir, name, ino, EXT2_FT_SYMLINK);
+    if (ret < 0) {
+        ext2_free_inode(m, ino, 0);
+        return ret;
+    }
+    
+    struct ext2_inode_info *new_lnk = ext2_lookup_inode(m, ino);
+    if (!new_lnk) return -EIO;
+    
+    size_t target_len = strlen(target);
+    new_lnk->disk.i_size = target_len;
+    
+    if (target_len <= 60) {
+        memcpy(new_lnk->disk.i_block, target, target_len);
+        new_lnk->disk.i_blocks = 0;
+    } else {
+        uint32_t bnum;
+        if (ext2_alloc_block(m, &bnum) == 0) {
+            memset(m->scratch, 0, m->block_size);
+            memcpy(m->scratch, target, target_len);
+            write_block(m, bnum, m->scratch);
+            new_lnk->disk.i_block[0] = bnum;
+            new_lnk->disk.i_blocks = m->block_size / 512;
+        } else {
+            /* Handled badly: just make it an empty link */
+            new_lnk->disk.i_size = 0;
+        }
+    }
+    ext2_sync_inode(m, new_lnk);
+    
+    if (out) {
+        struct vfs_node *node = make_vfs_node(new_lnk);
+        if (!node) {
+            ext2_free_inode_info(new_lnk);
+            return -ENOMEM;
+        }
+        struct vfs_dentry *d = kmalloc(sizeof(*d));
+        vfs_dentry_init(d, node, parent_dentry, name, NULL);
+        *out = d;
+    } else {
+        ext2_free_inode_info(new_lnk);
+    }
+    
+    return 0;
+}
+
+static int ext2_node_rename(struct vfs_mount *vfs_m, struct vfs_dentry *old_parent_d,
+                            const char *old_name, struct vfs_dentry *new_parent_d,
+                            const char *new_name)
+{
+    struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
+    struct ext2_inode_info *old_dir = (struct ext2_inode_info *)old_parent_d->node->private;
+    struct ext2_inode_info *new_dir = (struct ext2_inode_info *)new_parent_d->node->private;
+
+    struct ext2_inode_info *target = lookup_child(m, old_dir, old_name, strlen(old_name));
+    if (!target) return -ENOENT;
+
+    bool target_is_dir = ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+
+    struct ext2_inode_info *existing = lookup_child(m, new_dir, new_name, strlen(new_name));
+    if (existing) {
+        bool existing_is_dir = ((existing->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+        if (target_is_dir && !existing_is_dir) {
+            ext2_free_inode_info(target); ext2_free_inode_info(existing); return -ENOTDIR;
+        }
+        if (!target_is_dir && existing_is_dir) {
+            ext2_free_inode_info(target); ext2_free_inode_info(existing); return -EISDIR;
+        }
+        
+        if (existing_is_dir) {
+            bool empty = true;
+            if (existing->disk.i_size > 0 && existing->disk.i_block[0]) {
+                if (read_block(m, existing->disk.i_block[0], m->scratch) == 0) {
+                    struct ext2_disk_dirent *de = (struct ext2_disk_dirent *)m->scratch;
+                    if (de->rec_len > 0 && de->rec_len < m->block_size) {
+                        struct ext2_disk_dirent *de2 = (struct ext2_disk_dirent *)(m->scratch + de->rec_len);
+                        if (de->rec_len + de2->rec_len < m->block_size) empty = false;
+                    }
+                }
+            }
+            if (!empty) {
+                ext2_free_inode_info(target); ext2_free_inode_info(existing); return -ENOTEMPTY;
+            }
+            ext2_remove_dirent(m, new_dir, new_name);
+            existing->disk.i_links_count = 0;
+            struct vfs_node dummy; dummy.private = existing; ext2_node_truncate(&dummy, 0);
+            ext2_free_inode(m, existing->ino, 1);
+            if (new_dir->disk.i_links_count > 0) new_dir->disk.i_links_count--;
+        } else {
+            ext2_remove_dirent(m, new_dir, new_name);
+            if (existing->disk.i_links_count > 0) {
+                existing->disk.i_links_count--;
+                if (existing->disk.i_links_count == 0) {
+                    struct vfs_node dummy; dummy.private = existing; ext2_node_truncate(&dummy, 0);
+                    ext2_free_inode(m, existing->ino, 0);
+                } else {
+                    ext2_sync_inode(m, existing);
+                }
+            }
+        }
+        ext2_free_inode_info(existing);
+    }
+
+    uint8_t ext2_type = EXT2_FT_UNKNOWN;
+    if (target_is_dir) ext2_type = EXT2_FT_DIR;
+    else if ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFREG) ext2_type = EXT2_FT_REG_FILE;
+    else if ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) ext2_type = EXT2_FT_SYMLINK;
+
+    int ret = ext2_add_dirent(m, new_dir, new_name, target->ino, ext2_type);
+    if (ret < 0) { ext2_free_inode_info(target); return ret; }
+
+    ext2_remove_dirent(m, old_dir, old_name);
+
+    if (target_is_dir && old_dir->ino != new_dir->ino) {
+        if (target->disk.i_size > 0 && target->disk.i_block[0]) {
+            if (read_block(m, target->disk.i_block[0], m->scratch) == 0) {
+                struct ext2_disk_dirent *de = (struct ext2_disk_dirent *)m->scratch;
+                if (de->rec_len > 0 && de->rec_len < m->block_size) {
+                    struct ext2_disk_dirent *de2 = (struct ext2_disk_dirent *)(m->scratch + de->rec_len);
+                    if (de2->name_len == 2 && de2->inode != 0) {
+                        de2->inode = new_dir->ino;
+                        write_block(m, target->disk.i_block[0], m->scratch);
+                    }
+                }
+            }
+        }
+        if (old_dir->disk.i_links_count > 0) old_dir->disk.i_links_count--;
+        new_dir->disk.i_links_count++;
+        ext2_sync_inode(m, old_dir);
+        ext2_sync_inode(m, new_dir);
+    }
+
+    ext2_free_inode_info(target);
+    return 0;
+}
+
 const struct vfs_fs_ops ext2_fs_ops = {
     .root           = ext2_root,
     .lookup_child   = ext2_lookup_child_vfs,
     .create         = ext2_node_create,
     .remove         = ext2_node_remove,
-    .rename         = ext2_rofs_ren,
+    .rename         = ext2_node_rename,
     .link           = ext2_rofs_link,
-    .symlink        = ext2_rofs_symlink,
+    .symlink        = ext2_node_symlink,
     .destroy_dentry = ext2_destroy_dentry,
 };
 
