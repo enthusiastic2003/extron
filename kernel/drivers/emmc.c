@@ -479,19 +479,70 @@ struct mbr_partition {
     uint32_t num_sectors;
 } __attribute__((packed));
 
+#define EMMC_CACHE_SIZE 2048
+#define EMMC_READAHEAD_SECTORS 64
+
+static struct {
+    uint64_t lba;
+    bool valid;
+    uint8_t data[512];
+} emmc_cache[EMMC_CACHE_SIZE];
+
 static int emmc_block_dev_read(struct ext2_block_dev *dev, uint64_t lba, size_t count, void *buf) {
     (void)dev;
-    return emmc_read_sectors(lba, count, buf);
+    uint8_t *dst = buf;
+    
+    for (size_t i = 0; i < count; i++) {
+        uint64_t cur_lba = lba + i;
+        uint32_t idx = cur_lba % EMMC_CACHE_SIZE;
+        
+        if (!emmc_cache[idx].valid || emmc_cache[idx].lba != cur_lba) {
+            /* Cache Miss! Do a multi-block read-ahead to fill the cache */
+            uint8_t *chunk_buf = kmalloc(512 * EMMC_READAHEAD_SECTORS);
+            if (!chunk_buf) return -1;
+            
+            if (emmc_read_sectors(cur_lba, EMMC_READAHEAD_SECTORS, chunk_buf) == 0) {
+                for (size_t j = 0; j < EMMC_READAHEAD_SECTORS; j++) {
+                    uint64_t ra_lba = cur_lba + j;
+                    uint32_t ra_idx = ra_lba % EMMC_CACHE_SIZE;
+                    emmc_cache[ra_idx].lba = ra_lba;
+                    emmc_cache[ra_idx].valid = true;
+                    memcpy(emmc_cache[ra_idx].data, chunk_buf + (j * 512), 512);
+                }
+            } else {
+                /* Fallback to single sector if read-ahead fails */
+                if (emmc_read_sectors(cur_lba, 1, emmc_cache[idx].data) < 0) {
+                    kfree(chunk_buf);
+                    return -1;
+                }
+                emmc_cache[idx].lba = cur_lba;
+                emmc_cache[idx].valid = true;
+            }
+            kfree(chunk_buf);
+        }
+        
+        memcpy(dst, emmc_cache[idx].data, 512);
+        dst += 512;
+    }
+    return 0;
 }
 
 static int emmc_block_dev_write(struct ext2_block_dev *dev, uint64_t lba, size_t count, const void *buf) {
     (void)dev;
-    return emmc_write_sectors(lba, count, buf);
+    const uint8_t *src = buf;
+    for (size_t i = 0; i < count; i++) {
+        uint64_t cur_lba = lba + i;
+        uint32_t idx = cur_lba % EMMC_CACHE_SIZE;
+        if (emmc_cache[idx].valid && emmc_cache[idx].lba == cur_lba) {
+            memcpy(emmc_cache[idx].data, src, 512);
+        }
+        if (emmc_write_sectors(cur_lba, 1, src) < 0) return -1;
+        src += 512;
+    }
+    return 0;
 }
 
 void emmc_mount_ext2(void) {
-    extern bool try_ramdisk_mount(void);
-    if (try_ramdisk_mount()) return;
     uint8_t sector0[512];
     if (emmc_read_sectors(0, 1, sector0) < 0) {
         kprintf("eMMC: Failed to read MBR for partition parsing.\n");
@@ -537,17 +588,11 @@ void emmc_mount_ext2(void) {
         return;
     }
 
-    /* Mount it into the VFS at /mnt/sd */
-    struct vfs_path root;
-    if (vfs_root_path(&root) == 0) {
-        int res = vfs_mount_at(&root, "mnt/sd", &ext2_fs_ops, ext2_m);
-        if (res == 0) {
-            kprintf("eMMC: Successfully mounted ext2 at /mnt/sd\n");
-        } else {
-            kprintf("eMMC: VFS mount failed with error %d\n", res);
-        }
-        vfs_path_release(&root);
+    /* Mount it into the VFS as the root filesystem */
+    int res = vfs_mount_root(&ext2_fs_ops, ext2_m);
+    if (res == 0) {
+        kprintf("eMMC: Successfully mounted ext2 as root (/)\n");
     } else {
-        kprintf("eMMC: Failed to resolve VFS root for mounting.\n");
+        kprintf("eMMC: VFS mount failed with error %d\n", res);
     }
 }

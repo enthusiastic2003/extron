@@ -37,3 +37,5 @@ third_party/mlibc/sysdeps/extron/include/sys/ioctl.h
 # The shareware WAD. Freely redistributable but 4MB of binary that would
 # sit in every clone forever; fetch it into usr/ instead.
 usr/*.wad
+initrd.ext2
+initrd/
