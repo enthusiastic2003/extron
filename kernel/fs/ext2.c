@@ -567,6 +567,113 @@ static int inode_bmap_alloc(struct ext2_mount *m, struct ext2_inode_info *info,
         *out_block = ind1[n];
         return 0;
     }
+    n -= ptrs;
+
+    if (n < ptrs * ptrs) {
+        if (di->i_block[13] == 0) {
+            uint32_t b;
+            int ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            di->i_block[13] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            m->ind_l1_block = di->i_block[13];
+            memset(m->ind_l1, 0, m->block_size);
+        }
+        int ret = read_block_cached(m, di->i_block[13], m->ind_l1, &m->ind_l1_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind1 = (uint32_t *)m->ind_l1;
+        uint32_t i = n / ptrs;
+        uint32_t j = n % ptrs;
+
+        if (ind1[i] == 0) {
+            uint32_t b;
+            ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            ind1[i] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, di->i_block[13], m->ind_l1);
+            m->ind_l2_block = ind1[i];
+            memset(m->ind_l2, 0, m->block_size);
+        }
+        ret = read_block_cached(m, ind1[i], m->ind_l2, &m->ind_l2_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind2 = (uint32_t *)m->ind_l2;
+        if (ind2[j] == 0) {
+            ret = ext2_alloc_block(m, &ind2[j]);
+            if (ret < 0) return ret;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, ind1[i], m->ind_l2);
+        }
+        *out_block = ind2[j];
+        return 0;
+    }
+    n -= ptrs * ptrs;
+
+    if (n < ptrs * ptrs * ptrs) {
+        if (di->i_block[14] == 0) {
+            uint32_t b;
+            int ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            di->i_block[14] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            m->ind_l1_block = di->i_block[14];
+            memset(m->ind_l1, 0, m->block_size);
+        }
+        int ret = read_block_cached(m, di->i_block[14], m->ind_l1, &m->ind_l1_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind1 = (uint32_t *)m->ind_l1;
+        uint32_t i = n / (ptrs * ptrs);
+        uint32_t rem = n % (ptrs * ptrs);
+        uint32_t j = rem / ptrs;
+        uint32_t k = rem % ptrs;
+
+        if (ind1[i] == 0) {
+            uint32_t b;
+            ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            ind1[i] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, di->i_block[14], m->ind_l1);
+            m->ind_l2_block = ind1[i];
+            memset(m->ind_l2, 0, m->block_size);
+        }
+        ret = read_block_cached(m, ind1[i], m->ind_l2, &m->ind_l2_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind2 = (uint32_t *)m->ind_l2;
+        if (ind2[j] == 0) {
+            uint32_t b;
+            ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            ind2[j] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, ind1[i], m->ind_l2);
+            m->ind_l3_block = ind2[j];
+            memset(m->ind_l3, 0, m->block_size);
+        }
+        ret = read_block_cached(m, ind2[j], m->ind_l3, &m->ind_l3_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind3 = (uint32_t *)m->ind_l3;
+        if (ind3[k] == 0) {
+            ret = ext2_alloc_block(m, &ind3[k]);
+            if (ret < 0) return ret;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, ind2[j], m->ind_l3);
+        }
+        *out_block = ind3[k];
+        return 0;
+    }
     
     return -ENOSYS; 
 }
