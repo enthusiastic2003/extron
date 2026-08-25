@@ -45,11 +45,16 @@ if [ -d "$INITRD_DIR/tests" ]; then
 fi
 
 # Distribute home/root binaries and files
-for f in pty.elf reboot.elf resize.elf getenv_test.elf hello.txt; do
+for f in pty.elf reboot.elf getenv_test.elf hello.txt; do
     if [ -f "$INITRD_DIR/$f" ]; then
         cp "$INITRD_DIR/$f" "$ROOTFS_DIR/root/$f"
     fi
 done
+
+# Distribute standalone utilities to /bin
+if [ -f "$INITRD_DIR/resize.elf" ]; then
+    cp "$INITRD_DIR/resize.elf" "$ROOTFS_DIR/bin/resize"
+fi
 
 # Distribute terminfo and other usr/local files
 if [ -d "$INITRD_DIR/usr" ]; then
