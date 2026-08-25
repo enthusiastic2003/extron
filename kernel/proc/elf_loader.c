@@ -7,6 +7,7 @@
 #include<kernel/klibc/string.h>
 #include<kernel/console.h>
 #include<kernel/mm/uvm.h>
+#include<kernel/proc/elf_loader.h>
 
 Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
     if (!buffer)
@@ -72,7 +73,7 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size) {
 int parse_and_load_binary(virt_addr_t binary_mem_loc,
                           size_t buffer_size,
                           pml4_t user_pml4,
-                          virt_addr_t *out_entry_point,
+                          struct elf_aux_info *out_aux,
                           struct vm_space *mm) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)binary_mem_loc;
 
@@ -223,7 +224,10 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
         }
     }
 
-    *out_entry_point = ehdr->e_entry;
+    out_aux->entry     = ehdr->e_entry;
+    out_aux->phdr_va   = ELF_USER_EXPECTED_BASE + ehdr->e_phoff;
+    out_aux->phnum     = ehdr->e_phnum;
+    out_aux->phentsize = ehdr->e_phentsize;
 
     kprintf(
         "[LOADER] Binary loaded, entry point: 0x%llx\n",

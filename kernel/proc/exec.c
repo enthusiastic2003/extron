@@ -1,5 +1,6 @@
 #include <kernel/proc/exec.h>
 #include <kernel/proc/elf_loader.h>
+#include <kernel/elf.h>
 #include <kernel/proc/sched.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/mm/paging.h>
@@ -8,6 +9,7 @@
 #include <kernel/mm/uvm.h>
 #include <kernel/console.h>
 #include <kernel/klibc/string.h>
+#include <arch/irq_spinlock.h>
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
  * has its own independent TTBR0 (see kernel/arch/aarch64/proc.c's
@@ -28,13 +30,21 @@
 #define USER_STACK_PAGES 32
 #define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
 
+/* AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, AT_UID,
+ * AT_EUID, AT_GID, AT_EGID, plus the AT_NULL terminator — see
+ * build_arg_stack()'s auxv block below. Each entry is a (type, value)
+ * pair of two uint64_t words. */
+#define EXEC_AUXV_ENTRIES 11
+
 /* The whole argument block has to fit in the single page it is written
  * into, or build_arg_stack() would run off the bottom of that page and
  * corrupt the stack page below it. Sized so it cannot: worst case is
  * every argument present, every byte used, plus argc's own word, the
  * argv pointer array, argv's NULL terminator, envp's (empty) NULL
- * terminator, plus 16 bytes of alignment slack. */
-_Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES + (EXEC_MAX_ARGS + EXEC_MAX_ENVS + 3) * sizeof(uint64_t) + 16
+ * terminator, the auxv block, plus 16 bytes of alignment slack. */
+_Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES
+               + (EXEC_MAX_ARGS + EXEC_MAX_ENVS + 3) * sizeof(uint64_t)
+               + EXEC_AUXV_ENTRIES * 2 * sizeof(uint64_t) + 16
                < PAGE_SIZE, "exec argument block must fit one stack page");
 
 /*
@@ -72,6 +82,9 @@ _Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES + (EXEC_MAX_ARGS + EXEC_MAX_ENVS 
 static virt_addr_t build_arg_stack(phys_addr_t top_phys,
                                    const char *const *args, int argc,
                                    const char *const *envp, int envc,
+                                   const struct elf_aux_info *aux,
+                                   uint32_t uid, uint32_t euid,
+                                   uint32_t gid, uint32_t egid,
                                    virt_addr_t *out_argv_va) {
     uint8_t     *page    = (uint8_t *)phys_to_virt_hhdm(top_phys);
     virt_addr_t  page_va = USER_STACK_TOP - PAGE_SIZE;
@@ -95,6 +108,7 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
 
     off &= ~(size_t)7;
     off -= (size_t)(argc + envc + 3) * sizeof(uint64_t);
+    off -= (size_t)EXEC_AUXV_ENTRIES * 2 * sizeof(uint64_t);
     off &= ~(size_t)15;             /* AAPCS64: sp must be 16-byte aligned */
 
     uint64_t *sp_words = (uint64_t *)(page + off);
@@ -102,10 +116,40 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     for (int i = 0; i < argc; i++)
         sp_words[1 + i] = str_va[i];
     sp_words[1 + argc] = 0;
-    
+
     for (int i = 0; i < envc; i++)
         sp_words[1 + argc + 1 + i] = env_va[i];
     sp_words[1 + argc + 1 + envc] = 0;
+
+    /* Auxiliary vector — a SysV ELF stack isn't just argc/argv/envp;
+     * this is the other half of what init_libc()'s constructor (see
+     * this function's own header comment above) reads unconditionally.
+     * Nothing currently parses past envp's NULL (mlibc's generic
+     * parse_exec_stack() stops there for a static binary), so this is
+     * purely forward-looking: a future dynamic linker built from
+     * mlibc's own vendored rtld needs exactly this to bootstrap itself
+     * instead of re-parsing its own ELF header. AT_BASE is 0 because
+     * there's no interpreter to report yet — this kernel doesn't load
+     * PT_INTERP at all so far. */
+    size_t auxv_base = 1 + argc + 1 + envc + 1;
+    size_t a = 0;
+    #define AUXV(t, v) do { \
+        sp_words[auxv_base + 2 * a]     = (t); \
+        sp_words[auxv_base + 2 * a + 1] = (uint64_t)(v); \
+        a++; \
+    } while (0)
+    AUXV(AT_PHDR,   aux->phdr_va);
+    AUXV(AT_PHENT,  aux->phentsize);
+    AUXV(AT_PHNUM,  aux->phnum);
+    AUXV(AT_PAGESZ, PAGE_SIZE);
+    AUXV(AT_BASE,   0);
+    AUXV(AT_ENTRY,  aux->entry);
+    AUXV(AT_UID,    uid);
+    AUXV(AT_EUID,   euid);
+    AUXV(AT_GID,    gid);
+    AUXV(AT_EGID,   egid);
+    AUXV(AT_NULL,   0);
+    #undef AUXV
 
     *out_argv_va = page_va + off + sizeof(uint64_t);
     return page_va + off;
@@ -215,8 +259,9 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     out->mm    = mm;
     out->ttbr0 = ttbr0;
 
+    struct elf_aux_info aux;
     int load_result = parse_and_load_binary((virt_addr_t)binary, binary_size,
-                                            ttbr0, &out->entry, mm);
+                                            ttbr0, &aux, mm);
     kfree(binary);
     if (load_result != 0) {
         kprintf("[EXEC] ELF load failed for %s\n", binary_path);
@@ -248,7 +293,25 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
                          USER_STACK_PAGES * PAGE_SIZE, true) != 0)
         goto fail;
 
-    out->user_sp = build_arg_stack(top_phys, args, argc, envp, envc, &out->argv);
+    /* Same "NULL means kernel-initiated boot spawn, resolves as root"
+     * convention load_binary_bytes() above already uses. execve()
+     * doesn't process setuid/setgid bits (out of scope here), so the
+     * new image simply reports whatever identity was already current —
+     * exactly what a real kernel reports too when nothing changes it. */
+    uint32_t aux_uid = 0, aux_euid = 0, aux_gid = 0, aux_egid = 0;
+    if (requester) {
+        irq_spin_lock(&requester->cred_lock);
+        aux_uid  = requester->ruid;
+        aux_euid = requester->euid;
+        aux_gid  = requester->rgid;
+        aux_egid = requester->egid;
+        irq_spin_unlock(&requester->cred_lock);
+    }
+
+    out->entry   = aux.entry;
+    out->user_sp = build_arg_stack(top_phys, args, argc, envp, envc, &aux,
+                                   aux_uid, aux_euid, aux_gid, aux_egid,
+                                   &out->argv);
     out->argc    = (uint64_t)argc;
 
     /* No MMIO mapping here any more. The UART used to be identity-mapped

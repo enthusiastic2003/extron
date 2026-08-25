@@ -151,4 +151,23 @@ typedef enum {
 
 /*Extron Specific User Program Load Constants*/
 #define ELF_USER_EXPECTED_BASE 0x400000
+
+/* Standard SysV auxiliary vector types (the ELF ABI's AT_* constants —
+ * same numbering on every Linux-derived platform, not an Extron
+ * invention). A dynamic linker bootstraps itself from these instead of
+ * re-parsing its own ELF header; see build_arg_stack() in
+ * kernel/proc/exec.c for where these get written onto the initial
+ * stack. */
+#define AT_NULL   0  /* end of vector */
+#define AT_PHDR   3  /* runtime VA of the program header table */
+#define AT_PHENT  4  /* size of one program header entry */
+#define AT_PHNUM  5  /* number of program header entries */
+#define AT_PAGESZ 6  /* system page size */
+#define AT_BASE   7  /* base address of the interpreter, 0 if none */
+#define AT_ENTRY  9  /* program's real entry point */
+#define AT_UID    11
+#define AT_EUID   12
+#define AT_GID    13
+#define AT_EGID   14
+
 #endif /* ELF_H */
