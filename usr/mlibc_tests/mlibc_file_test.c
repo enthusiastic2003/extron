@@ -16,7 +16,7 @@ static void check(const char *name, int ok) {
 
 int main(void) {
     char buf[32] = {0};
-    FILE *f = fopen("hello.txt", "rb");
+    FILE *f = fopen("/opt/tests/hello.txt", "rb");
     check("fopen initrd file", f != NULL);
     if (f) {
         check("fread returns requested bytes", fread(buf, 1, 5, f) == 5);
@@ -30,9 +30,9 @@ int main(void) {
     check("missing file reports failure", fopen("missing", "rb") == NULL);
 
     struct stat path_info, fd_info;
-    FILE *metadata_file = fopen("hello.txt", "rb");
+    FILE *metadata_file = fopen("/opt/tests/hello.txt", "rb");
     int metadata_fd = metadata_file ? fileno(metadata_file) : -1;
-    int path_stat = stat("hello.txt", &path_info);
+    int path_stat = stat("/opt/tests/hello.txt", &path_info);
     int path_metadata_ok = path_stat == 0 && S_ISREG(path_info.st_mode)
                          && path_info.st_size == 22 && path_info.st_ino != 0;
     if (!path_metadata_ok)

@@ -1,10 +1,19 @@
 /*
- * ext2.c — Read-only ext2 filesystem driver.
+ * ext2.c — Read-write ext2 filesystem driver.
  *
  * Designed to compile in two modes:
  *  1. Host test:  gcc -DEXT2_HOST_TEST  (uses malloc/free, pread-backed block dev)
  *  2. Kernel:     part of the kernel build  (uses kmalloc/kfree, EMMC block dev,
  *                 and exposes VFS ops tables at the bottom of this file)
+ *
+ * Limitations:
+ *  - No Inode Cache / Dentry Cache: Every lookup operation reads the inode from disk 
+ *    and creates a new in-memory `ext2_inode_info` and VFS `vfs_node`. If a file is 
+ *    opened and subsequently modified or unlinked via a different path/lookup, the 
+ *    open file descriptor's cached `vfs_node` will not see the changes (e.g. `fstat` 
+ *    will report old link counts, and `readdir` on unlinked directories may read 
+ *    freed blocks).
+ *  - No Journaling: Modifications are synchronous and there is no ext3-style journal.
  *
  * The single #ifdef block below is the ONLY divergence.  All ext2 logic
  * beneath it is identical in both builds.
@@ -80,28 +89,75 @@ _Static_assert(offsetof(struct ext2_disk_inode, i_blocks) == 28, "");
  * sectors into a temporary buffer.  Allocates; suitable for infrequent
  * reads (superblock, inodes).
  */
+
+static int ext2_sec_cache_get(struct ext2_mount *m, uint64_t lba, int *idx)
+{
+    int oldest = 0;
+    uint32_t oldest_tick = 0xFFFFFFFF;
+    
+    for (int i = 0; i < 128; i++) {
+        if (m->sec_cache[i].valid && m->sec_cache[i].lba == lba) {
+            m->sec_cache[i].tick = ++m->sec_cache_tick;
+            *idx = i;
+            return 0;
+        }
+        if (!m->sec_cache[i].valid) {
+            oldest = i;
+            oldest_tick = 0;
+        } else if (m->sec_cache[i].tick < oldest_tick) {
+            oldest = i;
+            oldest_tick = m->sec_cache[i].tick;
+        }
+    }
+    
+    if (m->sec_cache[oldest].valid && m->sec_cache[oldest].dirty) {
+        m->dev->write_sectors(m->dev, m->sec_cache[oldest].lba, 1, m->sec_cache[oldest].data);
+    }
+    
+    m->sec_cache[oldest].lba = lba;
+    m->sec_cache[oldest].valid = true;
+    m->sec_cache[oldest].dirty = false;
+    m->sec_cache[oldest].tick = ++m->sec_cache_tick;
+    
+    int ret = m->dev->read_sectors(m->dev, lba, 1, m->sec_cache[oldest].data);
+    if (ret < 0) {
+        m->sec_cache[oldest].valid = false;
+        return ret;
+    }
+    *idx = oldest;
+    return 0;
+}
+
+static void ext2_sync_cache(struct ext2_mount *m)
+{
+    for (int i = 0; i < 128; i++) {
+        if (m->sec_cache[i].valid && m->sec_cache[i].dirty) {
+            m->dev->write_sectors(m->dev, m->sec_cache[i].lba, 1, m->sec_cache[i].data);
+            m->sec_cache[i].dirty = false;
+        }
+    }
+}
+
 static int read_bytes(struct ext2_mount *m, uint64_t byte_offset,
                       void *buf, size_t count)
 {
     uint32_t ss = m->dev->sector_size;
-    uint64_t sec_start = byte_offset / ss;
+    if (ss != 512) return -ENOSYS;
+    uint64_t sec_start = m->part_lba + (byte_offset / ss);
     size_t   sec_off   = (size_t)(byte_offset % ss);
-    size_t   nsec      = (sec_off + count + ss - 1) / ss;
-    size_t   raw_size  = nsec * ss;
+    uint8_t *dst = (uint8_t *)buf;
 
-    uint8_t *raw = (uint8_t *)kmalloc(raw_size);
-    if (!raw)
-        return -ENOMEM;
-
-    int ret = m->dev->read_sectors(m->dev, m->part_lba + sec_start,
-                                   nsec, raw);
-    if (ret < 0) {
-        kfree(raw);
-        return ret;
+    while (count > 0) {
+        int idx;
+        if (ext2_sec_cache_get(m, sec_start, &idx) < 0) return -EIO;
+        size_t chunk = ss - sec_off;
+        if (chunk > count) chunk = count;
+        memcpy(dst, m->sec_cache[idx].data + sec_off, chunk);
+        dst += chunk;
+        count -= chunk;
+        sec_start++;
+        sec_off = 0;
     }
-
-    memcpy(buf, raw + sec_off, count);
-    kfree(raw);
     return 0;
 }
 
@@ -109,52 +165,35 @@ static int write_bytes(struct ext2_mount *m, uint64_t byte_offset,
                        const void *buf, size_t count)
 {
     uint32_t ss = m->dev->sector_size;
-    uint64_t sec_start = byte_offset / ss;
+    if (ss != 512) return -ENOSYS;
+    uint64_t sec_start = m->part_lba + (byte_offset / ss);
     size_t   sec_off   = (size_t)(byte_offset % ss);
-    size_t   nsec      = (sec_off + count + ss - 1) / ss;
-    size_t   raw_size  = nsec * ss;
+    const uint8_t *src = (const uint8_t *)buf;
 
-    uint8_t *raw = (uint8_t *)kmalloc(raw_size);
-    if (!raw) return -ENOMEM;
-
-    int ret = m->dev->read_sectors(m->dev, m->part_lba + sec_start, nsec, raw);
-    if (ret < 0) {
-        kfree(raw);
-        return ret;
+    while (count > 0) {
+        int idx;
+        if (ext2_sec_cache_get(m, sec_start, &idx) < 0) return -EIO;
+        size_t chunk = ss - sec_off;
+        if (chunk > count) chunk = count;
+        memcpy(m->sec_cache[idx].data + sec_off, src, chunk);
+        m->sec_cache[idx].dirty = true;
+        src += chunk;
+        count -= chunk;
+        sec_start++;
+        sec_off = 0;
     }
-
-    memcpy(raw + sec_off, buf, count);
-
-    if (!m->dev->write_sectors) {
-        kfree(raw);
-        return -ENOSYS;
-    }
-
-    ret = m->dev->write_sectors(m->dev, m->part_lba + sec_start, nsec, raw);
-    kfree(raw);
-    return ret;
+    return 0;
 }
-
-/*
- * Read a full filesystem block into `buf`.  `buf` must be at least
- * m->block_size bytes.  Block-aligned by construction (block_size is
- * always a multiple of sector_size).
- */
-
 
 static int read_block(struct ext2_mount *m, uint32_t block_no, void *buf)
 {
-    if (block_no == 0)
-        return -EINVAL;
-
-    uint64_t byte_off = (uint64_t)block_no * m->block_size;
-    uint32_t ss = m->dev->sector_size;
-    uint64_t sec_start = byte_off / ss;
-    size_t   nsec      = m->block_size / ss;
-
-    return m->dev->read_sectors(m->dev, m->part_lba + sec_start, nsec, buf);
+    return read_bytes(m, (uint64_t)block_no * m->block_size, buf, m->block_size);
 }
 
+static int write_block(struct ext2_mount *m, uint32_t block_no, const void *buf)
+{
+    return write_bytes(m, (uint64_t)block_no * m->block_size, buf, m->block_size);
+}
 /* ==================================================================== */
 /*  Inode lookup                                                        */
 /* ==================================================================== */
@@ -197,12 +236,6 @@ static int read_disk_inode(struct ext2_mount *m, uint32_t ino,
     return read_bytes(m, inode_byte, out, sizeof(*out));
 }
 
-static int write_block(struct ext2_mount *m, uint32_t block_no, const void *buf)
-{
-    if (block_no == 0) return -EINVAL;
-    uint64_t byte_off = (uint64_t)block_no * m->block_size;
-    return write_bytes(m, byte_off, buf, m->block_size);
-}
 
 static int ext2_sync_bgd(struct ext2_mount *m, uint32_t group, const struct ext2_bgd *bgd)
 {
@@ -567,6 +600,113 @@ static int inode_bmap_alloc(struct ext2_mount *m, struct ext2_inode_info *info,
         *out_block = ind1[n];
         return 0;
     }
+    n -= ptrs;
+
+    if (n < ptrs * ptrs) {
+        if (di->i_block[13] == 0) {
+            uint32_t b;
+            int ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            di->i_block[13] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            m->ind_l1_block = di->i_block[13];
+            memset(m->ind_l1, 0, m->block_size);
+        }
+        int ret = read_block_cached(m, di->i_block[13], m->ind_l1, &m->ind_l1_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind1 = (uint32_t *)m->ind_l1;
+        uint32_t i = n / ptrs;
+        uint32_t j = n % ptrs;
+
+        if (ind1[i] == 0) {
+            uint32_t b;
+            ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            ind1[i] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, di->i_block[13], m->ind_l1);
+            m->ind_l2_block = ind1[i];
+            memset(m->ind_l2, 0, m->block_size);
+        }
+        ret = read_block_cached(m, ind1[i], m->ind_l2, &m->ind_l2_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind2 = (uint32_t *)m->ind_l2;
+        if (ind2[j] == 0) {
+            ret = ext2_alloc_block(m, &ind2[j]);
+            if (ret < 0) return ret;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, ind1[i], m->ind_l2);
+        }
+        *out_block = ind2[j];
+        return 0;
+    }
+    n -= ptrs * ptrs;
+
+    if (n < ptrs * ptrs * ptrs) {
+        if (di->i_block[14] == 0) {
+            uint32_t b;
+            int ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            di->i_block[14] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            m->ind_l1_block = di->i_block[14];
+            memset(m->ind_l1, 0, m->block_size);
+        }
+        int ret = read_block_cached(m, di->i_block[14], m->ind_l1, &m->ind_l1_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind1 = (uint32_t *)m->ind_l1;
+        uint32_t i = n / (ptrs * ptrs);
+        uint32_t rem = n % (ptrs * ptrs);
+        uint32_t j = rem / ptrs;
+        uint32_t k = rem % ptrs;
+
+        if (ind1[i] == 0) {
+            uint32_t b;
+            ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            ind1[i] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, di->i_block[14], m->ind_l1);
+            m->ind_l2_block = ind1[i];
+            memset(m->ind_l2, 0, m->block_size);
+        }
+        ret = read_block_cached(m, ind1[i], m->ind_l2, &m->ind_l2_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind2 = (uint32_t *)m->ind_l2;
+        if (ind2[j] == 0) {
+            uint32_t b;
+            ret = ext2_alloc_block(m, &b);
+            if (ret < 0) return ret;
+            ind2[j] = b;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, ind1[i], m->ind_l2);
+            m->ind_l3_block = ind2[j];
+            memset(m->ind_l3, 0, m->block_size);
+        }
+        ret = read_block_cached(m, ind2[j], m->ind_l3, &m->ind_l3_block);
+        if (ret < 0) return ret;
+
+        uint32_t *ind3 = (uint32_t *)m->ind_l3;
+        if (ind3[k] == 0) {
+            ret = ext2_alloc_block(m, &ind3[k]);
+            if (ret < 0) return ret;
+            di->i_blocks += m->block_size / 512;
+            *dirty = true;
+            write_block(m, ind2[j], m->ind_l3);
+        }
+        *out_block = ind3[k];
+        return 0;
+    }
     
     return -ENOSYS; 
 }
@@ -625,7 +765,8 @@ long ext2_write_data(struct ext2_mount *m, struct ext2_inode_info *info,
         ext2_sync_inode(m, info);
     }
 
-    return (long)total_written;
+        ext2_sync_cache(m);
+return (long)total_written;
 }
 
 long ext2_read_data(struct ext2_mount *m, struct ext2_inode_info *info,
@@ -795,12 +936,12 @@ long ext2_read_symlink(struct ext2_mount *m, struct ext2_inode_info *info,
  * Look up a child by name within a directory inode.
  * Returns a new ext2_inode_info for the child, or NULL.
  */
-static struct ext2_inode_info *lookup_child(struct ext2_mount *m,
+static uint32_t lookup_child_ino(struct ext2_mount *m,
                                             struct ext2_inode_info *dir,
                                             const char *name, size_t namelen)
 {
     if ((dir->disk.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR)
-        return NULL;
+        return 0;
 
     uint32_t dir_size = dir->disk.i_size;
     uint32_t pos = 0;
@@ -812,24 +953,24 @@ static struct ext2_inode_info *lookup_child(struct ext2_mount *m,
         uint32_t disk_block;
         int ret = inode_bmap(m, &dir->disk, file_block, &disk_block);
         if (ret < 0 || disk_block == 0)
-            return NULL;
+            return 0;
 
         ret = read_block(m, disk_block, m->scratch);
         if (ret < 0)
-            return NULL;
+            return 0;
 
         while (block_off < m->block_size && pos < dir_size) {
             struct ext2_disk_dirent *de =
                 (struct ext2_disk_dirent *)(m->scratch + block_off);
 
             if (de->rec_len == 0)
-                return NULL;
+                return 0;
 
             if (de->inode != 0
                 && de->name_len == namelen
                 && memcmp((uint8_t *)de + 8, name, namelen) == 0)
             {
-                return ext2_lookup_inode(m, de->inode);
+                return de->inode;
             }
 
             pos       += de->rec_len;
@@ -837,8 +978,18 @@ static struct ext2_inode_info *lookup_child(struct ext2_mount *m,
         }
     }
 
-    return NULL;
+    return 0;
 }
+
+static struct ext2_inode_info *lookup_child(struct ext2_mount *m,
+                                            struct ext2_inode_info *dir,
+                                            const char *name, size_t namelen)
+{
+    uint32_t ino = lookup_child_ino(m, dir, name, namelen);
+    if (!ino) return NULL;
+    return ext2_lookup_inode(m, ino);
+}
+
 
 struct ext2_inode_info *ext2_lookup_path(struct ext2_mount *m,
                                          const char *path)
@@ -1186,6 +1337,40 @@ static long ext2_node_write(struct vfs_node *node, size_t off, const void *buf, 
     return ext2_write_data(info->mount, info, off, buf, count);
 }
 
+
+static int ext2_node_setattr(struct vfs_node *node, const struct vfs_setattr *attr) {
+    struct ext2_inode_info *info = (struct ext2_inode_info *)node->private;
+    bool dirty = false;
+
+    if (attr->valid & VFS_SET_MODE) {
+        info->disk.i_mode = (info->disk.i_mode & EXT2_S_IFMT) | (attr->mode & 07777);
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_UID) {
+        info->disk.i_uid = attr->uid;
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_GID) {
+        info->disk.i_gid = attr->gid;
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_ATIME) {
+        info->disk.i_atime = attr->atime.sec;
+        dirty = true;
+    }
+    if (attr->valid & VFS_SET_MTIME) {
+        info->disk.i_mtime = attr->mtime.sec;
+        dirty = true;
+    }
+
+    if (dirty) {
+        int ret = ext2_sync_inode(info->mount, info);
+        ext2_sync_cache(info->mount);
+        return ret;
+    }
+    ext2_sync_cache(info->mount);
+    return 0;
+}
 static const struct vfs_node_ops ext2_node_ops = {
 
     .read     = ext2_node_read,
@@ -1195,7 +1380,7 @@ static const struct vfs_node_ops ext2_node_ops = {
     .getattr  = ext2_node_getattr,
     .readlink = ext2_node_readlink,
     .destroy  = ext2_node_destroy,
-    /* write / truncate / setattr / mmap — NULL (read-only) */
+    .setattr = ext2_node_setattr,
 };
 
 /* --- Helpers for VFS fs_ops --- */
@@ -1209,13 +1394,37 @@ static enum vfs_node_type ext2_mode_to_vfs_type(uint16_t mode)
     }
 }
 
-static struct vfs_node *make_vfs_node(struct ext2_inode_info *info)
+static struct vfs_node *make_vfs_node(struct vfs_mount *mount, struct ext2_inode_info *info)
 {
     struct vfs_node *node = (struct vfs_node *)kmalloc(sizeof(*node));
     if (!node)
         return NULL;
     enum vfs_node_type type = ext2_mode_to_vfs_type(info->disk.i_mode);
     vfs_node_init(node, &ext2_node_ops, info, type);
+    node->inode_num = info->ino;
+    node->owner_mount = mount;
+    vfs_cache_insert_node(node);
+    return node;
+}
+
+static struct vfs_node *get_ext2_vfs_node(struct vfs_mount *mount, struct ext2_mount *m, uint32_t ino)
+{
+    struct vfs_node *node = vfs_cache_lookup_node(mount, ino);
+    if (node) return node;
+
+    struct ext2_inode_info *info = ext2_lookup_inode(m, ino);
+    if (!info) return NULL;
+
+    node = (struct vfs_node *)kmalloc(sizeof(*node));
+    if (!node) {
+        ext2_free_inode_info(info);
+        return NULL;
+    }
+    enum vfs_node_type type = ext2_mode_to_vfs_type(info->disk.i_mode);
+    vfs_node_init(node, &ext2_node_ops, info, type);
+    node->inode_num = ino;
+    node->owner_mount = mount;
+    vfs_cache_insert_node(node);
     return node;
 }
 
@@ -1224,30 +1433,24 @@ static struct vfs_node *make_vfs_node(struct ext2_inode_info *info)
 static int ext2_root(struct vfs_mount *mount, struct vfs_dentry **out)
 {
     struct ext2_mount *m = (struct ext2_mount *)mount->private;
-    struct ext2_inode_info *info = ext2_lookup_inode(m, EXT2_ROOT_INO);
-    if (!info)
-        return -EIO;
 
-    struct vfs_node *node = make_vfs_node(info);
-    if (!node) {
-        ext2_free_inode_info(info);
-        return -ENOMEM;
-    }
+    struct vfs_node *node = get_ext2_vfs_node(mount, m, EXT2_ROOT_INO);
+    if (!node)
+        return -EIO;
 
     struct vfs_dentry *dentry = (struct vfs_dentry *)kmalloc(sizeof(*dentry));
     if (!dentry) {
-        kfree(node);
-        ext2_free_inode_info(info);
+        vfs_node_release(node);
         return -ENOMEM;
     }
 
     int ret = vfs_dentry_init(dentry, node, NULL, "", NULL);
     if (ret < 0) {
         kfree(dentry);
-        kfree(node);
-        ext2_free_inode_info(info);
+        vfs_node_release(node);
         return ret;
     }
+    vfs_node_release(node); /* dentry now holds the reference; drop ours */
     *out = dentry;
     return 0;
 }
@@ -1261,65 +1464,34 @@ static int ext2_lookup_child_vfs(struct vfs_mount *mount,
     struct ext2_inode_info *pinfo =
         (struct ext2_inode_info *)parent->node->private;
 
-    struct ext2_inode_info *cinfo =
-        lookup_child(m, pinfo, name, strlen(name));
-    if (!cinfo)
+    uint32_t cino = lookup_child_ino(m, pinfo, name, strlen(name));
+    if (!cino)
         return -ENOENT;
 
-    struct vfs_node *node = make_vfs_node(cinfo);
-    if (!node) {
-        ext2_free_inode_info(cinfo);
+    struct vfs_node *node = get_ext2_vfs_node(mount, m, cino);
+    if (!node)
         return -ENOMEM;
-    }
 
     struct vfs_dentry *dentry = (struct vfs_dentry *)kmalloc(sizeof(*dentry));
     if (!dentry) {
-        kfree(node);
-        ext2_free_inode_info(cinfo);
+        vfs_node_release(node);
         return -ENOMEM;
     }
 
     int ret = vfs_dentry_init(dentry, node, parent, name, NULL);
     if (ret < 0) {
         kfree(dentry);
-        kfree(node);
-        ext2_free_inode_info(cinfo);
+        vfs_node_release(node);
         return ret;
     }
+    vfs_node_release(node); /* dentry now holds the reference; drop ours */
     *out = dentry;
     return 0;
 }
 
-static int ext2_rofs(struct vfs_mount *m, struct vfs_dentry *p, const char *n,
-                     enum vfs_node_type t, uint32_t mo, uint32_t u, uint32_t g,
-                     struct vfs_dentry **out) {
-    (void)m;(void)p;(void)n;(void)t;(void)mo;(void)u;(void)g;(void)out;
-    return -EROFS;
-}
-static int ext2_rofs_rm(struct vfs_mount *m, struct vfs_dentry *p,
-                        const char *n, int d) {
-    (void)m;(void)p;(void)n;(void)d;
-    return -EROFS;
-}
-static int ext2_rofs_ren(struct vfs_mount *m, struct vfs_dentry *op,
-                         const char *on, struct vfs_dentry *np,
-                         const char *nn) {
-    (void)m;(void)op;(void)on;(void)np;(void)nn;
-    return -EROFS;
-}
-static int ext2_rofs_link(struct vfs_mount *m, struct vfs_node *n,
-                          struct vfs_dentry *p, const char *name,
-                          struct vfs_dentry **out) {
-    (void)m;(void)n;(void)p;(void)name;(void)out;
-    return -EROFS;
-}
-static int ext2_rofs_symlink(struct vfs_mount *m, struct vfs_dentry *p,
-                             const char *name, const char *target,
-                             uint32_t u, uint32_t g,
-                             struct vfs_dentry **out) {
-    (void)m;(void)p;(void)name;(void)target;(void)u;(void)g;(void)out;
-    return -EROFS;
-}
+
+
+
 
 static void ext2_destroy_dentry(struct vfs_dentry *dentry)
 {
@@ -1493,6 +1665,12 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     struct ext2_inode_info *dir = (struct ext2_inode_info *)parent->private;
     
     if (type != VFS_NODE_REGULAR && type != VFS_NODE_DIRECTORY) return -ENOSYS; /* Only files and dirs for now */
+
+    /* Check for existing entry using the raw inode lookup — avoids creating
+     * a VFS dentry that would steal the parent reference we don't own. */
+    if (lookup_child_ino(m, dir, name, strlen(name)) != 0)
+        return -EEXIST;
+
     uint16_t ext2_mode = (type == VFS_NODE_DIRECTORY) ? (EXT2_S_IFDIR | mode) : (EXT2_S_IFREG | mode);
     uint8_t ext2_type = (type == VFS_NODE_DIRECTORY) ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
     
@@ -1552,34 +1730,25 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     }
 
     
-    /* Build the new VFS node */
-    struct ext2_inode_info *child_info = ext2_lookup_inode(m, ino);
-    if (!child_info) return -EIO;
-    
-    struct vfs_node *node = kmalloc(sizeof(*node));
-    if (!node) {
-        ext2_free_inode_info(child_info);
-        return -ENOMEM;
-    }
-    memset(node, 0, sizeof(*node));
-    node->type = type;
-    node->ops = &ext2_node_ops;
-    node->private = child_info;
-    
+    /* Build the new VFS node via the cache — properly sets refs=1, inode_num,
+     * owner_mount, and inserts into icache. */
+    struct vfs_node *node = get_ext2_vfs_node(vfs_m, m, ino);
+    if (!node) return -EIO;
+
     struct vfs_dentry *d = kmalloc(sizeof(*d));
     if (!d) {
-        kfree(node);
-        ext2_free_inode_info(child_info);
+        vfs_node_release(node);
         return -ENOMEM;
     }
     ret = vfs_dentry_init(d, node, parent_dentry, name, NULL);
     if (ret < 0) {
         kfree(d);
-        kfree(node);
-        ext2_free_inode_info(child_info);
+        vfs_node_release(node);
         return ret;
     }
+    vfs_node_release(node); /* dentry now holds the reference; drop ours */
     *out = d;
+    ext2_sync_cache(m);
     return 0;
 }
 
@@ -1667,7 +1836,217 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
         ext2_sync_inode(m, dir);
     }
 
+    ext2_sync_cache(m);
     return ret;
+}
+
+
+
+static int ext2_node_link(struct vfs_mount *vfs_m, struct vfs_node *target_node,
+                          struct vfs_dentry *parent_dentry, const char *name,
+                          struct vfs_dentry **out)
+{
+    struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
+    struct ext2_inode_info *target = (struct ext2_inode_info *)target_node->private;
+    struct ext2_inode_info *dir = (struct ext2_inode_info *)parent_dentry->node->private;
+    
+    uint16_t mode = target->disk.i_mode & EXT2_S_IFMT;
+    if (mode == EXT2_S_IFDIR)
+        return -EPERM;
+
+    if (lookup_child_ino(m, dir, name, strlen(name)) != 0)
+        return -EEXIST;
+
+    uint8_t ext2_type = EXT2_FT_UNKNOWN;
+    if (mode == EXT2_S_IFREG) ext2_type = EXT2_FT_REG_FILE;
+    else if (mode == EXT2_S_IFCHR) ext2_type = EXT2_FT_CHRDEV;
+    else if (mode == EXT2_S_IFBLK) ext2_type = EXT2_FT_BLKDEV;
+    else if (mode == EXT2_S_IFIFO) ext2_type = EXT2_FT_FIFO;
+    else if (mode == EXT2_S_IFSOCK) ext2_type = EXT2_FT_SOCK;
+    else if (mode == EXT2_S_IFLNK) ext2_type = EXT2_FT_SYMLINK;
+    
+    int ret = ext2_add_dirent(m, dir, name, target->ino, ext2_type);
+    if (ret < 0) return ret;
+    
+    target->disk.i_links_count++;
+    ext2_sync_inode(m, target);
+    ext2_sync_cache(m);
+    
+    if (out) {
+        struct vfs_dentry *d = kmalloc(sizeof(*d));
+        vfs_dentry_init(d, target_node, parent_dentry, name, NULL);
+        *out = d;
+    }
+    
+    return 0;
+}
+
+static int ext2_node_symlink(struct vfs_mount *vfs_m, struct vfs_dentry *parent_dentry,
+                             const char *name, const char *target,
+                             uint32_t uid, uint32_t gid,
+                             struct vfs_dentry **out)
+{
+    struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
+    struct ext2_inode_info *dir = (struct ext2_inode_info *)parent_dentry->node->private;
+    
+    if (lookup_child_ino(m, dir, name, strlen(name)) != 0)
+        return -EEXIST;
+
+    uint32_t ino;
+    int ret = ext2_alloc_inode(m, EXT2_S_IFLNK | 0777, uid, gid, &ino);
+    if (ret < 0) return ret;
+    
+    ret = ext2_add_dirent(m, dir, name, ino, EXT2_FT_SYMLINK);
+    if (ret < 0) {
+        ext2_free_inode(m, ino, 0);
+        return ret;
+    }
+    
+    struct ext2_inode_info *new_lnk = ext2_lookup_inode(m, ino);
+    if (!new_lnk) return -EIO;
+    
+    size_t target_len = strlen(target);
+    new_lnk->disk.i_size = target_len;
+    
+    if (target_len <= 60) {
+        memcpy(new_lnk->disk.i_block, target, target_len);
+        new_lnk->disk.i_blocks = 0;
+    } else {
+        uint32_t bnum;
+        if (ext2_alloc_block(m, &bnum) == 0) {
+            memset(m->scratch, 0, m->block_size);
+            memcpy(m->scratch, target, target_len);
+            write_block(m, bnum, m->scratch);
+            new_lnk->disk.i_block[0] = bnum;
+            new_lnk->disk.i_blocks = m->block_size / 512;
+        } else {
+            /* Handled badly: just make it an empty link */
+            new_lnk->disk.i_size = 0;
+        }
+    }
+    ext2_sync_inode(m, new_lnk);
+    
+    if (out) {
+        struct vfs_node *node = make_vfs_node(vfs_m, new_lnk);
+        if (!node) {
+            ext2_free_inode_info(new_lnk);
+            return -ENOMEM;
+        }
+        struct vfs_dentry *d = kmalloc(sizeof(*d));
+        vfs_dentry_init(d, node, parent_dentry, name, NULL);
+        *out = d;
+    } else {
+        ext2_free_inode_info(new_lnk);
+    }
+    
+    ext2_sync_cache(m);
+    return 0;
+}
+
+static int ext2_node_rename(struct vfs_mount *vfs_m, struct vfs_dentry *old_parent_d,
+                            const char *old_name, struct vfs_dentry *new_parent_d,
+                            const char *new_name)
+{
+    struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
+    struct ext2_inode_info *old_dir = (struct ext2_inode_info *)old_parent_d->node->private;
+    struct ext2_inode_info *new_dir = (struct ext2_inode_info *)new_parent_d->node->private;
+
+    struct ext2_inode_info *target = lookup_child(m, old_dir, old_name, strlen(old_name));
+    if (!target) return -ENOENT;
+
+    bool target_is_dir = ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+
+    struct ext2_inode_info *existing = lookup_child(m, new_dir, new_name, strlen(new_name));
+    if (existing) {
+        /* POSIX rename(2): if oldpath and newpath are (hard) links to the
+         * same file, rename() does nothing and returns success. Without
+         * this check, a same-inode rename — including a plain no-op
+         * rename(x, x) — falls into the "replace existing destination"
+         * path below, which removes newpath's dirent and decrements/
+         * frees ITS inode... which is this same file. A fresh file (only
+         * ever named once) has i_links_count == 1, so that decrement
+         * hits 0 and the rename destroys the very file it was supposed
+         * to leave untouched: truncated, freed, and left as a dirent
+         * pointing at a wiped, deallocated inode. */
+        if (existing->ino == target->ino) {
+            ext2_free_inode_info(target);
+            ext2_free_inode_info(existing);
+            return 0;
+        }
+        bool existing_is_dir = ((existing->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+        if (target_is_dir && !existing_is_dir) {
+            ext2_free_inode_info(target); ext2_free_inode_info(existing); return -ENOTDIR;
+        }
+        if (!target_is_dir && existing_is_dir) {
+            ext2_free_inode_info(target); ext2_free_inode_info(existing); return -EISDIR;
+        }
+        
+        if (existing_is_dir) {
+            bool empty = true;
+            if (existing->disk.i_size > 0 && existing->disk.i_block[0]) {
+                if (read_block(m, existing->disk.i_block[0], m->scratch) == 0) {
+                    struct ext2_disk_dirent *de = (struct ext2_disk_dirent *)m->scratch;
+                    if (de->rec_len > 0 && de->rec_len < m->block_size) {
+                        struct ext2_disk_dirent *de2 = (struct ext2_disk_dirent *)(m->scratch + de->rec_len);
+                        if (de->rec_len + de2->rec_len < m->block_size) empty = false;
+                    }
+                }
+            }
+            if (!empty) {
+                ext2_free_inode_info(target); ext2_free_inode_info(existing); return -ENOTEMPTY;
+            }
+            ext2_remove_dirent(m, new_dir, new_name);
+            existing->disk.i_links_count = 0;
+            struct vfs_node dummy; dummy.private = existing; ext2_node_truncate(&dummy, 0);
+            ext2_free_inode(m, existing->ino, 1);
+            if (new_dir->disk.i_links_count > 0) new_dir->disk.i_links_count--;
+        } else {
+            ext2_remove_dirent(m, new_dir, new_name);
+            if (existing->disk.i_links_count > 0) {
+                existing->disk.i_links_count--;
+                if (existing->disk.i_links_count == 0) {
+                    struct vfs_node dummy; dummy.private = existing; ext2_node_truncate(&dummy, 0);
+                    ext2_free_inode(m, existing->ino, 0);
+                } else {
+                    ext2_sync_inode(m, existing);
+                }
+            }
+        }
+        ext2_free_inode_info(existing);
+    }
+
+    uint8_t ext2_type = EXT2_FT_UNKNOWN;
+    if (target_is_dir) ext2_type = EXT2_FT_DIR;
+    else if ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFREG) ext2_type = EXT2_FT_REG_FILE;
+    else if ((target->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) ext2_type = EXT2_FT_SYMLINK;
+
+    int ret = ext2_add_dirent(m, new_dir, new_name, target->ino, ext2_type);
+    if (ret < 0) { ext2_free_inode_info(target); return ret; }
+
+    ext2_remove_dirent(m, old_dir, old_name);
+
+    if (target_is_dir && old_dir->ino != new_dir->ino) {
+        if (target->disk.i_size > 0 && target->disk.i_block[0]) {
+            if (read_block(m, target->disk.i_block[0], m->scratch) == 0) {
+                struct ext2_disk_dirent *de = (struct ext2_disk_dirent *)m->scratch;
+                if (de->rec_len > 0 && de->rec_len < m->block_size) {
+                    struct ext2_disk_dirent *de2 = (struct ext2_disk_dirent *)(m->scratch + de->rec_len);
+                    if (de2->name_len == 2 && de2->inode != 0) {
+                        de2->inode = new_dir->ino;
+                        write_block(m, target->disk.i_block[0], m->scratch);
+                    }
+                }
+            }
+        }
+        if (old_dir->disk.i_links_count > 0) old_dir->disk.i_links_count--;
+        new_dir->disk.i_links_count++;
+        ext2_sync_inode(m, old_dir);
+        ext2_sync_inode(m, new_dir);
+    }
+
+    ext2_free_inode_info(target);
+    ext2_sync_cache(m);
+    return 0;
 }
 
 const struct vfs_fs_ops ext2_fs_ops = {
@@ -1675,9 +2054,9 @@ const struct vfs_fs_ops ext2_fs_ops = {
     .lookup_child   = ext2_lookup_child_vfs,
     .create         = ext2_node_create,
     .remove         = ext2_node_remove,
-    .rename         = ext2_rofs_ren,
-    .link           = ext2_rofs_link,
-    .symlink        = ext2_rofs_symlink,
+    .rename         = ext2_node_rename,
+    .link           = ext2_node_link,
+    .symlink        = ext2_node_symlink,
     .destroy_dentry = ext2_destroy_dentry,
 };
 

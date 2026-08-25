@@ -163,6 +163,18 @@ struct ext2_mount {
     uint32_t  ind_l2_block;
     uint8_t  *ind_l3;
     uint32_t  ind_l3_block;
+    /* Global Sector Cache (128 sectors = 64KB).
+     * Intercepts all read/write_sectors calls to dramatically speed up
+     * metadata-heavy operations like file allocation and deletion. */
+    struct {
+        uint64_t lba;
+        uint32_t tick;
+        bool valid;
+        bool dirty;
+        uint8_t data[512];
+    } sec_cache[128];
+    uint32_t sec_cache_tick;
+
 };
 
 /* Per-inode info — cached disk inode + metadata.  One per vfs_node in

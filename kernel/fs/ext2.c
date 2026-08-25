@@ -1958,6 +1958,21 @@ static int ext2_node_rename(struct vfs_mount *vfs_m, struct vfs_dentry *old_pare
 
     struct ext2_inode_info *existing = lookup_child(m, new_dir, new_name, strlen(new_name));
     if (existing) {
+        /* POSIX rename(2): if oldpath and newpath are (hard) links to the
+         * same file, rename() does nothing and returns success. Without
+         * this check, a same-inode rename — including a plain no-op
+         * rename(x, x) — falls into the "replace existing destination"
+         * path below, which removes newpath's dirent and decrements/
+         * frees ITS inode... which is this same file. A fresh file (only
+         * ever named once) has i_links_count == 1, so that decrement
+         * hits 0 and the rename destroys the very file it was supposed
+         * to leave untouched: truncated, freed, and left as a dirent
+         * pointing at a wiped, deallocated inode. */
+        if (existing->ino == target->ino) {
+            ext2_free_inode_info(target);
+            ext2_free_inode_info(existing);
+            return 0;
+        }
         bool existing_is_dir = ((existing->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
         if (target_is_dir && !existing_is_dir) {
             ext2_free_inode_info(target); ext2_free_inode_info(existing); return -ENOTDIR;
