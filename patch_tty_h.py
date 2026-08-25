@@ -1,12 +1,10 @@
-#ifndef KERNEL_DRIVERS_TTY_H
-#define KERNEL_DRIVERS_TTY_H
+import sys
 
-#include <stddef.h>
-#include <stdbool.h>
-#include <stdint.h>
+tty_h = "kernel/include/kernel/drivers/tty.h"
+with open(tty_h, "r") as f:
+    content = f.read()
 
-/* Extron's userspace termios ABI. Keep this layout synchronized with
- * sysdeps/extron/include/abi-bits/termios.h. */
+new_struct = """
 #include <arch/irq_spinlock.h>
 
 #define TTY_NCCS 32
@@ -71,9 +69,12 @@ void tty_get_winsize(struct tty *t, struct tty_winsize *out);
 void tty_set_winsize(struct tty *t, const struct tty_winsize *ws);
 uint64_t tty_foreground_pgid(struct tty *t);
 void tty_set_foreground_pgid(struct tty *t, uint64_t pgid);
+"""
 
+# Replace everything from #define TTY_NCCS 32 down to the end (before #endif)
+start_idx = content.find("#define TTY_NCCS 32")
+end_idx = content.find("#endif")
+content = content[:start_idx] + new_struct.strip() + "\n\n" + content[end_idx:]
 
-void tty_flush_input(struct tty *t);
-int tty_input_ready(struct tty *t);
-int tty_wait_for_input(struct tty *t, int timeout_ms);
-#endif
+with open(tty_h, "w") as f:
+    f.write(content)

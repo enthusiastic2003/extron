@@ -1,3 +1,5 @@
+#include <kernel/drivers/pty.h>
+#include <kernel/drivers/tty.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/devfs.h>
@@ -188,6 +190,19 @@ int file_open_at(struct proc *p, const struct vfs_path *base,
     f->refs = 1;
     f->kind = FILE_VNODE;
     f->object.node = node;
+    if (devfs_is_ptmx(f->object.node)) {
+        struct vfs_node *master = pty_allocate_master();
+        if (!master) {
+            vfs_path_release(&f->path);
+            vfs_node_release(node);
+            kfree(f);
+            return -ENOMEM;
+        }
+        vfs_node_release(f->object.node);
+        f->object.node = master;
+        node = master; // for vfs_getattr below
+    }
+
     struct vfs_attr attr;
     if (vfs_getattr(node, &attr) != 0) {
         vfs_path_release(&f->path);
@@ -547,7 +562,16 @@ int file_is_tty(struct proc *p, int fd) {
     if (!descriptor_ok(p, fd))
         return 0;
     struct open_file *f = p->files[fd];
-    return f->kind == FILE_VNODE && devfs_is_console(f->object.node);
+    return f->kind == FILE_VNODE && devfs_get_tty(f->object.node) != NULL;
+}
+
+struct tty *file_get_tty(struct proc *p, int fd) {
+    if (!descriptor_ok(p, fd))
+        return NULL;
+    struct open_file *f = p->files[fd];
+    if (f->kind == FILE_VNODE)
+        return devfs_get_tty(f->object.node);
+    return NULL;
 }
 
 int file_poll(struct proc *p, int fd, short events, short *revents) {
@@ -557,8 +581,13 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_VNODE && devfs_is_console(f->object.node)) {
-        if ((events & POLLIN) && kbd_input_ready())
+    
+    struct tty *t = NULL;
+    if (f->kind == FILE_VNODE)
+        t = devfs_get_tty(f->object.node);
+        
+    if (t) {
+        if ((events & POLLIN) && tty_input_ready(t))
             *revents |= POLLIN;
         if (events & POLLOUT)
             *revents |= POLLOUT;
@@ -576,12 +605,12 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
             if (!pipe->writers)
                 *revents |= POLLHUP;
         } else {
-            if ((events & POLLOUT) && pipe->used < PIPE_CAPACITY && pipe->readers)
+            if ((events & POLLOUT) && (pipe->used < PIPE_CAPACITY || !pipe->readers))
                 *revents |= POLLOUT;
             if (!pipe->readers)
                 *revents |= POLLERR;
         }
         irq_spin_unlock(&pipe->lock);
     }
-    return *revents != 0;
+    return 0;
 }

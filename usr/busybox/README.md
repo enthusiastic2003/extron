@@ -37,7 +37,7 @@ on scheduler wait channels when the buffer is empty or full, so pipelines do
 not poll the UART or spin the CPU. `dup`, `dup2`, the `fcntl` operations used
 by ash (`F_DUPFD_CLOEXEC`, descriptor flags, and status flags), and close on
 exec are implemented. Closing or exiting the final writer delivers EOF to
-readers. Run `/mlibc_pipe_test.elf` to exercise these primitives directly.
+readers. Run `/tests/mlibc_pipe_test.elf` to exercise these primitives directly.
 
 The console is now a kernel TTY rather than raw UART reads with hard-coded
 echo. It implements the termios and winsize ioctls used by BusyBox, canonical
@@ -46,7 +46,7 @@ post-processing, and an interrupt-or-timeout `poll` path. BusyBox's line
 editor therefore owns interactive echo and provides cursor editing, a
 50-entry history, tab completion, and fancy prompts. UART input remains
 interrupt-driven; finite `poll` waits use the scheduler timer and do not scan
-the UART in a loop. Run `/mlibc_tty_test.elf` to check the userspace ABI.
+the UART in a loop. Run `/tests/mlibc_tty_test.elf` to check the userspace ABI.
 
 The shell now has signals, process groups, foreground job control, namespace
 mutation, links, and ramfs permission/ownership/timestamp enforcement. It is

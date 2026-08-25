@@ -60,3 +60,4 @@ int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
 int     file_get_node(struct proc *p, int fd, struct vfs_node **out);
 
 #endif
+struct tty *file_get_tty(struct proc *p, int fd);

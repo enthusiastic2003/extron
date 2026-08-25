@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
     pthread_mutex_unlock(&lock);
 
     puts("[thread_exec_test] exec with a blocked sibling");
-    char *args[] = { "/mlibc_thread_exec_test.elf", "after-exec", NULL };
+    char *args[] = { "/tests/mlibc_thread_exec_test.elf", "after-exec", NULL };
     execve(args[0], args, NULL);
     perror("[thread_exec_test] execve");
     return 1;

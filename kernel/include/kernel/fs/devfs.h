@@ -12,6 +12,8 @@ void devfs_init(void);
 
 /* True if `node` is the console/tty device — the one file_is_tty() and
  * sys_ioctl()'s termios/pgrp calls key off. */
-bool devfs_is_console(struct vfs_node *node);
+struct tty *devfs_get_tty(struct vfs_node *node);
 
 #endif
+
+bool devfs_is_ptmx(struct vfs_node *node);

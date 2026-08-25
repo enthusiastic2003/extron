@@ -1,19 +1,29 @@
 /*
  * Smoke test for the real ext2 mount at /mnt/sd (kernel/fs/ext2.c,
- * kernel/drivers/emmc.c) — read-only, backed by an actual SD card
- * partition, not a synthetic image. kernel/fs/ext2.c's own correctness
- * (block mapping, directory iteration, symlinks, the indirect-block
- * cache) is already covered exhaustively against a synthetic disk image
- * by the host test harness in ext2_host/ — see ext2_host/ext2_test.c,
- * run via `make -C ext2_host test`. That harness can't reach this file:
- * it never goes through the VFS, the EMMC driver, or a real syscall.
+ * kernel/drivers/emmc.c) — backed by an actual SD card partition, not a
+ * synthetic image. kernel/fs/ext2.c's own correctness (block mapping,
+ * directory iteration, symlinks, the indirect-block cache, allocation)
+ * is already covered exhaustively against a synthetic disk image by the
+ * host test harness in ext2_host/ — see ext2_host/ext2_test.c, run via
+ * `make -C ext2_host test`. That harness can't reach this file: it
+ * never goes through the VFS, the EMMC driver, or a real syscall.
  *
  * This test is the other half: it proves the whole stack end to end —
- * VFS mount resolution, the EMMC2 SDHCI driver (command sequencing,
- * the post-select clock speed-up, CMD18 multi-block reads), and
- * ext2.c's VFS adapter — using whatever happens to be on the card's
- * ext2 partition. It does not assume specific file names or sizes,
- * since that partition's contents aren't part of this repo.
+ * VFS mount resolution, the EMMC2 SDHCI driver, and ext2.c's VFS
+ * adapter — using whatever happens to be on the card's ext2 partition,
+ * plus a dedicated scratch directory this test creates, writes into,
+ * and cleans up itself. It does not assume specific pre-existing file
+ * names or sizes, since the partition's contents outside that scratch
+ * directory aren't part of this repo.
+ *
+ * ext2 write support (create/write/delete) landed after this test was
+ * first written — see ext2_plan.md's "Current state (post-v1)" section
+ * for what's real and what still has sharp edges. This version reflects
+ * that: read-only enforcement is gone (writes now succeed), replaced
+ * with checks for create/write/append/overwrite/permissions/delete, and
+ * with explicit checks for the ops that are STILL unconditionally
+ * read-only-only (rename/symlink/link/chmod) so a regression there
+ * shows up here rather than being silently assumed away.
  *
  * Real-hardware only: QEMU's raspi4b machine has no working EMMC2
  * model (CMD8 times out during emmc_init()), so /mnt/sd never mounts
@@ -37,6 +47,30 @@ static int failures = 0;
 static void check(const char *what, int ok) {
     printf("[ext2_test] %-56s %s\n", what, ok ? "PASS" : "FAIL");
     if (!ok) failures++;
+}
+
+#define TEST_DIR "/mnt/sd/.mlibc_ext2_test"
+
+/* Our test tree is never more than one level deep (TEST_DIR and one
+ * "sub" child), so a flat unlink pass over each directory plus rmdir
+ * is enough — no need for general recursive removal. Best-effort: this
+ * runs both before the test (in case a previous run crashed and left
+ * something behind) and after, so failures here are swallowed rather
+ * than asserted. */
+static void remove_dir_shallow(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        char child[320];
+        snprintf(child, sizeof(child), "%s/%s", path, de->d_name);
+        if (unlink(child) != 0)
+            rmdir(child);
+    }
+    closedir(d);
+    rmdir(path);
 }
 
 /* Read up to `size` bytes of `path` into a freshly malloc'd buffer.
@@ -74,87 +108,43 @@ static char *read_whole_file(const char *path, size_t size, long *out_got) {
     return buf;
 }
 
-int main(void) {
-    printf("\n[ext2_test] === /mnt/sd (real SD card ext2 partition) ===\n");
-
-    struct stat root_st;
-    int root_rc = stat("/mnt/sd", &root_st);
-    if (root_rc != 0 || !S_ISDIR(root_st.st_mode)) {
-        printf("[ext2_test] /mnt/sd is not mounted (stat rc=%d errno=%d) -- "
-               "skipping. Expected on QEMU (no working EMMC2 model); needs "
-               "real Pi4 hardware with a partitioned, ext2-formatted SD "
-               "card to actually exercise this.\n", root_rc, errno);
-        return 0;
-    }
-    check("stat(/mnt/sd) sees a directory", 1);
-
-    /* /mnt/sd is created as a plain, writable ramfs directory in
-     * kernel.c *before* emmc_mount_ext2() ever runs — exactly like
-     * /dev is created before devfs_init() covers it (kernel/kernel.c).
-     * So the stat() above proves nothing about whether the ext2 mount
-     * actually landed here: if EMMC init or the ext2 mount failed (as
-     * it always will on QEMU), /mnt/sd is just that empty ramfs
-     * directory, still a perfectly good directory, but writable and
-     * with none of the card's files in it. The only reliable way to
-     * tell the two apart from userspace is to try to write to it:
-     * ext2_fs_ops's create hook (kernel/fs/ext2.c) unconditionally
-     * returns -EROFS, while ramfs happily creates the file. */
-    const char *probe_path = "/mnt/sd/__ext2_test_mount_probe__";
-    errno = 0;
-    int probe_fd = open(probe_path, O_CREAT | O_EXCL | O_WRONLY, 0644);
-    if (probe_fd >= 0) {
-        close(probe_fd);
-        unlink(probe_path);
-        printf("[ext2_test] /mnt/sd accepted a file creation -- the real "
-               "ext2 mount never landed here (still the plain ramfs "
-               "directory kernel.c pre-creates as the mount point). "
-               "Expected on QEMU; needs real Pi4 hardware with the SD "
-               "card's ext2 partition to exercise the rest of this test.\n");
-        return 0;
-    }
-    check("/mnt/sd rejects file creation with EROFS (real ext2 mount present)",
-          errno == EROFS);
-
+/*
+ * Read-side regression pass over whatever's already on the card,
+ * independent of anything this test creates: enumerate /mnt/sd's root,
+ * and for every regular file found, read it twice (two separate
+ * open()s) and require byte-for-byte agreement, plus a mid-file
+ * seek+read probe on the largest one found. This is the direct
+ * regression test for the indirect-block cache added to inode_bmap()
+ * — a caching bug would show up as the second read disagreeing with
+ * the first, or as corruption localized to offsets past the 12 direct
+ * blocks.
+ */
+static void check_existing_content_reads_consistently(void) {
     DIR *root = opendir("/mnt/sd");
     check("opendir(/mnt/sd) succeeds", root != NULL);
-    if (!root) {
-        printf("[ext2_test] === %d failure(s) ===\n", failures);
-        return failures;
-    }
+    if (!root) return;
 
-    /* Walk the root directory once, categorizing entries. Bounded so a
-     * corrupt or pathological directory can't spin forever; ordinary
-     * directories are nowhere near this many entries. */
-    #define MAX_SCAN 4096
     #define MAX_TRACKED 64
     char reg_names[MAX_TRACKED][256];
     off_t  reg_sizes[MAX_TRACKED];
     int n_reg = 0;
-    char first_dir[256] = {0};
-    int have_dir = 0;
     int n_entries = 0, n_dirs = 0, n_reg_total = 0, n_other = 0;
 
     struct dirent *de;
-    while (n_entries < MAX_SCAN && (de = readdir(root)) != NULL) {
+    while (n_entries < 4096 && (de = readdir(root)) != NULL) {
         n_entries++;
-        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")
+            || !strcmp(de->d_name, ".mlibc_ext2_test"))
             continue;
 
         char path[300];
         snprintf(path, sizeof(path), "/mnt/sd/%s", de->d_name);
 
         struct stat st;
-        if (lstat(path, &st) != 0) {
-            n_other++;
-            continue;
-        }
+        if (lstat(path, &st) != 0) { n_other++; continue; }
 
         if (S_ISDIR(st.st_mode)) {
             n_dirs++;
-            if (!have_dir) {
-                strncpy(first_dir, path, sizeof(first_dir) - 1);
-                have_dir = 1;
-            }
         } else if (S_ISREG(st.st_mode)) {
             n_reg_total++;
             if (n_reg < MAX_TRACKED) {
@@ -169,16 +159,10 @@ int main(void) {
     }
     closedir(root);
 
-    check("readdir(/mnt/sd) enumerates without error", n_entries < MAX_SCAN);
+    check("readdir(/mnt/sd) enumerates without error", n_entries < 4096);
     printf("[ext2_test] root: %d dirs, %d regular files, %d other, %d total entries\n",
            n_dirs, n_reg_total, n_other, n_entries);
 
-    /* Content-consistency check: read every tracked regular file twice
-     * (two separate open()s) and require byte-for-byte agreement. This
-     * is the direct regression test for the indirect-block cache added
-     * to inode_bmap() — a caching bug would show up as the second read
-     * disagreeing with the first, or as corruption localized to file
-     * offsets past the 12 direct blocks. */
     off_t largest_size = -1;
     char largest_path[300] = {0};
     for (int i = 0; i < n_reg; i++) {
@@ -199,17 +183,10 @@ int main(void) {
             largest_size = reg_sizes[i];
             strncpy(largest_path, reg_names[i], sizeof(largest_path) - 1);
         }
-
         free(a);
         free(b);
     }
 
-    /* Targeted random-offset check on whichever file is biggest: seek
-     * to its midpoint and confirm a fresh read there agrees with the
-     * full-file read above. Only meaningful (as a check on indirect
-     * block mapping specifically, rather than just direct blocks) once
-     * the file is bigger than a handful of direct blocks; smaller files
-     * still get exercised by the full-read check above. */
     if (largest_size > 65536) {
         long got_full = 0;
         char *full = read_whole_file(largest_path, (size_t)largest_size, &got_full);
@@ -241,51 +218,203 @@ int main(void) {
                "the mid-file indirect-block probe (largest seen: %ld bytes)\n",
                (long)largest_size);
     }
+}
 
-    /* Further read-only enforcement (O_CREAT was already proven above,
-     * as the mount-detection probe itself). ext2_fs_ops's other
-     * mutating hooks (remove, rename, link, symlink — kernel/fs/ext2.c)
-     * all return -EROFS unconditionally too. A per-node write()
-     * attempt is different: ext2_node_ops.write is simply NULL, so
-     * vfs_write() reports -EINVAL (kernel/fs/vfs.c's vfs_write())
-     * rather than -EROFS — that's the real current behavior, not a
-     * documented POSIX guarantee, so this checks what the kernel
-     * actually does. */
+/*
+ * Create/write/append/overwrite/permissions/delete, all inside our own
+ * scratch directory so this never touches whatever else lives on the
+ * card. Every path here is exercising the write commits (ef92bfc,
+ * 141f98f) directly.
+ */
+static void check_create_write_and_delete(void) {
+    umask(0);
+
+    check("mkdir creates a real directory on /mnt/sd", mkdir(TEST_DIR, 0755) == 0);
+    struct stat st;
+    check("stat sees the new directory with the requested mode",
+          stat(TEST_DIR, &st) == 0 && S_ISDIR(st.st_mode)
+          && (st.st_mode & 0777) == 0755);
+
+    /* --- create + permissions --- */
+    char file_a[300];
+    snprintf(file_a, sizeof(file_a), TEST_DIR "/alpha.txt");
+    int fd = open(file_a, O_CREAT | O_EXCL | O_WRONLY, 0640);
+    check("O_CREAT creates a new regular file", fd >= 0);
+    check("new file's mode round-trips through the inode as 0640",
+          fd >= 0 && stat(file_a, &st) == 0 && S_ISREG(st.st_mode)
+          && (st.st_mode & 0777) == 0640);
     errno = 0;
-    check("mkdir under /mnt/sd reports EROFS",
-          mkdir("/mnt/sd/__ext2_test_dir__", 0755) == -1 && errno == EROFS);
+    check("O_CREAT|O_EXCL on an existing file reports EEXIST",
+          open(file_a, O_CREAT | O_EXCL | O_WRONLY, 0640) == -1 && errno == EEXIST);
+
+    /* --- write + read back --- */
+    const char *msg = "hello from the ext2 write path\n";
+    size_t msg_len = strlen(msg);
+    check("write() reports the full byte count",
+          fd >= 0 && write(fd, msg, msg_len) == (long)msg_len);
+    check("stat size reflects the write",
+          stat(file_a, &st) == 0 && (size_t)st.st_size == msg_len);
+    if (fd >= 0) close(fd);
+
+    long got;
+    char *readback = read_whole_file(file_a, msg_len, &got);
+    check("read back matches what was written",
+          readback && got == (long)msg_len && memcmp(readback, msg, msg_len) == 0);
+    free(readback);
+
+    /* --- append (exercises inode_bmap_alloc's file-growth path) --- */
+    const char *more = "second line, appended after reopening\n";
+    size_t more_len = strlen(more);
+    fd = open(file_a, O_WRONLY);
+    check("reopen for append succeeds", fd >= 0);
+    off_t end = fd >= 0 ? lseek(fd, 0, SEEK_END) : -1;
+    check("lseek(SEEK_END) lands exactly at the file's current size",
+          end == (off_t)msg_len);
+    check("append write reports the full byte count",
+          fd >= 0 && write(fd, more, more_len) == (long)more_len);
+    if (fd >= 0) close(fd);
+
+    size_t total_len = msg_len + more_len;
+    char *expected = malloc(total_len);
+    memcpy(expected, msg, msg_len);
+    memcpy(expected + msg_len, more, more_len);
+
+    readback = read_whole_file(file_a, total_len, &got);
+    check("appended content reads back in full and in the right order",
+          readback && got == (long)total_len
+          && memcmp(readback, expected, total_len) == 0);
+    free(readback);
+
+    /* --- in-place overwrite (partial-block read-modify-write) --- */
+    fd = open(file_a, O_RDWR);
+    check("reopen O_RDWR for in-place overwrite succeeds", fd >= 0);
+    if (fd >= 0) {
+        check("lseek to an interior offset", lseek(fd, 6, SEEK_SET) == 6);
+        check("in-place write of 5 bytes reports the full count",
+              write(fd, "WORLD", 5) == 5);
+        close(fd);
+    }
+    memcpy(expected + 6, "WORLD", 5); /* mirror the same mutation on our copy */
+
+    readback = read_whole_file(file_a, total_len, &got);
+    check("in-place overwrite is reflected on reread, surrounding bytes untouched",
+          readback && got == (long)total_len
+          && memcmp(readback, expected, total_len) == 0);
+    free(readback);
+    free(expected);
+
+    /* --- subdirectory + readdir --- */
+    char subdir[300];
+    snprintf(subdir, sizeof(subdir), TEST_DIR "/sub");
+    check("mkdir creates a subdirectory", mkdir(subdir, 0755) == 0);
+
+    char subfile[340];
+    snprintf(subfile, sizeof(subfile), "%s/child.txt", subdir);
+    int sfd = open(subfile, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    check("create a file inside the new subdirectory", sfd >= 0);
+    if (sfd >= 0) { write(sfd, "x", 1); close(sfd); }
+
+    DIR *dp = opendir(subdir);
+    int found_child = 0, found_dot = 0, found_dotdot = 0;
+    struct dirent *de;
+    while (dp && (de = readdir(dp)) != NULL) {
+        if (!strcmp(de->d_name, ".")) found_dot = 1;
+        else if (!strcmp(de->d_name, "..")) found_dotdot = 1;
+        else if (!strcmp(de->d_name, "child.txt")) found_child = 1;
+    }
+    if (dp) closedir(dp);
+    check("readdir sees '.', '..', and the file just created",
+          found_dot && found_dotdot && found_child);
+
+    /* --- delete: non-empty dir refuses, empties out, then succeeds --- */
+    errno = 0;
+    check("rmdir on a non-empty directory reports ENOTEMPTY",
+          rmdir(subdir) == -1 && errno == ENOTEMPTY);
+    check("unlink removes the file inside the subdirectory", unlink(subfile) == 0);
+    check("rmdir succeeds once the directory is empty", rmdir(subdir) == 0);
+    errno = 0;
+    check("stat on the removed subdirectory reports ENOENT",
+          stat(subdir, &st) == -1 && errno == ENOENT);
+
+    check("unlink removes the main test file", unlink(file_a) == 0);
+    errno = 0;
+    check("stat after unlink reports ENOENT", stat(file_a, &st) == -1 && errno == ENOENT);
+    errno = 0;
+    check("unlinking an already-removed file reports ENOENT",
+          unlink(file_a) == -1 && errno == ENOENT);
+
+    /* --- ops that are still unconditionally read-only-only --- */
+    char src[300], dst[300];
+    snprintf(src, sizeof(src), TEST_DIR "/rename-src");
+    snprintf(dst, sizeof(dst), TEST_DIR "/rename-dst");
+    int rfd = open(src, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    check("create a file to probe the still-unimplemented ops", rfd >= 0);
+    if (rfd >= 0) close(rfd);
 
     errno = 0;
-    check("symlink under /mnt/sd reports EROFS",
-          symlink("whatever", "/mnt/sd/__ext2_test_link__") == -1 && errno == EROFS);
+    check("rename() on ext2 currently reports EROFS (not yet implemented)",
+          rename(src, dst) == -1 && errno == EROFS);
 
-    if (n_reg > 0) {
-        errno = 0;
-        char label[320];
-        snprintf(label, sizeof(label), "unlink('%s') reports EROFS", reg_names[0]);
-        check(label, unlink(reg_names[0]) == -1 && errno == EROFS);
+    char link_target[300];
+    snprintf(link_target, sizeof(link_target), TEST_DIR "/a-symlink");
+    errno = 0;
+    check("symlink() on ext2 currently reports EROFS (not yet implemented)",
+          symlink("whatever", link_target) == -1 && errno == EROFS);
 
-        errno = 0;
-        int wfd = open(reg_names[0], O_WRONLY);
-        long wrote = (wfd >= 0) ? write(wfd, "x", 1) : -1;
-        int write_errno = errno;
-        if (wfd >= 0) close(wfd);
-        snprintf(label, sizeof(label), "write('%s') reports EINVAL", reg_names[0]);
-        check(label, wrote == -1 && write_errno == EINVAL);
-    } else {
-        printf("[ext2_test] no regular file found at /mnt/sd's root -- "
-               "skipping unlink/write enforcement checks\n");
+    snprintf(link_target, sizeof(link_target), TEST_DIR "/a-hardlink");
+    errno = 0;
+    check("link() on ext2 currently reports EROFS (not yet implemented)",
+          link(src, link_target) == -1 && errno == EROFS);
+
+    errno = 0;
+    check("chmod() on ext2 currently reports EROFS (no setattr op yet)",
+          chmod(src, 0600) == -1 && errno == EROFS);
+
+    unlink(src);
+}
+
+int main(void) {
+    printf("\n[ext2_test] === /mnt/sd (real SD card ext2 partition) ===\n");
+
+    struct stat root_st;
+    int root_rc = stat("/mnt/sd", &root_st);
+    if (root_rc != 0 || !S_ISDIR(root_st.st_mode)) {
+        printf("[ext2_test] /mnt/sd is not mounted (stat rc=%d errno=%d) -- "
+               "skipping. Expected on QEMU (no working EMMC2 model); needs "
+               "real Pi4 hardware with a partitioned, ext2-formatted SD "
+               "card to actually exercise this.\n", root_rc, errno);
+        return 0;
     }
+    check("stat(/mnt/sd) sees a directory", 1);
 
-    if (have_dir) {
-        errno = 0;
-        char label[320];
-        snprintf(label, sizeof(label), "rmdir('%s') reports EROFS", first_dir);
-        check(label, rmdir(first_dir) == -1 && errno == EROFS);
-    } else {
-        printf("[ext2_test] no subdirectory found at /mnt/sd's root -- "
-               "skipping rmdir enforcement check\n");
+    /* /mnt/sd is created as a plain, writable ramfs directory in
+     * kernel.c *before* emmc_mount_ext2() ever runs — exactly like /dev
+     * is created before devfs_init() covers it. Now that ext2 supports
+     * writes too, a successful write no longer tells the two apart —
+     * both accept one. The reliable signal is the root inode number:
+     * ext2's root directory is inode 2 by spec (EXT2_ROOT_INO,
+     * kernel/include/kernel/fs/ext2.h) no matter what's on the card,
+     * while ramfs's root is inode 1 and /mnt/sd, created 5th among
+     * kernel.c's boot-time mkdir calls (/dev, /bin, /etc, /tmp, /mnt,
+     * /mnt/sd), gets whatever sequential ramfs inode number that
+     * ordering produces — never 2. If kernel.c's mkdir order ever
+     * changes, this check needs revisiting alongside it. */
+    if (root_st.st_ino != 2) {
+        printf("[ext2_test] /mnt/sd has ino=%lu, not 2 -- the real ext2 "
+               "mount never landed here (still the plain ramfs directory "
+               "kernel.c pre-creates as the mount point). Expected on "
+               "QEMU; needs real Pi4 hardware with the SD card's ext2 "
+               "partition to exercise the rest of this test.\n",
+               (unsigned long)root_st.st_ino);
+        return 0;
     }
+    check("/mnt/sd's root inode is 2 (real ext2 mount present)", 1);
+
+    check_existing_content_reads_consistently();
+
+    remove_dir_shallow(TEST_DIR); /* defensive: a crashed prior run may have left this */
+    check_create_write_and_delete();
+    remove_dir_shallow(TEST_DIR);
 
     printf("[ext2_test] === %d failure(s) ===\n", failures);
     return failures;

@@ -1,3 +1,5 @@
+#include <kernel/drivers/pty.h>
+#include <kernel/mm/kheap.h>
 #include <kernel/fs/devfs.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/fb.h>
@@ -7,6 +9,7 @@
 #include <kernel/errno.h>
 
 static struct vfs_node console_node;
+static struct vfs_node ptmx_node;
 static struct vfs_node null_node;
 static struct vfs_node zero_node;
 static struct vfs_node fb_node;
@@ -21,6 +24,7 @@ struct devfs_entry {
 };
 
 static struct devfs_entry entries[] = {
+    { .name = "ptmx",    .node = &ptmx_node },
     { .name = "console", .node = &console_node },
     { .name = "tty",     .node = &console_node },
     { .name = "null",    .node = &null_node },
@@ -32,12 +36,12 @@ static struct devfs_entry entries[] = {
 
 static long console_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
     (void)n; (void)off;
-    return tty_read(buf, count);
+    return tty_read(devfs_get_tty(n), buf, count);
 }
 
 static long console_write(struct vfs_node *n, size_t off, const void *buf, size_t count) {
     (void)n; (void)off;
-    return tty_write(buf, count);
+    return tty_write(devfs_get_tty(n), buf, count);
 }
 
 static long null_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
@@ -198,6 +202,26 @@ static int devfs_root(struct vfs_mount *mount, struct vfs_dentry **out) {
 static int devfs_lookup_child(struct vfs_mount *mount, struct vfs_dentry *parent,
                               const char *name, struct vfs_dentry **out) {
     (void)mount; (void)parent;
+    
+    if (name[0] == 'p' && name[1] == 't' && name[2] == 's') {
+        int index = 0;
+        int i = 3;
+        while (name[i] >= '0' && name[i] <= '9') {
+            index = index * 10 + (name[i] - '0');
+            i++;
+        }
+        if (name[i] == '\0') {
+            struct tty *slave = pty_get_slave(index);
+            if (slave) {
+                struct vfs_node *pts_node = kmalloc(sizeof(struct vfs_node));
+                vfs_node_init(pts_node, &console_ops, slave, VFS_NODE_DEVICE);
+                struct vfs_dentry *pts_dentry = kmalloc(sizeof(struct vfs_dentry));
+                vfs_dentry_init(pts_dentry, pts_node, parent, name, NULL);
+                *out = pts_dentry;
+                return 0;
+            }
+        }
+    }
     for (size_t i = 0; i < ENTRY_COUNT; i++)
         if (strcmp(entries[i].name, name) == 0) {
             vfs_dentry_retain(&entries[i].dentry);
@@ -252,12 +276,20 @@ static const struct vfs_fs_ops devfs_fs_ops = {
     .symlink = devfs_symlink,
 };
 
-bool devfs_is_console(struct vfs_node *node) {
-    return node == &console_node;
+struct tty *devfs_get_tty(struct vfs_node *node) {
+    if (node == &console_node) return &tty_table[0];
+    if (node->ops == &console_ops && node != &console_node) {
+        return (struct tty *)node->private;
+    }
+    return NULL;
+}
+bool devfs_is_ptmx(struct vfs_node *node) {
+    return node == &ptmx_node;
 }
 
 void devfs_init(void) {
     vfs_node_init(&console_node, &console_ops, NULL, VFS_NODE_DEVICE);
+    vfs_node_init(&ptmx_node, &null_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&null_node, &null_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&zero_node, &zero_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&fb_node, &fb_ops, NULL, VFS_NODE_DEVICE);

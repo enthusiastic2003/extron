@@ -73,44 +73,14 @@ static void ring_push(uint8_t c) {
 }
 
 static void drain_uart(void) {
-    /* No irq_spin_lock needed here: this ISR runs with DAIF fully
-     * masked (automatic on any exception entry), so it can't be
-     * preempted by anything, including a second UART interrupt. The
-     * only other accessor, kbd_getc(), already masks DAIF itself
-     * around its own critical section (that's what irq_spin_lock does
-     * for it) — which means this ISR architecturally cannot even be
-     * entered while kbd_getc() is mid-read, lock or no lock on this
-     * side. On a single core (the only kind this kernel runs on —
-     * boot.S parks the others permanently) there's no other way these
-     * two could ever touch kbuf at the same time, so a lock here would
-     * just be overhead with nothing left to exclude. Revisit if this
-     * ever runs on more than one core. */
     int c;
-    /* Drain the ENTIRE hardware FIFO in one go — the whole point is to
-     * empty it before more bytes can possibly overflow it, not just
-     * take one byte per interrupt. */
-    bool got_any = false;
     while ((c = serial_try_getc()) != -1) {
-        /* ISIG control bytes act at arrival time, even when the foreground
-         * job is sleeping rather than reading stdin.  Consumed terminal
-         * controls do not become ordinary input bytes. */
-        if (tty_handle_input_byte((uint8_t)c))
-            continue;
-        uint32_t next_head = (kbuf.head + 1) % KBD_BUFFER_SIZE;
-        if (next_head != kbuf.tail) { /* drop the byte if the software buffer is full too */
-            kbuf.buf[kbuf.head] = (char)c;
-            kbuf.head = next_head;
-            got_any = true;
+        if (!tty_handle_input_byte(&tty_table[0], (uint8_t)c)) {
+            tty_push_input(&tty_table[0], (char)c);
         }
-        /* Outside the kbuf-full check on purpose: a process polling the
-         * ring shouldn't lose keystrokes just because nothing is
-         * draining the blocking console path. */
         ring_push((uint8_t)c);
     }
-    if (got_any)
-        wakeup(&kbuf);
 }
-
 static void kbd_irq_handler(struct aarch64_frame *f) {
     (void)f;
     drain_uart();

@@ -1,3 +1,4 @@
+#include <kernel/drivers/pty.h>
 #include <kernel/proc/syscall.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
@@ -394,36 +395,50 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
                           struct aarch64_frame *f) {
     (void)f;
     struct proc *p = my_proc();
-    if (!file_is_tty(p, (int)fd))
+    struct open_file *f_ioctl = p->files[fd];
+    if (f_ioctl && f_ioctl->kind == FILE_VNODE && pty_get_index(f_ioctl->object.node) >= 0) {
+        if (request == 0x80045430) { /* TIOCGPTN */
+            if (!user_buffer_ok(p, arg, sizeof(int))) return (uint64_t)-EFAULT;
+            *(int *)arg = pty_get_index(f_ioctl->object.node);
+            return 0;
+        }
+        if (request == 0x40045431) { /* TIOCSPTLCK */
+            if (!user_buffer_ok(p, arg, sizeof(int))) return (uint64_t)-EFAULT;
+            return 0; // successfully fake unlocked
+        }
+    }
+    
+    struct tty *t = file_get_tty(p, (int)fd);
+    if (!t)
         return (uint64_t)-ENOTTY;
     if (request == TCGETS) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
             return (uint64_t)-EFAULT;
-        tty_get_termios((struct tty_termios *)arg);
+        tty_get_termios(t, (struct tty_termios *)arg);
         return 0;
     }
     if (request == TCSETS || request == TCSETSW || request == TCSETSF) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_termios)))
             return (uint64_t)-EFAULT;
-        tty_set_termios((const struct tty_termios *)arg, request == TCSETSF);
+        tty_set_termios(t, (const struct tty_termios *)arg, request == TCSETSF);
         return 0;
     }
     if (request == TIOCGWINSZ) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
             return (uint64_t)-EFAULT;
-        tty_get_winsize((struct tty_winsize *)arg);
+        tty_get_winsize(t, (struct tty_winsize *)arg);
         return 0;
     }
     if (request == TIOCSWINSZ) {
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
             return (uint64_t)-EFAULT;
-        tty_set_winsize((const struct tty_winsize *)arg);
+        tty_set_winsize(t, (const struct tty_winsize *)arg);
         return 0;
     }
     if (request == TIOCGPGRP) {
         if (!user_buffer_ok(p, arg, sizeof(int)))
             return (uint64_t)-EFAULT;
-        *(int *)arg = (int)tty_foreground_pgid();
+        *(int *)arg = (int)tty_foreground_pgid(t);
         return 0;
     }
     if (request == TIOCSPGRP) {
@@ -432,7 +447,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
         int pgid = *(const int *)arg;
         if (pgid <= 0 || !proc_group_exists((uint64_t)pgid, p->sid))
             return (uint64_t)-EPERM;
-        tty_set_foreground_pgid((uint64_t)pgid);
+        tty_set_foreground_pgid(t, (uint64_t)pgid);
         return 0;
     }
     return (uint64_t)-ENOTTY;
@@ -466,14 +481,17 @@ static uint64_t sys_poll(uint64_t fds_addr, uint64_t count, uint64_t timeout_raw
     if (ready || timeout == 0)
         return (uint64_t)ready;
 
-    bool waits_for_input = false;
-    for (size_t i = 0; i < count; i++)
-        if (file_is_tty(my_proc(), fds[i].fd)
-                && (fds[i].events & POLLIN))
-            waits_for_input = true;
-    if (!waits_for_input)
+    struct tty *wait_tty = NULL;
+    for (size_t i = 0; i < count; i++) {
+        struct tty *t = file_get_tty(my_proc(), fds[i].fd);
+        if (t && (fds[i].events & POLLIN)) {
+            wait_tty = t;
+            break;
+        }
+    }
+    if (!wait_tty)
         return 0;
-    kbd_wait_for_input(timeout);
+    tty_wait_for_input(wait_tty, timeout);
     if (signal_pending_unblocked(my_thread()))
         return (uint64_t)-4; /* EINTR */
     return (uint64_t)poll_scan(fds, count);

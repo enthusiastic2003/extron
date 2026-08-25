@@ -1,3 +1,4 @@
+#include <kernel/drivers/pty.h>
 #include <kernel/console.h>
 #include <kernel/panic.h>
 #include <kernel/mm/pmm.h>
@@ -195,6 +196,7 @@ void kernel_stage2(uint64_t mb2_addr) {
     */
     init_kbd();
     tty_init();
+    pty_init();
 
     /* VideoCore mailbox bring-up. Deliberately before any framebuffer
      * code: it proves the transport (Device mapping, cache maintenance,
