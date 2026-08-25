@@ -1,10 +1,19 @@
 /*
- * ext2.c — Read-only ext2 filesystem driver.
+ * ext2.c — Read-write ext2 filesystem driver.
  *
  * Designed to compile in two modes:
  *  1. Host test:  gcc -DEXT2_HOST_TEST  (uses malloc/free, pread-backed block dev)
  *  2. Kernel:     part of the kernel build  (uses kmalloc/kfree, EMMC block dev,
  *                 and exposes VFS ops tables at the bottom of this file)
+ *
+ * Limitations:
+ *  - No Inode Cache / Dentry Cache: Every lookup operation reads the inode from disk 
+ *    and creates a new in-memory `ext2_inode_info` and VFS `vfs_node`. If a file is 
+ *    opened and subsequently modified or unlinked via a different path/lookup, the 
+ *    open file descriptor's cached `vfs_node` will not see the changes (e.g. `fstat` 
+ *    will report old link counts, and `readdir` on unlinked directories may read 
+ *    freed blocks).
+ *  - No Journaling: Modifications are synchronous and there is no ext3-style journal.
  *
  * The single #ifdef block below is the ONLY divergence.  All ext2 logic
  * beneath it is identical in both builds.
@@ -1633,6 +1642,12 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     struct ext2_inode_info *dir = (struct ext2_inode_info *)parent->private;
     
     if (type != VFS_NODE_REGULAR && type != VFS_NODE_DIRECTORY) return -ENOSYS; /* Only files and dirs for now */
+
+    struct vfs_dentry *existing = NULL;
+    if (ext2_lookup_child_vfs(vfs_m, parent_dentry, name, &existing) == 0) {
+        vfs_dentry_release(existing);
+        return -EEXIST;
+    }
     uint16_t ext2_mode = (type == VFS_NODE_DIRECTORY) ? (EXT2_S_IFDIR | mode) : (EXT2_S_IFREG | mode);
     uint8_t ext2_type = (type == VFS_NODE_DIRECTORY) ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
     
@@ -1826,6 +1841,12 @@ static int ext2_node_link(struct vfs_mount *vfs_m, struct vfs_node *target_node,
     if (mode == EXT2_S_IFDIR)
         return -EPERM;
         
+    struct vfs_dentry *existing = NULL;
+    if (ext2_lookup_child_vfs(vfs_m, parent_dentry, name, &existing) == 0) {
+        vfs_dentry_release(existing);
+        return -EEXIST;
+    }
+
     uint8_t ext2_type = EXT2_FT_UNKNOWN;
     if (mode == EXT2_S_IFREG) ext2_type = EXT2_FT_REG_FILE;
     else if (mode == EXT2_S_IFCHR) ext2_type = EXT2_FT_CHRDEV;
@@ -1858,6 +1879,12 @@ static int ext2_node_symlink(struct vfs_mount *vfs_m, struct vfs_dentry *parent_
     struct ext2_mount *m = (struct ext2_mount *)vfs_m->private;
     struct ext2_inode_info *dir = (struct ext2_inode_info *)parent_dentry->node->private;
     
+    struct vfs_dentry *existing = NULL;
+    if (ext2_lookup_child_vfs(vfs_m, parent_dentry, name, &existing) == 0) {
+        vfs_dentry_release(existing);
+        return -EEXIST;
+    }
+
     uint32_t ino;
     int ret = ext2_alloc_inode(m, EXT2_S_IFLNK | 0777, uid, gid, &ino);
     if (ret < 0) return ret;
