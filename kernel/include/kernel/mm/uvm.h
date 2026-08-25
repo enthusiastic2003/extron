@@ -76,22 +76,22 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags);
 
 /* Like vm_allocate_region(), but at a caller-chosen address instead of
  * first-fit — MAP_FIXED's anonymous case. `addr` must already be
- * page-aligned and fall entirely within [heap_start, heap_end); the
- * range must also be completely free of any existing VMA. Real
- * MAP_FIXED silently discards whatever mapping already overlaps the
- * target range instead of failing — that requires splitting/trimming
- * arbitrary VMAs, which is deferred, so this fails instead of
- * clobbering something a caller may not have expected to lose. Returns
- * `addr` on success, or 0 on failure (misaligned, out of range,
- * overlaps something, or OOM). */
+ * page-aligned and fall entirely within [heap_start, heap_end). Real
+ * MAP_FIXED semantics: whatever already occupies [addr, addr+size) is
+ * silently discarded first (see carve_range_locked() in uvm.c — an
+ * overlapping VMA is trimmed or split as needed, never just refused).
+ * Returns `addr` on success, or 0 on failure (misaligned, out of range,
+ * or OOM). */
 virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
                                   size_t size, int flags);
 
-/* Frees the region whose base == addr — unmaps and frees its physical
- * pages, removes it from the list. `size` isn't trusted beyond a sanity
- * check; the VMA's own recorded size is what's actually freed, so a
- * mismatched caller can't corrupt more or less than was really
- * allocated. No-op if no VMA starts at exactly `addr`. */
+/* Frees [addr, addr+size) — unmaps and frees the physical pages it
+ * owns, trimming or splitting whatever VMA(s) the range overlaps rather
+ * than requiring an exact match against some VMA's own base (see
+ * carve_range_locked() in uvm.c). `addr` must be page-aligned; `size`
+ * is rounded up to a whole number of pages. No-op if either is
+ * malformed (this predates real error returns from the mmap ABI and
+ * still doesn't have one). */
 void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size);
 
 /* Map EXISTING physical memory into the process at a free VA, rather
@@ -105,10 +105,11 @@ virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, in
 
 /* Like vm_map_region(), but at a caller-chosen address instead of
  * first-fit — MAP_FIXED's file/device-backed case. Same placement
- * rules as vm_allocate_region_at(): `addr` page-aligned, in range, and
- * free of any overlap. Returns `addr + (phys's own intra-page offset)`
- * on success (matching vm_map_region()'s own convention when `phys`
- * isn't page-aligned), or 0 on failure. */
+ * rules as vm_allocate_region_at(): `addr` page-aligned and in range;
+ * whatever already overlaps [addr, addr+size) is discarded first, not
+ * refused. Returns `addr + (phys's own intra-page offset)` on success
+ * (matching vm_map_region()'s own convention when `phys` isn't
+ * page-aligned), or 0 on failure. */
 virt_addr_t vm_map_region_at(struct vm_space *mm, virt_addr_t addr,
                              phys_addr_t phys, size_t size, int flags);
 

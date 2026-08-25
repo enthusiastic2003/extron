@@ -667,13 +667,13 @@ struct mmap_request {
  * PMM (vm_map_region() already records that correctly via
  * owns_pages).
  *
- * MAP_FIXED requires the target range to be page-aligned and
- * completely free of any existing mapping — real MAP_FIXED silently
- * discards whatever overlaps instead, which needs splitting/trimming
- * arbitrary VMAs and is deferred (see vm_allocate_region_at()'s own
- * comment). No demand paging either (everything here is either
- * eagerly allocated or already-resident device memory) — deliberately
- * deferred, not silently pretended to work.
+ * MAP_FIXED requires the target range to be page-aligned; whatever
+ * already occupies [hint, hint+size) is silently discarded first, real
+ * Linux semantics (vm_allocate_region_at()/vm_map_region_at() do the
+ * trim/split via carve_range_locked() in uvm.c). No demand paging
+ * either (everything here is either eagerly allocated or
+ * already-resident device memory) — deliberately deferred, not
+ * silently pretended to work.
  */
 static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
                          struct aarch64_frame *f) {

@@ -104,12 +104,12 @@ static virt_addr_t find_gap_locked(struct vm_space *mm, size_t span,
 /*
  * Like find_gap_locked(), but checks a caller-specified range instead
  * of searching for one: succeeds only if [base, base+size) doesn't
- * overlap any existing VMA (real MAP_FIXED silently discards what's
- * there instead — see vm_allocate_region_at()'s own comment for why
- * that's deferred). On success *out_prev is the node the new one
- * should be linked after (NULL = list head), matching
- * find_gap_locked()'s own convention so both can feed the same
- * insertion logic. Caller holds mm->lock.
+ * overlap any existing VMA. vm_allocate_region_at()/vm_map_region_at()
+ * call carve_range_locked() first to guarantee that, so by the time
+ * they call this it only ever hands back the insertion point (*out_prev,
+ * matching find_gap_locked()'s own convention: NULL = list head) —
+ * the `false` return remains reachable, just never taken in that
+ * caller. Caller holds mm->lock.
  */
 static bool check_fixed_locked(struct vm_space *mm, virt_addr_t base,
                                size_t size, struct vma **out_prev) {
@@ -126,6 +126,109 @@ static bool check_fixed_locked(struct vm_space *mm, virt_addr_t base,
 
     *out_prev = prev;
     return true;
+}
+
+/*
+ * Discard whatever already occupies [base, end) — real MAP_FIXED
+ * semantics, and also what a real munmap(addr, len) needs for an
+ * arbitrary sub-range instead of only ever matching a VMA's exact base.
+ * base/end must already be page-aligned. Caller holds mm->lock.
+ *
+ * struct vma tracks only {base, size, owns_pages} — no file offset like
+ * Linux's vm_pgoff — so splitting one in two is just a second node with
+ * adjusted base/size; nothing about the mapping itself needs
+ * recomputing. Each VMA the range genuinely overlaps falls into one of
+ * four cases: entirely inside the range (delete outright), the range
+ * eats its head (shrink forward), the range eats its tail (shrink
+ * back), or the range lands in the middle (split into two). Physical
+ * pages are only unmapped/freed for the overlapped sub-range, never the
+ * whole VMA, so a shrink or split leaves the surviving portion's
+ * mapping untouched.
+ */
+static void carve_range_locked(struct vm_space *mm, virt_addr_t base,
+                               virt_addr_t end) {
+    struct vma *prev = NULL;
+    struct vma *cur  = mm->vmas;
+
+    while (cur) {
+        virt_addr_t cur_end = cur->base + cur->size;
+        if (cur_end <= base) { prev = cur; cur = cur->next; continue; }
+        if (cur->base >= end)
+            break;                         /* sorted list: nothing further overlaps */
+
+        virt_addr_t ov_start = cur->base > base ? cur->base : base;
+        virt_addr_t ov_end   = cur_end < end ? cur_end : end;
+
+        for (virt_addr_t va = ov_start; va < ov_end; va += PAGE_SIZE) {
+            phys_addr_t phys = virt_to_phys(mm->ttbr0, va);
+            if (phys) {
+                unmap_page(mm->ttbr0, va);
+                if (cur->owns_pages)
+                    pmm_free_page((void *)phys);
+            }
+        }
+
+        bool head_hit = (ov_start == cur->base);
+        bool tail_hit = (ov_end == cur_end);
+
+        if (head_hit && tail_hit) {
+            struct vma *dead = cur;
+            cur = cur->next;
+            if (prev) prev->next = cur; else mm->vmas = cur;
+            kfree(dead);
+            continue;
+        }
+
+        if (head_hit) {
+            cur->base = ov_end;
+            cur->size = cur_end - ov_end;
+            prev = cur;
+            cur  = cur->next;
+            continue;
+        }
+
+        if (tail_hit) {
+            cur->size = ov_start - cur->base;
+            prev = cur;
+            cur  = cur->next;
+            continue;
+        }
+
+        /* Middle hit: split into [cur->base, ov_start) and
+         * [ov_end, cur_end). */
+        struct vma *tail = kmalloc(sizeof(struct vma));
+        if (!tail) {
+            /* Can't represent both halves as separate nodes. Rather than
+             * leave [ov_end, cur_end) mapped but untracked by any VMA
+             * (a real leak — fork()/vm_space_destroy() would never see
+             * those pages again), unmap/free that remainder too and
+             * drop it: an already-degenerate OOM-during-carve corner
+             * case loses that trailing sub-range of address space, but
+             * nothing physical leaks. */
+            for (virt_addr_t va = ov_end; va < cur_end; va += PAGE_SIZE) {
+                phys_addr_t phys = virt_to_phys(mm->ttbr0, va);
+                if (phys) {
+                    unmap_page(mm->ttbr0, va);
+                    if (cur->owns_pages)
+                        pmm_free_page((void *)phys);
+                }
+            }
+            cur->size = ov_start - cur->base;
+            prev = cur;
+            cur  = cur->next;
+            continue;
+        }
+        tail->base       = ov_end;
+        tail->size       = cur_end - ov_end;
+        tail->owns_pages = cur->owns_pages;
+        tail->next       = cur->next;
+
+        cur->size = ov_start - cur->base;
+        cur->next = tail;
+
+        prev = tail;
+        cur  = tail->next;
+    }
 }
 
 /*
@@ -294,11 +397,16 @@ virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
 
     irq_spin_lock(&mm->lock);
 
-    struct vma *prev;
-    if (!check_fixed_locked(mm, addr, size, &prev)) {
-        irq_spin_unlock(&mm->lock);
-        return 0;
-    }
+    /* Real MAP_FIXED semantics: discard whatever already occupies
+     * [addr, addr+size) rather than refusing — see carve_range_locked()
+     * for how an arbitrary overlap gets trimmed/split/deleted down to
+     * exactly this range. Nothing can still overlap afterwards, so
+     * check_fixed_locked() below only exists to hand back the
+     * insertion point (prev), not to fail. */
+    carve_range_locked(mm, addr, addr + size);
+
+    struct vma *prev = NULL;
+    check_fixed_locked(mm, addr, size, &prev);
     struct vma *cur = prev ? prev->next : mm->vmas;
 
     uint64_t pflags = arch_translate_vm_flags(flags);
@@ -349,45 +457,25 @@ virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
     return addr;
 }
 
-/* Frees the region whose base == addr. `size` is not trusted beyond
- * this being a real request — the VMA's own recorded size is what
- * actually gets unmapped/freed, so a mismatched caller can't corrupt
- * more or less than was really allocated. No-op if nothing starts at
- * exactly `addr`. */
+/* Frees [addr, addr+size), which no longer needs to match any VMA's
+ * exact base — carve_range_locked() trims/splits/deletes whatever
+ * overlaps, same primitive MAP_FIXED's clobber path uses. `addr` must
+ * be page-aligned (a misaligned request is simply not a valid unmap and
+ * is a no-op, matching this function's existing "not really an error
+ * path" convention); `size` is rounded up to a whole number of pages. */
 void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size) {
-    (void)size;
-    if (!mm)
+    if (!mm || size == 0 || (addr & (PAGE_SIZE - 1)))
         return;
+    if (size > (size_t)-1 - (PAGE_SIZE - 1))
+        return;
+
+    virt_addr_t end = addr + align_up(size, PAGE_SIZE);
+    if (end < addr)
+        return; /* wrapped */
 
     irq_spin_lock(&mm->lock);
-
-    struct vma *prev = NULL;
-    struct vma *cur = mm->vmas;
-    while (cur && cur->base != addr) {
-        prev = cur;
-        cur = cur->next;
-    }
-    if (!cur) {
-        irq_spin_unlock(&mm->lock);
-        return;
-    }
-
-    for (size_t off = 0; off < cur->size; off += PAGE_SIZE) {
-        phys_addr_t phys = virt_to_phys(mm->ttbr0, cur->base + off);
-        if (phys) {
-            unmap_page(mm->ttbr0, cur->base + off);
-            if (cur->owns_pages)
-                pmm_free_page((void *)phys);
-        }
-    }
-
-    if (prev)
-        prev->next = cur->next;
-    else
-        mm->vmas = cur->next;
-
+    carve_range_locked(mm, addr, end);
     irq_spin_unlock(&mm->lock);
-    kfree(cur);
 }
 
 /*
@@ -477,11 +565,12 @@ virt_addr_t vm_map_region_at(struct vm_space *mm, virt_addr_t addr,
 
     irq_spin_lock(&mm->lock);
 
-    struct vma *prev;
-    if (!check_fixed_locked(mm, addr, span, &prev)) {
-        irq_spin_unlock(&mm->lock);
-        return 0;
-    }
+    /* Same clobber-instead-of-refuse handling as vm_allocate_region_at()
+     * above. */
+    carve_range_locked(mm, addr, addr + span);
+
+    struct vma *prev = NULL;
+    check_fixed_locked(mm, addr, span, &prev);
     struct vma *cur = prev ? prev->next : mm->vmas;
 
     uint64_t pflags = arch_translate_vm_flags(flags);

@@ -92,11 +92,13 @@ static void test_framebuffer_device(void) {
 /*
  * MAP_FIXED (kernel/mm/uvm.c's vm_allocate_region_at()/vm_map_region_at(),
  * dynamic-linking groundwork stage 2 — stage 1 was the auxiliary
- * vector). Placement at a caller-chosen address is real now, but real
- * MAP_FIXED's "silently discard whatever already overlaps" behavior
- * isn't: this version requires the target range to already be
- * completely free, and fails instead of clobbering something a
- * caller might not have expected to lose.
+ * vector). Placement at a caller-chosen address is real, and so now is
+ * real MAP_FIXED's "silently discard whatever already overlaps"
+ * behavior: carve_range_locked() (kernel/mm/uvm.c) trims or splits
+ * whatever VMA(s) the target range overlaps rather than requiring the
+ * range to already be free. vm_free_region() (munmap()'s backend)
+ * shares that same primitive, so an ordinary munmap() of an arbitrary
+ * sub-range works now too, not just a whole VMA at its exact base.
  */
 static void test_map_fixed(void) {
     /* Address 0 (NULL) sits below this allocator's window
@@ -138,15 +140,62 @@ static void test_map_fixed(void) {
     bytes[0] = 0x5A;
     check("a write through a MAP_FIXED mapping reads back", bytes[0] == 0x5A);
 
-    /* A second MAP_FIXED request landing on the live mapping above
-     * must fail rather than silently clobber it — see this function's
-     * own header comment. */
-    void *overlap = mmap(fixed, 4096, PROT_READ,
+    /* A second MAP_FIXED request landing exactly on the live mapping
+     * above must now succeed and discard it — real Linux semantics,
+     * see this function's own header comment. A fresh, zeroed page
+     * where the 0x5A byte used to be is the actual proof: a bug that
+     * left the request "succeeding" without really replacing the old
+     * mapping (e.g. just returning the same address without doing
+     * anything) would still read back 0x5A. */
+    void *overlap = mmap(fixed, 4096, PROT_READ | PROT_WRITE,
                          MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    check("MAP_FIXED onto an already-mapped range fails (no clobber support yet)",
-          overlap == MAP_FAILED);
+    check("MAP_FIXED onto an already-mapped range now succeeds",
+          overlap == fixed);
+    check("...and the old mapping's contents are really gone",
+          overlap != MAP_FAILED && ((unsigned char *)overlap)[0] == 0);
 
     check("munmap() of the MAP_FIXED region succeeds", munmap(fixed, 4096) == 0);
+
+    /* The harder case: MAP_FIXED landing in the MIDDLE of a larger live
+     * VMA, which carve_range_locked() must split into a surviving head
+     * and a surviving tail rather than just deleting the whole thing.
+     * Three untouched pages, each given a distinct sentinel byte, then
+     * MAP_FIXED replaces only the middle one. */
+    size_t triple_len = 3 * 4096;
+    void *triple = mmap(NULL, triple_len, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("mmap() a 3-page region to test splitting", triple != MAP_FAILED);
+    if (triple == MAP_FAILED) return;
+
+    unsigned char *pages = triple;
+    pages[0 * 4096] = 0xAA;
+    pages[1 * 4096] = 0xBB;
+    pages[2 * 4096] = 0xCC;
+
+    void *middle = (unsigned char *)triple + 4096;
+    void *split = mmap(middle, 4096, PROT_READ | PROT_WRITE,
+                       MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("MAP_FIXED into the middle of a live VMA succeeds", split == middle);
+
+    check("the head page survives the split, untouched",
+          pages[0 * 4096] == 0xAA);
+    check("the middle page is a fresh, zeroed replacement",
+          pages[1 * 4096] == 0);
+    check("the tail page survives the split, untouched",
+          pages[2 * 4096] == 0xCC);
+
+    /* munmap() of just the (post-split) middle page exercises the same
+     * carve/split path from vm_free_region()'s side. */
+    check("munmap() of the middle page alone succeeds",
+          munmap(middle, 4096) == 0);
+    check("the head page still survives after that munmap()",
+          pages[0 * 4096] == 0xAA);
+    check("the tail page still survives after that munmap()",
+          pages[2 * 4096] == 0xCC);
+
+    check("munmap() of the head page succeeds", munmap(triple, 4096) == 0);
+    check("munmap() of the tail page succeeds",
+          munmap((unsigned char *)triple + 2 * 4096, 4096) == 0);
 }
 
 static void test_bad_arguments(void) {
