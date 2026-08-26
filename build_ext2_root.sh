@@ -25,6 +25,8 @@ mkdir -p "$ROOTFS_DIR/usr/local"
 # use the exact same ABI build.
 cp "usr/mlibc-sysroot/lib/ld.so" "$ROOTFS_DIR/lib/ld.so"
 cp "usr/mlibc-sysroot/lib/libc.so" "$ROOTFS_DIR/lib/libc.so"
+cp -P usr/mlibc-sysroot/lib/libreadline.so* "$ROOTFS_DIR/lib/" || true
+cp -P usr/mlibc-sysroot/lib/libhistory.so* "$ROOTFS_DIR/lib/" || true
 if compgen -G "$INITRD_DIR/lib/*.so" >/dev/null; then
     cp "$INITRD_DIR"/lib/*.so "$ROOTFS_DIR/opt/tests/"
 fi
