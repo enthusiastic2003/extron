@@ -56,6 +56,11 @@ long    file_readdir(struct proc *p, int fd, void *buffer, size_t size);
 int     file_info(struct proc *p, int fd, struct vfs_attr *attr);
 int     file_is_tty(struct proc *p, int fd);
 int     file_poll(struct proc *p, int fd, short events, short *revents);
+/* All pollable objects publish state changes through one scheduler channel.
+ * The current kernel is single-core, so a waiter can scan descriptors and
+ * enter this channel without an intervening producer running. */
+void    file_poll_notify(void);
+int     file_poll_wait_until(uint64_t deadline_tick);
 int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
 int     file_get_node(struct proc *p, int fd, struct vfs_node **out);
 

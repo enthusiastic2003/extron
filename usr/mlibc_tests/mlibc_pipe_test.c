@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -117,8 +118,26 @@ static void test_broken_pipe(void) {
         return;
 
     close(fds[0]);
-    check("write fails when a pipe has no readers", write(fds[1], "x", 1) < 0);
+    signal(SIGPIPE, SIG_IGN);
+    errno = 0;
+    check("ignored SIGPIPE leaves write() reporting EPIPE",
+          write(fds[1], "x", 1) == -1 && errno == EPIPE);
+    signal(SIGPIPE, SIG_DFL);
     close(fds[1]);
+
+    check("create pipe for default SIGPIPE action", pipe(fds) == 0);
+    pid_t child = fork();
+    if (child == 0) {
+        close(fds[0]);
+        write(fds[1], "x", 1);
+        _exit(99);
+    }
+    close(fds[0]);
+    close(fds[1]);
+    int status = 0;
+    check("default SIGPIPE terminates the writer",
+          child > 0 && waitpid(child, &status, 0) == child
+          && WIFSIGNALED(status) && WTERMSIG(status) == SIGPIPE);
 }
 
 int main(void) {

@@ -42,6 +42,22 @@ struct pipe_buffer {
 /* Placeholder for file_pipe()'s two-slot reservation below. Never
  * installed as a real descriptor and never dereferenced. */
 static struct open_file reserved_slot;
+static spinlock_t poll_wait_lock = SPINLOCK_INIT;
+static char poll_wait_channel;
+
+void file_poll_notify(void) {
+    wakeup(&poll_wait_channel);
+}
+
+int file_poll_wait_until(uint64_t deadline_tick) {
+    struct thread *t = my_thread();
+    irq_spin_lock(&poll_wait_lock);
+    t->sleep_until = deadline_tick;
+    sleep(&poll_wait_channel, &poll_wait_lock);
+    t->sleep_until = 0;
+    irq_spin_unlock(&poll_wait_lock);
+    return signal_pending_unblocked(t) ? -EINTR : 0;
+}
 
 static void file_retain(struct open_file *f) {
     irq_spin_lock(&f->lock);
@@ -67,6 +83,7 @@ static void file_release(struct open_file *f) {
         /* Readers need EOF when the final writer closes; writers need to
          * stop sleeping when the final reader disappears. */
         wakeup(pipe);
+        file_poll_notify();
         irq_spin_unlock(&pipe->lock);
         if (free_pipe)
             kfree(pipe);
@@ -229,7 +246,7 @@ int file_open(struct proc *p, const char *path, int flags, uint32_t mode) {
 }
 
 int file_pipe(struct proc *p, int fds[2], int flags) {
-    if (!p || !fds || (flags & ~O_CLOEXEC))
+    if (!p || !fds || (flags & ~(O_CLOEXEC | O_NONBLOCK)))
         return -EINVAL;
     int read_fd = free_descriptor_from(p, 0);
     if (read_fd < 0)
@@ -259,10 +276,12 @@ int file_pipe(struct proc *p, int fds[2], int flags) {
     reader->refs = 1;
     reader->kind = FILE_PIPE_READER;
     reader->object.pipe = pipe;
+    reader->flags = flags & O_NONBLOCK;
     writer->lock = (spinlock_t)SPINLOCK_INIT;
     writer->refs = 1;
     writer->kind = FILE_PIPE_WRITER;
     writer->object.pipe = pipe;
+    writer->flags = flags & O_NONBLOCK;
 
     p->files[read_fd] = reader;
     p->files[write_fd] = writer;
@@ -430,6 +449,7 @@ static long pipe_read(struct open_file *f, void *buffer, size_t count) {
     pipe->tail = (pipe->tail + count) % PIPE_CAPACITY;
     pipe->used -= count;
     wakeup(pipe);
+    file_poll_notify();
     irq_spin_unlock(&pipe->lock);
     return (long)count;
 }
@@ -438,6 +458,25 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
     struct pipe_buffer *pipe = f->object.pipe;
     size_t written = 0;
     irq_spin_lock(&pipe->lock);
+
+    /* POSIX requires every write no larger than PIPE_BUF to appear as one
+     * indivisible record with respect to other writers. Since this pipe's
+     * capacity is exactly PIPE_BUF, wait for the complete request to fit
+     * before copying any of it. */
+    if (count <= PIPE_CAPACITY) {
+        while (PIPE_CAPACITY - pipe->used < count && pipe->readers) {
+            if (f->flags & O_NONBLOCK) {
+                irq_spin_unlock(&pipe->lock);
+                return -EAGAIN;
+            }
+            sleep(pipe, &pipe->lock);
+            if (signal_pending_unblocked(my_thread())) {
+                irq_spin_unlock(&pipe->lock);
+                return -EINTR;
+            }
+        }
+    }
+
     while (written < count) {
         while (pipe->used == PIPE_CAPACITY && pipe->readers) {
             if (f->flags & O_NONBLOCK) {
@@ -452,6 +491,8 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
         }
         if (!pipe->readers) {
             irq_spin_unlock(&pipe->lock);
+            if (!written)
+                signal_send(my_proc(), 13 /* SIGPIPE */);
             return written ? (long)written : -EPIPE;
         }
         size_t available = PIPE_CAPACITY - pipe->used;
@@ -467,6 +508,7 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
         pipe->used += chunk;
         written += chunk;
         wakeup(pipe);
+        file_poll_notify();
     }
     irq_spin_unlock(&pipe->lock);
     return (long)written;
@@ -485,7 +527,18 @@ long file_read(struct proc *p, int fd, void *buffer, size_t count) {
         irq_spin_unlock(&f->lock);
         return -EBADF;
     }
-    long result = vfs_read(f->object.node, f->offset, buffer, count);
+    struct tty *tty = devfs_get_tty(f->object.node);
+    long result;
+    if (tty) {
+        result = tty_read_flags(tty, buffer, count,
+                                !!(f->flags & O_NONBLOCK));
+    } else if ((f->flags & O_NONBLOCK)
+            && pty_get_index(f->object.node) >= 0
+            && !pty_master_read_ready(f->object.node)) {
+        result = -EAGAIN;
+    } else {
+        result = vfs_read(f->object.node, f->offset, buffer, count);
+    }
     if (result > 0) f->offset += (size_t)result;
     irq_spin_unlock(&f->lock);
     return result;
@@ -512,7 +565,17 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
         }
         f->offset = attr.size;
     }
-    long result = vfs_write(f->object.node, f->offset, buffer, count);
+    struct tty *tty = devfs_get_tty(f->object.node);
+    long result;
+    if (tty) {
+        result = tty_write_flags(tty, buffer, count,
+                                 !!(f->flags & O_NONBLOCK));
+    } else if (pty_get_index(f->object.node) >= 0) {
+        result = pty_master_write_flags(f->object.node, buffer, count,
+                                        !!(f->flags & O_NONBLOCK));
+    } else {
+        result = vfs_write(f->object.node, f->offset, buffer, count);
+    }
     if (result > 0) {
         f->offset += (size_t)result;
         struct vfs_cred cred;
@@ -589,7 +652,12 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
     if (t) {
         if ((events & POLLIN) && tty_input_ready(t))
             *revents |= POLLIN;
-        if (events & POLLOUT)
+        if ((events & POLLOUT) && tty_output_ready(t))
+            *revents |= POLLOUT;
+    } else if (f->kind == FILE_VNODE && pty_get_index(f->object.node) >= 0) {
+        if ((events & POLLIN) && pty_master_read_ready(f->object.node))
+            *revents |= POLLIN;
+        if ((events & POLLOUT) && pty_master_write_ready(f->object.node))
             *revents |= POLLOUT;
     } else if (f->kind == FILE_VNODE) {
         if (events & POLLOUT)

@@ -97,6 +97,7 @@
 #define SYS_PAUSE       72
 #define SYS_MPROTECT    73
 #define SYS_MSYNC       74
+#define SYS_PPOLL       75
 
 
 using main_fn = int (*)(int, char **);
@@ -935,10 +936,19 @@ int sys_isatty(int fd) {
 #include <poll.h>
 
 namespace mlibc {
+struct ppoll_request {
+    uint64_t fds;
+    uint64_t count;
+    int64_t timeout_ns;
+    uint64_t signal_mask;
+    uint64_t has_signal_mask;
+};
+
 int sys_pselect(int num_fds, fd_set *read_set, fd_set *write_set,
 		fd_set *except_set, const struct timespec *timeout, const sigset_t *sigmask, int *num_events) {
-    (void)sigmask;
-	struct pollfd fds[num_fds];
+	if (num_fds < 0 || num_fds > FD_SETSIZE)
+		return EINVAL;
+	struct pollfd fds[num_fds ? num_fds : 1];
 	nfds_t count = 0;
 	for (int i = 0; i < num_fds; i++) {
 		short events = 0;
@@ -952,12 +962,26 @@ int sys_pselect(int num_fds, fd_set *read_set, fd_set *write_set,
 			count++;
 		}
 	}
-	int timeout_ms = -1;
+	int64_t timeout_ns = -1;
 	if (timeout) {
-		timeout_ms = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
+		if (timeout->tv_sec < 0 || timeout->tv_nsec < 0
+				|| timeout->tv_nsec >= 1000000000L
+				|| (uint64_t)timeout->tv_sec
+				   > (uint64_t)(INT64_MAX - timeout->tv_nsec) / 1000000000ULL)
+			return EINVAL;
+		timeout_ns = (int64_t)timeout->tv_sec * 1000000000LL
+			+ timeout->tv_nsec;
 	}
-	int ret = sys_poll(fds, count, timeout_ms, num_events);
-	if (ret) return ret;
+	ppoll_request request{
+		reinterpret_cast<uint64_t>(fds), count, timeout_ns,
+		sigmask ? sigmask->sig[0] : 0, sigmask ? 1ULL : 0ULL
+	};
+	long result = cp_syscall3(SYS_PPOLL, reinterpret_cast<long>(&request), 0, 0);
+	if (result < 0)
+		return (int)-result;
+	for (nfds_t i = 0; i < count; i++)
+		if (fds[i].revents & POLLNVAL)
+			return EBADF;
 
 	if (read_set) FD_ZERO(read_set);
 	if (write_set) FD_ZERO(write_set);
@@ -974,6 +998,7 @@ int sys_pselect(int num_fds, fd_set *read_set, fd_set *write_set,
 			if (except_set) FD_SET(fds[i].fd, except_set);
 		}
 	}
+	*num_events = (int)result;
 	return 0;
 }
 }

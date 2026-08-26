@@ -45,7 +45,8 @@ struct tty {
     uint32_t in_tail;
 
     /* Callbacks */
-    void (*write_out)(struct tty *t, const char *buf, size_t count);
+    long (*write_out)(struct tty *t, const char *buf, size_t count,
+                      bool nonblock);
     void *private_data;
 
     /* Canonical line editor state */
@@ -61,10 +62,13 @@ extern struct tty tty_table[MAX_TTYS];
 
 void tty_init(void);
 void tty_push_input(struct tty *t, char c);
+long tty_push_input_flags(struct tty *t, char c, bool nonblock);
 
 bool tty_handle_input_byte(struct tty *t, uint8_t byte);
 long tty_read(struct tty *t, void *buffer, size_t count);
 long tty_write(struct tty *t, const void *buffer, size_t count);
+long tty_read_flags(struct tty *t, void *buffer, size_t count, bool nonblock);
+long tty_write_flags(struct tty *t, const void *buffer, size_t count, bool nonblock);
 void tty_get_termios(struct tty *t, struct tty_termios *out);
 void tty_set_termios(struct tty *t, const struct tty_termios *termios, int flush_input);
 void tty_get_winsize(struct tty *t, struct tty_winsize *out);
@@ -75,5 +79,7 @@ void tty_set_foreground_pgid(struct tty *t, uint64_t pgid);
 
 void tty_flush_input(struct tty *t);
 int tty_input_ready(struct tty *t);
+int tty_input_space(struct tty *t);
+int tty_output_ready(struct tty *t);
 int tty_wait_for_input(struct tty *t, int timeout_ms);
 #endif

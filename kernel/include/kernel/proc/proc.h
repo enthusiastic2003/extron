@@ -102,6 +102,8 @@ struct thread {
     enum thread_state   stop_saved_state;    /* state to restore after process continuation */
     virt_addr_t         exit_word;           /* userspace completion word, set to 1 at exit */
     uint64_t            signal_mask;         /* blocked signals, bit (signo - 1) */
+    bool                wait_mask_restore;   /* pselect mask is live until delivery */
+    uint64_t            wait_original_mask;  /* mask restored by signal return */
     uint64_t            signal_pending;      /* thread-directed pending signals */
     struct signal_info  signal_info[SIGNAL_MAX + 1];
     struct thread       *next_in_process;

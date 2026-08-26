@@ -38,8 +38,11 @@ struct tty tty_table[MAX_TTYS];
 #include <kernel/drivers/serial.h>
 #include <kernel/klibc/string.h>
 #include <kernel/proc/signal.h>
+#include <kernel/fs/file.h>
+#include <kernel/drivers/pty.h>
 #include <arch/irq_spinlock.h>
 #include <stdbool.h>
+#include <kernel/errno.h>
 
 /* Linux-compatible values used by Extron's mlibc ABI. */
 #define VINTR 0
@@ -63,14 +66,17 @@ struct tty tty_table[MAX_TTYS];
 #define CLOCAL 0004000
 #define ICANON 0000002
 #define ISIG   0000001
-static void serial_write_out(struct tty *t, const char *buf, size_t count) {
+static long serial_write_out(struct tty *t, const char *buf, size_t count,
+                             bool nonblock) {
     (void)t;
+    (void)nonblock;
     for (size_t i = 0; i < count; i++) {
         char byte = buf[i];
         if ((t->termios.oflag & (OPOST | ONLCR)) == (OPOST | ONLCR) && byte == '\n')
             serial_putc('\r');
         serial_putc(byte);
     }
+    return (long)count;
 }
 
 void tty_init(void) {
@@ -110,19 +116,37 @@ void tty_init(void) {
 
 static void emit_locked(struct tty *t, char byte) {
     if (t->write_out) {
-        t->write_out(t, &byte, 1);
+        (void)t->write_out(t, &byte, 1, true);
     }
 }
 
 void tty_push_input(struct tty *t, char c) {
+    (void)tty_push_input_flags(t, c, true);
+}
+
+long tty_push_input_flags(struct tty *t, char c, bool nonblock) {
     irq_spin_lock(&t->lock);
-    uint32_t next = (t->in_head + 1) % TTY_BUFFER_SIZE;
-    if (next != t->in_tail) {
-        t->in_buf[t->in_head] = c;
-        t->in_head = next;
+    for (;;) {
+        uint32_t next = (t->in_head + 1) % TTY_BUFFER_SIZE;
+        if (next != t->in_tail) {
+            t->in_buf[t->in_head] = c;
+            t->in_head = next;
+            break;
+        }
+        if (nonblock) {
+            irq_spin_unlock(&t->lock);
+            return -EAGAIN;
+        }
+        sleep(&t->in_buf, &t->lock);
+        if (signal_pending_unblocked(my_thread())) {
+            irq_spin_unlock(&t->lock);
+            return -EINTR;
+        }
     }
     irq_spin_unlock(&t->lock);
     wakeup(&t->in_buf);
+    file_poll_notify();
+    return 1;
 }
 
 static int tty_getc_interruptible(struct tty *t, char *out) {
@@ -137,6 +161,8 @@ static int tty_getc_interruptible(struct tty *t, char *out) {
     *out = t->in_buf[t->in_tail];
     t->in_tail = (t->in_tail + 1) % TTY_BUFFER_SIZE;
     irq_spin_unlock(&t->lock);
+    wakeup(&t->in_buf);
+    file_poll_notify();
     return 1;
 }
 
@@ -149,6 +175,8 @@ static int tty_try_getc(struct tty *t, char *out) {
     *out = t->in_buf[t->in_tail];
     t->in_tail = (t->in_tail + 1) % TTY_BUFFER_SIZE;
     irq_spin_unlock(&t->lock);
+    wakeup(&t->in_buf);
+    file_poll_notify();
     return 1;
 }
 
@@ -273,11 +301,38 @@ static int fill_canonical_line(struct tty *t) {
 }
 
 long tty_read(struct tty *t, void *buffer, size_t count) {
+    return tty_read_flags(t, buffer, count, false);
+}
+
+static long read_noncanonical_nonblock(struct tty *t, char *buffer,
+                                       size_t count) {
+    size_t received = 0;
+    char raw;
+    while (received < count && tty_try_getc(t, &raw)) {
+        irq_spin_lock(&t->lock);
+        bool discard;
+        char byte = map_input_locked(t, raw, &discard);
+        if (!discard) {
+            if (t->termios.lflag & ECHO) emit_locked(t, byte);
+            buffer[received++] = byte;
+        }
+        irq_spin_unlock(&t->lock);
+    }
+    return received ? (long)received : -EAGAIN;
+}
+
+long tty_read_flags(struct tty *t, void *buffer, size_t count, bool nonblock) {
     if (!count) return 0;
     irq_spin_lock(&t->lock);
     bool canonical = t->termios.lflag & ICANON;
     irq_spin_unlock(&t->lock);
-    if (!canonical) return read_noncanonical(t, buffer, count);
+    if (!canonical)
+        return nonblock
+            ? read_noncanonical_nonblock(t, buffer, count)
+            : read_noncanonical(t, buffer, count);
+
+    if (nonblock && !tty_input_ready(t))
+        return -EAGAIN;
 
     irq_spin_lock(&t->lock);
     bool ready = t->canonical_ready;
@@ -307,10 +362,16 @@ long tty_read(struct tty *t, void *buffer, size_t count) {
 }
 
 long tty_write(struct tty *t, const void *buffer, size_t count) {
+    return tty_write_flags(t, buffer, count, false);
+}
+
+long tty_write_flags(struct tty *t, const void *buffer, size_t count,
+                     bool nonblock) {
     irq_spin_lock(&t->lock);
-    if (t->write_out) t->write_out(t, buffer, count);
+    long result = t->write_out
+        ? t->write_out(t, buffer, count, nonblock) : (long)count;
     irq_spin_unlock(&t->lock);
-    return (long)count;
+    return result;
 }
 
 void tty_get_termios(struct tty *t, struct tty_termios *out) {
@@ -328,6 +389,7 @@ void tty_set_termios(struct tty *t, const struct tty_termios *termios, int flush
         t->in_tail = t->in_head;
     }
     irq_spin_unlock(&t->lock);
+    file_poll_notify();
 }
 
 void tty_get_winsize(struct tty *t, struct tty_winsize *out) {
@@ -357,7 +419,42 @@ void tty_flush_input(struct tty *t) {
 
 int tty_input_ready(struct tty *t) {
     irq_spin_lock(&t->lock);
-    int ready = t->in_head != t->in_tail;
+    int ready = t->canonical_ready;
+    if (!ready && !(t->termios.lflag & ICANON))
+        ready = t->in_head != t->in_tail;
+    if (!ready && (t->termios.lflag & ICANON)) {
+        size_t length = t->canonical_length;
+        for (uint32_t pos = t->in_tail; pos != t->in_head;
+             pos = (pos + 1) % TTY_BUFFER_SIZE) {
+            bool discard;
+            char byte = map_input_locked(t, t->in_buf[pos], &discard);
+            if (discard) continue;
+            if ((uint8_t)byte == t->termios.cc[VERASE]) {
+                if (length) length--;
+                continue;
+            }
+            if ((uint8_t)byte == t->termios.cc[VKILL]) {
+                length = 0;
+                continue;
+            }
+            if ((uint8_t)byte == t->termios.cc[VEOF]
+                    || byte == '\n' || ++length >= TTY_CANON_MAX) {
+                ready = 1;
+                break;
+            }
+        }
+    }
+    irq_spin_unlock(&t->lock);
+    return ready;
+}
+
+int tty_output_ready(struct tty *t) {
+    return !t->private_data || pty_slave_write_ready(t);
+}
+
+int tty_input_space(struct tty *t) {
+    irq_spin_lock(&t->lock);
+    int ready = (t->in_head + 1) % TTY_BUFFER_SIZE != t->in_tail;
     irq_spin_unlock(&t->lock);
     return ready;
 }

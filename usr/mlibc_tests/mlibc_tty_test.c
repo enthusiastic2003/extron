@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <poll.h>
+#include <fcntl.h>
 
 static int fail(const char *what) {
     printf("TTY_TEST_FAIL: %s: %s\n", what, strerror(errno));
@@ -58,6 +59,20 @@ int main(void) {
         return 1;
     }
 
+    int original_flags = fcntl(STDIN_FILENO, F_GETFL);
+    if (original_flags < 0
+            || fcntl(STDIN_FILENO, F_SETFL, original_flags | O_NONBLOCK) != 0)
+        return fail("enable O_NONBLOCK");
+    char no_input;
+    errno = 0;
+    if (read(STDIN_FILENO, &no_input, 1) != -1 || errno != EAGAIN) {
+        puts("TTY_TEST_FAIL: empty nonblocking tty did not report EAGAIN");
+        fcntl(STDIN_FILENO, F_SETFL, original_flags);
+        return 1;
+    }
+    if (fcntl(STDIN_FILENO, F_SETFL, original_flags) != 0)
+        return fail("restore descriptor flags");
+
     struct termios changed = saved;
     changed.c_lflag ^= ECHO | ICANON;
     changed.c_cc[VMIN] = 1;
@@ -78,7 +93,7 @@ int main(void) {
     if (tcsetattr(STDIN_FILENO, TCSANOW, &saved) != 0)
         return fail("tcsetattr restore");
 
-    printf("TTY_TEST_PASS: %ux%u termios + poll\n",
+    printf("TTY_TEST_PASS: %ux%u termios + poll + nonblock\n",
            (unsigned)size.ws_col, (unsigned)size.ws_row);
     return 0;
 }

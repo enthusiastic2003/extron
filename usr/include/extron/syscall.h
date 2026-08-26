@@ -76,6 +76,7 @@
 #define SYS_FUTIMENS    65
 #define SYS_FCHDIR      66
 #define SYS_REBOOT      71
+#define SYS_PPOLL       75
 
 struct extron_thread_create_args {
     uintptr_t entry;

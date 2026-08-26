@@ -394,6 +394,8 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
                           struct aarch64_frame *f) {
     (void)f;
     struct proc *p = my_proc();
+    if (!p || fd >= PROC_MAX_FDS || !p->files[fd])
+        return (uint64_t)-EBADF;
     struct open_file *f_ioctl = p->files[fd];
     if (f_ioctl && f_ioctl->kind == FILE_VNODE && pty_get_index(f_ioctl->object.node) >= 0) {
         if (request == 0x80045430) { /* TIOCGPTN */
@@ -466,34 +468,95 @@ static int poll_scan(struct extron_pollfd *fds, size_t count) {
     return ready;
 }
 
+static long poll_wait(struct extron_pollfd *fds, size_t count,
+                      int64_t timeout_ns) {
+    if (timeout_ns < -1)
+        return -EINVAL;
+
+    uint64_t deadline = 0;
+    if (timeout_ns > 0) {
+        uint64_t hz = timer_ticks_per_second();
+        uint64_t nanos = (uint64_t)timeout_ns;
+        uint64_t ticks = nanos / 1000000000ULL * hz;
+        uint64_t remainder = nanos % 1000000000ULL;
+        ticks += (remainder * hz + 999999999ULL) / 1000000000ULL;
+        if (!ticks) ticks = 1;
+        uint64_t now = timer_ticks();
+        deadline = UINT64_MAX - now < ticks ? UINT64_MAX : now + ticks;
+    }
+
+    for (;;) {
+        int ready = poll_scan(fds, count);
+        if (ready || timeout_ns == 0)
+            return ready;
+        if (signal_pending_unblocked(my_thread()))
+            return -EINTR;
+        if (deadline && timer_ticks() >= deadline)
+            return 0;
+        int result = file_poll_wait_until(deadline);
+        if (result < 0)
+            return result;
+    }
+}
+
 static uint64_t sys_poll(uint64_t fds_addr, uint64_t count, uint64_t timeout_raw,
                          struct aarch64_frame *f) {
     (void)f;
-    if (count > 64 || count > (uint64_t)-1 / sizeof(struct extron_pollfd))
-        return (uint64_t)-1;
+    if (count > PROC_MAX_FDS
+            || count > (uint64_t)-1 / sizeof(struct extron_pollfd))
+        return (uint64_t)-EINVAL;
     size_t bytes = (size_t)count * sizeof(struct extron_pollfd);
     if (!user_buffer_ok(my_proc(), fds_addr, bytes))
-        return (uint64_t)-1;
+        return (uint64_t)-EFAULT;
     struct extron_pollfd *fds = (struct extron_pollfd *)fds_addr;
-    int ready = poll_scan(fds, count);
     int timeout = (int)timeout_raw;
-    if (ready || timeout == 0)
-        return (uint64_t)ready;
+    int64_t timeout_ns = timeout < 0 ? -1 : (int64_t)timeout * 1000000LL;
+    return (uint64_t)poll_wait(fds, (size_t)count, timeout_ns);
+}
 
-    struct tty *wait_tty = NULL;
-    for (size_t i = 0; i < count; i++) {
-        struct tty *t = file_get_tty(my_proc(), fds[i].fd);
-        if (t && (fds[i].events & POLLIN)) {
-            wait_tty = t;
-            break;
-        }
+struct extron_ppoll_request {
+    uint64_t fds;
+    uint64_t count;
+    int64_t timeout_ns;       /* -1 means infinite */
+    uint64_t signal_mask;
+    uint64_t has_signal_mask;
+};
+
+static uint64_t sys_ppoll(uint64_t request_addr, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_addr, sizeof(struct extron_ppoll_request)))
+        return (uint64_t)-EFAULT;
+    struct extron_ppoll_request request =
+        *(const struct extron_ppoll_request *)request_addr;
+    if (request.count > PROC_MAX_FDS
+            || request.count > (uint64_t)-1 / sizeof(struct extron_pollfd))
+        return (uint64_t)-EINVAL;
+    size_t bytes = (size_t)request.count * sizeof(struct extron_pollfd);
+    if (!user_buffer_ok(p, request.fds, bytes))
+        return (uint64_t)-EFAULT;
+    if (request.timeout_ns < -1)
+        return (uint64_t)-EINVAL;
+
+    struct thread *t = my_thread();
+    uint64_t old_mask = t->signal_mask;
+    if (request.has_signal_mask
+            && signal_mask_update(t, 2, &request.signal_mask, &old_mask) != 0)
+        return (uint64_t)-EINVAL;
+
+    long result = poll_wait((struct extron_pollfd *)request.fds,
+                            (size_t)request.count, request.timeout_ns);
+    if (request.has_signal_mask && result == -EINTR) {
+        /* exception_dispatch() delivers the pending signal immediately
+         * after this syscall. deliver() records old_mask in its frame so
+         * sigreturn restores it atomically after the handler. */
+        t->wait_original_mask = old_mask;
+        t->wait_mask_restore = true;
+    } else if (request.has_signal_mask) {
+        t->signal_mask = old_mask;
     }
-    if (!wait_tty)
-        return 0;
-    tty_wait_for_input(wait_tty, timeout);
-    if (signal_pending_unblocked(my_thread()))
-        return (uint64_t)-4; /* EINTR */
-    return (uint64_t)poll_scan(fds, count);
+    return (uint64_t)result;
 }
 
 #define O_CLOEXEC 02000000
@@ -2128,6 +2191,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_MUNMAP] = sys_munmap,
     [SYS_MPROTECT] = sys_mprotect,
     [SYS_MSYNC] = sys_msync,
+    [SYS_PPOLL] = sys_ppoll,
     [SYS_REBOOT] = sys_reboot,
     [SYS_PAUSE]  = sys_pause,
 };

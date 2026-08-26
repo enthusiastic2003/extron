@@ -439,11 +439,18 @@ static bool deliver(struct aarch64_frame *f, int signo,
                     const struct signal_info *info, bool synchronous) {
     struct proc *p = my_proc();
     struct thread *t = my_thread();
+    uint64_t return_mask = t->signal_mask;
+    if (t->wait_mask_restore) {
+        return_mask = t->wait_original_mask;
+        t->wait_mask_restore = false;
+    }
     if (action.handler == SIGNAL_IGN) {
+        t->signal_mask = return_mask;
         if (!synchronous) return true;
         proc_exit_current(-signo);
     }
     if (action.handler == SIGNAL_DFL) {
+        t->signal_mask = return_mask;
         if (!synchronous && default_ignored(signo)) return true;
         if (!synchronous && default_stops(signo)) {
             proc_stop_current(signo);
@@ -458,7 +465,10 @@ static bool deliver(struct aarch64_frame *f, int signo,
     memset(frame, 0, sizeof(*frame));
     frame->magic = SIGNAL_FRAME_MAGIC;
     fill_siginfo(&frame->info, info);
-    fill_ucontext(frame, f, t->signal_mask);
+    /* pselect() keeps its temporary mask installed until this exact point.
+     * The handler runs under that mask, while sigreturn restores the mask
+     * that was active before pselect began waiting. */
+    fill_ucontext(frame, f, return_mask);
     t->signal_mask |= action.mask;
     if (!(action.flags & SIGNAL_SA_NODEFER)) t->signal_mask |= signal_bit(signo);
     if (action.flags & SIGNAL_SA_RESETHAND)
