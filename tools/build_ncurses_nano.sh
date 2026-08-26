@@ -4,8 +4,8 @@ set -euo pipefail
 SYSROOT="$(pwd)/usr/mlibc-sysroot"
 export CC=/home/sirjanh/extron-toolkit/toolchain/bin/aarch64-extron-gcc
 export CFLAGS="--sysroot=$SYSROOT -O2"
-# -nostartfiles to avoid linking crt0.o into shared libraries due to toolchain spec bug
-export LDFLAGS="--sysroot=$SYSROOT -L$SYSROOT/lib -Wl,--dynamic-linker=/lib/ld.so -nostartfiles"
+# No need for -nostartfiles or -dynamic-linker anymore, the toolchain specs handle it!
+export LDFLAGS="--sysroot=$SYSROOT -L$SYSROOT/lib"
 
 echo "=== Building ncurses (shared) ==="
 cd third_party/ncurses-6.4
@@ -19,8 +19,7 @@ make -j8 > /dev/null
 cd ../..
 
 echo "=== Building nano ==="
-# nano is an executable, so we MUST link with standard start files. We remove -nostartfiles here.
-export LDFLAGS="--sysroot=$SYSROOT -L$SYSROOT/lib -Wl,--dynamic-linker=/lib/ld.so -L$(pwd)/third_party/ncurses-6.4/lib -pie"
+export LDFLAGS="--sysroot=$SYSROOT -L$SYSROOT/lib -L$(pwd)/third_party/ncurses-6.4/lib -pie"
 export CFLAGS="--sysroot=$SYSROOT -O2 -I$(pwd)/third_party/ncurses-6.4/include -I$(pwd)/third_party/ncurses-6.4/include/ncurses -fPIE"
 
 cd third_party/nano-7.2

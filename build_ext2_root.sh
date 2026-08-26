@@ -39,7 +39,6 @@ fi
 
 if [ -f "$INITRD_DIR/nano" ]; then
     cp "$INITRD_DIR/nano" "$ROOTFS_DIR/bin/nano"
-cp "$INITRD_DIR/test_terminfo" "$ROOTFS_DIR/bin/test_terminfo"
 fi
 
 # Distribute Doom
