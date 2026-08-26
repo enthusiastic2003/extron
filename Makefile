@@ -140,13 +140,13 @@ $(BUILD)/initrd/%.elf: usr/%.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
+		 $< -o $@ -O1
 
 $(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
+		 $< -o $@ -O1
 
 # First real dynamic-linker fixture. The explicit -L must precede the
 # toolchain's built-in static-only sysroot, or its libc.a wins before this
@@ -168,7 +168,7 @@ $(BUILD)/initrd/tests/mlibc_dynamic_test.elf: usr/mlibc_tests/mlibc_dynamic_test
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" \
 		-L"$(abspath $(BUILD))/initrd/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so,-rpath-link,$(abspath $(BUILD))/initrd/lib,-rpath=/opt/tests \
+		-Wl,-rpath-link,$(abspath $(BUILD))/initrd/lib,-rpath=/opt/tests \
 		$< -lextron_rtld_test -o $@ -O1
 
 # Late-loading fixture: deliberately do not link libextron_rtld_test.so here.
@@ -178,13 +178,13 @@ $(BUILD)/initrd/tests/mlibc_dlopen_test.elf: usr/mlibc_tests/mlibc_dlopen_test.c
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
+		 $< -o $@ -O1
 
 $(BUILD)/initrd/tests/mlibc_dlthread_test.elf: usr/mlibc_tests/mlibc_dlthread_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
+		 $< -o $@ -O1
 
 # Full-RELRO fixture. Its child deliberately writes into PT_GNU_RELRO and
 # must receive SIGSEGV while the parent and shell survive.
@@ -192,7 +192,7 @@ $(BUILD)/initrd/tests/mlibc_relro_test.elf: usr/mlibc_tests/mlibc_relro_test.c $
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so,-z,relro,-z,now $< -o $@ -O1
+		-z,relro,-z,now $< -o $@ -O1
 
 
 
@@ -212,7 +212,7 @@ $(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $(DOOM_OBJ) \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so -o $@ -O2
+		 -o $@ -O2
 
 $(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	tools/configure_busybox.sh
