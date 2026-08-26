@@ -128,7 +128,7 @@ static uint64_t hw_attrs_from_flags(uint64_t flags) {
         attrs |= PTE_SH_INNER | PTE_ATTR_IDX(MAIR_IDX_NORMAL);
     }
     if (!(flags & PAGE_WRITE)) attrs |= PTE_AP_RO;
-    if (flags & PAGE_USER) attrs |= PTE_AP_EL0;
+    if ((flags & PAGE_USER) && !(flags & PAGE_NO_ACCESS)) attrs |= PTE_AP_EL0;
     if (flags & PAGE_NX) attrs |= PTE_UXN | PTE_PXN;
     return attrs;
 }
@@ -389,6 +389,9 @@ uint64_t arch_translate_vm_flags(int vm_flags) {
     uint64_t hw_flags = 0;
     if (vm_flags & VM_WRITE) hw_flags |= PAGE_WRITE;
     if (vm_flags & VM_USER) hw_flags |= PAGE_USER;
+    if ((vm_flags & VM_USER)
+            && !(vm_flags & (VM_READ | VM_WRITE | VM_EXEC)))
+        hw_flags |= PAGE_NO_ACCESS;
     if (!(vm_flags & VM_EXEC)) hw_flags |= PAGE_NX;
     if (vm_flags & VM_NOCACHE) hw_flags |= PAGE_NORMAL_NC;
     return hw_flags;

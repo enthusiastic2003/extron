@@ -29,12 +29,18 @@
 struct vma {
     virt_addr_t base;   /* page-aligned */
     size_t      size;   /* page-aligned */
+    int         flags;  /* VM_* protection and memory-type flags */
     /* False when this region maps memory the process does NOT own —
      * vm_map_region() views of the initrd, and later the framebuffer.
      * Tearing such a region down must unmap it and stop there: handing
      * initrd pages back to the PMM would put live, shared, still-mapped
      * memory into the free pool to be handed out again. */
     bool        owns_pages;
+    /* Non-NULL for reference-counted shared anonymous/file mappings.
+     * backing_offset is the byte offset of this VMA's first page inside
+     * that object; it keeps partial unmap/mprotect splits correct. */
+    struct vm_backing *backing;
+    size_t      backing_offset;
     struct vma  *next;  /* sorted ascending by base */
 };
 
@@ -93,6 +99,31 @@ virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
  * malformed (this predates real error returns from the mmap ABI and
  * still doesn't have one). */
 void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size);
+
+/* Change protection on a completely mapped range. Returns a negative
+ * errno; unlike the old syscall-local loop this also updates/splits the
+ * VMA description, so fork(), later mprotect(), and unmap agree. */
+int vm_protect_region(struct vm_space *mm, virt_addr_t addr, size_t size,
+                      int flags);
+
+/* Eager shared mappings. Anonymous mappings share their physical pages
+ * across fork(); file mappings additionally share pages with every other
+ * mapping of the same vnode/page offset and write back through VFS. */
+struct vfs_node;
+virt_addr_t vm_allocate_shared_region(struct vm_space *mm, virt_addr_t addr,
+                                      size_t size, int flags, bool fixed);
+virt_addr_t vm_map_file_shared(struct vm_space *mm, virt_addr_t addr,
+                               size_t size, int flags, bool fixed,
+                               struct vfs_node *node, size_t file_offset,
+                               size_t file_bytes, bool writable_allowed,
+                               int *error);
+int vm_sync_region(struct vm_space *mm, virt_addr_t addr, size_t size);
+/* VFS coherence hooks: overlay dirty resident shared pages after a normal
+ * read, and mirror a successful normal write into those pages. */
+void vm_shared_file_read_overlay(struct vfs_node *node, size_t offset,
+                                 void *buffer, size_t size);
+void vm_shared_file_written(struct vfs_node *node, size_t offset,
+                            const void *buffer, size_t size);
 
 /* Map EXISTING physical memory into the process at a free VA, rather
  * than allocating fresh pages for it — a read-only window onto the

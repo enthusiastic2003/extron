@@ -639,6 +639,13 @@ static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3,
 #define MAP_PRIVATE    0x02
 #define MAP_FIXED      0x10
 #define MAP_ANONYMOUS  0x20
+#define O_ACCMODE      03
+#define O_WRONLY       01
+#define O_RDWR         02
+#define O_PATH         010000000
+#define MS_ASYNC       0x01
+#define MS_INVALIDATE  0x02
+#define MS_SYNC        0x04
 
 /* mmap()'s six real arguments don't fit the three-register syscall
  * convention every other syscall here uses — bundled into one struct
@@ -659,13 +666,10 @@ struct mmap_request {
  * zeroed pages — the same call SYS_ANON_ALLOC already makes, just
  * reachable through the real mmap() ABI now.
  *
- * Otherwise: the fd's vfs_node must offer memory to map at all
- * (ops->mmap — ramfs files, console, null, and zero don't), which then
- * goes through vm_map_region()/vm_map_region_at() exactly like the
- * framebuffer and initrd views already do — existing physical memory,
- * not fresh pages, so unmapping it later must not hand it back to the
- * PMM (vm_map_region() already records that correctly via
- * owns_pages).
+ * Regular files use eager VM pages: MAP_PRIVATE receives a copy while
+ * MAP_SHARED uses the VM-level vnode/page cache and VFS writeback. Device
+ * nodes continue to use ops->mmap to expose existing physical memory (the
+ * framebuffer), whose pages must only be unmapped, never returned to PMM.
  *
  * MAP_FIXED requires the target range to be page-aligned; whatever
  * already occupies [hint, hint+size) is silently discarded first, real
@@ -683,7 +687,13 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
         return (uint64_t)-EFAULT;
     struct mmap_request req = *(struct mmap_request *)request_addr;
 
-    if (!(req.flags & (MAP_SHARED | MAP_PRIVATE)))
+    const int known_flags = MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS;
+    if ((req.flags & ~known_flags) || (req.prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)))
+        return (uint64_t)-EINVAL;
+    int sharing = req.flags & (MAP_SHARED | MAP_PRIVATE);
+    if (sharing != MAP_SHARED && sharing != MAP_PRIVATE)
+        return (uint64_t)-EINVAL;
+    if (!req.size || req.size > (uint64_t)-1 - (PAGE_SIZE - 1))
         return (uint64_t)-EINVAL;
     bool fixed = req.flags & MAP_FIXED;
     if (fixed && (req.hint & (PAGE_SIZE - 1)))
@@ -695,23 +705,60 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
     if (req.prot & PROT_EXEC)  vm_flags |= VM_EXEC;
 
     if (req.flags & MAP_ANONYMOUS) {
-        virt_addr_t va = fixed
-            ? vm_allocate_region_at(p->mm, (virt_addr_t)req.hint, req.size, vm_flags)
-            : vm_allocate_region(p->mm, req.size, vm_flags);
+        if (req.offset != 0)
+            return (uint64_t)-EINVAL;
+        virt_addr_t va;
+        if (req.flags & MAP_SHARED)
+            va = vm_allocate_shared_region(p->mm, (virt_addr_t)req.hint,
+                                           req.size, vm_flags, fixed);
+        else
+            va = fixed
+                ? vm_allocate_region_at(p->mm, (virt_addr_t)req.hint, req.size, vm_flags)
+                : vm_allocate_region(p->mm, req.size, vm_flags);
         return va ? (uint64_t)va : (uint64_t)-ENOMEM;
     }
 
+    if (req.offset < 0 || ((uint64_t)req.offset & (PAGE_SIZE - 1)))
+        return (uint64_t)-EINVAL;
+    if ((uint64_t)req.offset > (uint64_t)-1 - req.size)
+        return (uint64_t)-EINVAL;
+
     struct vfs_node *node;
-    if (file_get_node(p, (int)req.fd, &node) != 0)
-        return (uint64_t)-EBADF;
+    int result = file_get_node(p, (int)req.fd, &node);
+    if (result != 0)
+        return (uint64_t)result;
+    int status_flags = file_get_status_flags(p, (int)req.fd);
+    int access = status_flags & O_ACCMODE;
+    if ((status_flags & O_PATH) || access == O_WRONLY || ((req.flags & MAP_SHARED)
+            && (req.prot & PROT_WRITE) && access != O_RDWR)) {
+        vfs_node_release(node);
+        return (uint64_t)-EACCES;
+    }
         
     /* If it's a regular file, we emulate mmap by allocating anonymous memory
      * and reading the file contents into it. This handles MAP_PRIVATE perfectly
      * (which is what ld.so needs). */
     if (node->type == VFS_NODE_REGULAR) {
         if (req.flags & MAP_SHARED) {
+            struct vfs_attr attr;
+            result = vfs_getattr(node, &attr);
+            if (result < 0) {
+                vfs_node_release(node);
+                return (uint64_t)result;
+            }
+            size_t file_bytes = 0;
+            if ((uint64_t)req.offset < attr.size) {
+                uint64_t available = attr.size - (uint64_t)req.offset;
+                file_bytes = available < req.size ? (size_t)available : req.size;
+            }
+            int map_error = -ENOMEM;
+            virt_addr_t va = vm_map_file_shared(
+                p->mm, (virt_addr_t)req.hint, req.size, vm_flags, fixed,
+                node, (size_t)req.offset, file_bytes,
+                access == O_RDWR && node->ops && node->ops->write,
+                &map_error);
             vfs_node_release(node);
-            return (uint64_t)-ENOSYS; /* Shared writeback not supported yet */
+            return va ? (uint64_t)va : (uint64_t)map_error;
         }
         
         /* Allocate as writable first so the kernel can copy the file contents in.
@@ -730,23 +777,24 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
         if (node->ops && node->ops->read) {
             long read_bytes = node->ops->read(node, req.offset, (void*)va, req.size);
             if (read_bytes < 0) {
-                // error handling ignored for now
+                vm_free_region(p->mm, va, req.size);
+                vfs_node_release(node);
+                return (uint64_t)read_bytes;
             }
+        } else {
+            vm_free_region(p->mm, va, req.size);
+            vfs_node_release(node);
+            return (uint64_t)-ENODEV;
         }
         
         /* If they didn't ask for write permissions, remove them now. */
         if (!(vm_flags & VM_WRITE)) {
-            for (size_t off = 0; off < align_up(req.size, PAGE_SIZE); off += PAGE_SIZE) {
-                virt_addr_t curr_va = va + off;
-                uint64_t pte = pte_lookup(p->mm->ttbr0, curr_va);
-                if (pte) {
-                    phys_addr_t phys = pte & PAGE_ADDR_MASK;
-                    uint64_t pflags = arch_translate_vm_flags(vm_flags);
-                    unmap_page(p->mm->ttbr0, curr_va);
-                    map_page(p->mm->ttbr0, curr_va, phys, pflags); 
-                }
+            result = vm_protect_region(p->mm, va, req.size, vm_flags);
+            if (result < 0) {
+                vm_free_region(p->mm, va, req.size);
+                vfs_node_release(node);
+                return (uint64_t)result;
             }
-            flush_tlb();
         }
         
         vfs_node_release(node);
@@ -760,8 +808,8 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
     uint64_t phys;
     size_t mapped_size;
     bool cacheable = true;
-    int result = node->ops->mmap(node, (size_t)req.offset, (size_t)req.size,
-                                 &phys, &mapped_size, &cacheable);
+    result = node->ops->mmap(node, (size_t)req.offset, (size_t)req.size,
+                             &phys, &mapped_size, &cacheable);
     vfs_node_release(node);
     if (result != 0)
         return (uint64_t)result;
@@ -776,6 +824,9 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
 static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
                            struct aarch64_frame *f) {
     (void)c; (void)f;
+    if ((addr & (PAGE_SIZE - 1)) || !size
+            || size > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return (uint64_t)-EINVAL;
     struct proc *p = my_proc();
     vm_free_region(p->mm, addr, size);
     return 0;
@@ -784,34 +835,30 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
 static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
                              struct aarch64_frame *f) {
     (void)f;
-    if (addr & (PAGE_SIZE - 1)) return (uint64_t)-EINVAL;
+    if ((addr & (PAGE_SIZE - 1)) || (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)))
+        return (uint64_t)-EINVAL;
     if (len == 0) return 0;
-    
-    struct proc *p = my_proc();
-    len = align_up(len, PAGE_SIZE);
-    
+
     int vm_flags = VM_USER;
     if (prot & PROT_READ)  vm_flags |= VM_READ;
     if (prot & PROT_WRITE) vm_flags |= VM_WRITE;
     if (prot & PROT_EXEC)  vm_flags |= VM_EXEC;
-    
-    for (size_t off = 0; off < len; off += PAGE_SIZE) {
-        virt_addr_t va = addr + off;
-        uint64_t pte = pte_lookup(p->mm->ttbr0, va);
-        if (pte) {
-            phys_addr_t phys = pte & PAGE_ADDR_MASK;
-            int cur_flags = vm_flags;
-            /* Preserve NOCACHE if the page was originally mapped with it (MAIR_IDX_NORMAL_NC == 2) */
-            if (((pte >> 2) & 7) == 2)
-                cur_flags |= VM_NOCACHE;
-            uint64_t pflags = arch_translate_vm_flags(cur_flags);
-            unmap_page(p->mm->ttbr0, va);
-            map_page(p->mm->ttbr0, va, phys, pflags); 
-        }
-    }
-    
-    flush_tlb();
-    return 0;
+    return (uint64_t)vm_protect_region(my_proc()->mm, addr, len, vm_flags);
+}
+
+static uint64_t sys_msync(uint64_t addr, uint64_t len, uint64_t flags,
+                          struct aarch64_frame *f) {
+    (void)f;
+    if ((addr & (PAGE_SIZE - 1)) || !len)
+        return (uint64_t)-EINVAL;
+    if ((flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC))
+            || ((flags & (MS_ASYNC | MS_SYNC)) != MS_ASYNC
+                && (flags & (MS_ASYNC | MS_SYNC)) != MS_SYNC))
+        return (uint64_t)-EINVAL;
+    /* There is no background writeback worker yet, so MS_ASYNC uses the
+     * same safe synchronous path. MS_INVALIDATE has nothing additional
+     * to do while all mappings share the same resident cache pages. */
+    return (uint64_t)vm_sync_region(my_proc()->mm, addr, len);
 }
 
 /* Root-only, matching real Unix's CAP_SYS_BOOT/reboot(2) gate — every
@@ -2080,6 +2127,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_MMAP] = sys_mmap,
     [SYS_MUNMAP] = sys_munmap,
     [SYS_MPROTECT] = sys_mprotect,
+    [SYS_MSYNC] = sys_msync,
     [SYS_REBOOT] = sys_reboot,
     [SYS_PAUSE]  = sys_pause,
 };

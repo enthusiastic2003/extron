@@ -1,6 +1,8 @@
 #include <kernel/mm/uvm.h>
 #include <kernel/mm/paging.h>
 #include <kernel/mm/kheap.h>
+#include <kernel/fs/vfs.h>
+#include <kernel/errno.h>
 #include <arch/irq_spinlock.h>
 #include <kernel/klibc/string.h>
 #include <stdbool.h>
@@ -10,6 +12,134 @@
  * 0x1000000). 256MB is generous for a hobby kernel and easy to raise. */
 #define USER_HEAP_START 0x10000000UL
 #define USER_HEAP_SIZE  0x10000000UL /* 256MB */
+
+enum vm_backing_type {
+    VM_BACKING_ANON_SHARED,
+    VM_BACKING_FILE_SHARED,
+};
+
+/* One cache entry per shared file page. Keeping this cache in the VM
+ * layer is deliberate: filesystems only see their existing read/write
+ * operations and do not need mmap-specific hooks or page ownership. */
+struct vm_file_page {
+    struct vfs_node *node;
+    size_t offset;
+    phys_addr_t phys;
+    size_t refs;
+    struct vm_file_page *next;
+};
+
+struct vm_backing {
+    spinlock_t lock;
+    size_t refs;
+    enum vm_backing_type type;
+    size_t size;
+    size_t file_bytes;
+    size_t file_offset;
+    bool writable_allowed;
+    bool may_be_dirty;
+    struct vfs_node *node;
+    size_t page_count;
+    phys_addr_t *pages;
+    struct vm_file_page **file_pages;
+};
+
+static spinlock_t file_page_lock = SPINLOCK_INIT;
+static struct vm_file_page *file_pages;
+
+static void backing_retain(struct vm_backing *backing) {
+    if (!backing) return;
+    irq_spin_lock(&backing->lock);
+    backing->refs++;
+    irq_spin_unlock(&backing->lock);
+}
+
+static int backing_sync(struct vm_backing *backing, size_t offset, size_t size) {
+    if (!backing || backing->type != VM_BACKING_FILE_SHARED
+            || !backing->may_be_dirty || !size)
+        return 0;
+    if (!backing->node || !backing->node->ops || !backing->node->ops->write)
+        return -EIO;
+    if (offset >= backing->file_bytes)
+        return 0;
+    if (size > backing->file_bytes - offset)
+        size = backing->file_bytes - offset;
+
+    size_t first = offset / PAGE_SIZE;
+    size_t last = (offset + size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (size_t i = first; i < last; i++) {
+        size_t page_start = i * PAGE_SIZE;
+        size_t start = offset > page_start ? offset - page_start : 0;
+        size_t end = PAGE_SIZE;
+        if (page_start + end > offset + size)
+            end = offset + size - page_start;
+        if (page_start + end > backing->file_bytes)
+            end = backing->file_bytes - page_start;
+        if (end <= start)
+            continue;
+        long written = backing->node->ops->write(
+            backing->node, backing->file_offset + page_start + start,
+            (char *)phys_to_virt_hhdm(backing->pages[i]) + start,
+            end - start);
+        if (written < 0)
+            return (int)written;
+        if ((size_t)written != end - start)
+            return -EIO;
+    }
+    return 0;
+}
+
+static void file_page_put(struct vm_file_page *page) {
+    if (!page) return;
+    irq_spin_lock(&file_page_lock);
+    if (--page->refs) {
+        irq_spin_unlock(&file_page_lock);
+        return;
+    }
+    struct vm_file_page **slot = &file_pages;
+    while (*slot && *slot != page)
+        slot = &(*slot)->next;
+    if (*slot == page)
+        *slot = page->next;
+    irq_spin_unlock(&file_page_lock);
+    vfs_node_release(page->node);
+    pmm_free_page((void *)page->phys);
+    kfree(page);
+}
+
+static void backing_release(struct vm_backing *backing) {
+    if (!backing) return;
+    irq_spin_lock(&backing->lock);
+    bool last = --backing->refs == 0;
+    irq_spin_unlock(&backing->lock);
+    if (!last) return;
+
+    if (backing->type == VM_BACKING_FILE_SHARED) {
+        /* Each VMA flushes precisely its live slice before dropping its
+         * reference. Do not flush the entire backing here: after a partial
+         * unmap, an ordinary write() may legitimately update the removed
+         * slice before the final surviving slice is unmapped. Replaying the
+         * stale removed page here would overwrite that newer file data. */
+        if (backing->file_pages) {
+            for (size_t i = 0; i < backing->page_count; i++)
+                file_page_put(backing->file_pages[i]);
+            kfree(backing->file_pages);
+        }
+        if (backing->node)
+            vfs_node_release(backing->node);
+    } else {
+        for (size_t i = 0; i < backing->page_count; i++)
+            if (backing->pages[i]) pmm_free_page((void *)backing->pages[i]);
+    }
+    kfree(backing->pages);
+    kfree(backing);
+}
+
+static void vma_release(struct vma *v) {
+    if (v->backing)
+        backing_release(v->backing);
+    kfree(v);
+}
 
 struct vm_space *vm_space_create(phys_addr_t ttbr0) {
     struct vm_space *mm = kmalloc(sizeof(struct vm_space));
@@ -31,17 +161,19 @@ void vm_space_destroy(struct vm_space *mm) {
     struct vma *v = mm->vmas;
     while (v) {
         struct vma *next = v->next;
+        if (v->backing)
+            (void)backing_sync(v->backing, v->backing_offset, v->size);
         for (size_t off = 0; off < v->size; off += PAGE_SIZE) {
             phys_addr_t phys = virt_to_phys(mm->ttbr0, v->base + off);
             if (phys) {
                 unmap_page(mm->ttbr0, v->base + off);
                 /* Only pages this process actually owns go back to the
                  * PMM — see struct vma's owns_pages comment. */
-                if (v->owns_pages)
+                if (v->owns_pages && !v->backing)
                     pmm_free_page((void *)phys);
             }
         }
-        kfree(v);
+        vma_release(v);
         v = next;
     }
 
@@ -134,10 +266,9 @@ static bool check_fixed_locked(struct vm_space *mm, virt_addr_t base,
  * arbitrary sub-range instead of only ever matching a VMA's exact base.
  * base/end must already be page-aligned. Caller holds mm->lock.
  *
- * struct vma tracks only {base, size, owns_pages} — no file offset like
- * Linux's vm_pgoff — so splitting one in two is just a second node with
- * adjusted base/size; nothing about the mapping itself needs
- * recomputing. Each VMA the range genuinely overlaps falls into one of
+ * Splitting a VMA also retains its shared backing and advances the tail's
+ * backing offset, so later writeback still targets the correct file pages.
+ * Each VMA the range genuinely overlaps falls into one of
  * four cases: entirely inside the range (delete outright), the range
  * eats its head (shrink forward), the range eats its tail (shrink
  * back), or the range lands in the middle (split into two). Physical
@@ -159,11 +290,16 @@ static void carve_range_locked(struct vm_space *mm, virt_addr_t base,
         virt_addr_t ov_start = cur->base > base ? cur->base : base;
         virt_addr_t ov_end   = cur_end < end ? cur_end : end;
 
+        if (cur->backing)
+            (void)backing_sync(cur->backing,
+                cur->backing_offset + (ov_start - cur->base),
+                ov_end - ov_start);
+
         for (virt_addr_t va = ov_start; va < ov_end; va += PAGE_SIZE) {
             phys_addr_t phys = virt_to_phys(mm->ttbr0, va);
             if (phys) {
                 unmap_page(mm->ttbr0, va);
-                if (cur->owns_pages)
+                if (cur->owns_pages && !cur->backing)
                     pmm_free_page((void *)phys);
             }
         }
@@ -175,11 +311,12 @@ static void carve_range_locked(struct vm_space *mm, virt_addr_t base,
             struct vma *dead = cur;
             cur = cur->next;
             if (prev) prev->next = cur; else mm->vmas = cur;
-            kfree(dead);
+            vma_release(dead);
             continue;
         }
 
         if (head_hit) {
+            cur->backing_offset += ov_end - cur->base;
             cur->base = ov_end;
             cur->size = cur_end - ov_end;
             prev = cur;
@@ -205,11 +342,15 @@ static void carve_range_locked(struct vm_space *mm, virt_addr_t base,
              * drop it: an already-degenerate OOM-during-carve corner
              * case loses that trailing sub-range of address space, but
              * nothing physical leaks. */
+            if (cur->backing)
+                (void)backing_sync(cur->backing,
+                    cur->backing_offset + (ov_end - cur->base),
+                    cur_end - ov_end);
             for (virt_addr_t va = ov_end; va < cur_end; va += PAGE_SIZE) {
                 phys_addr_t phys = virt_to_phys(mm->ttbr0, va);
                 if (phys) {
                     unmap_page(mm->ttbr0, va);
-                    if (cur->owns_pages)
+                    if (cur->owns_pages && !cur->backing)
                         pmm_free_page((void *)phys);
                 }
             }
@@ -220,7 +361,11 @@ static void carve_range_locked(struct vm_space *mm, virt_addr_t base,
         }
         tail->base       = ov_end;
         tail->size       = cur_end - ov_end;
+        tail->flags      = cur->flags;
         tail->owns_pages = cur->owns_pages;
+        tail->backing    = cur->backing;
+        tail->backing_offset = cur->backing_offset + (ov_end - cur->base);
+        backing_retain(tail->backing);
         tail->next       = cur->next;
 
         cur->size = ov_start - cur->base;
@@ -281,7 +426,7 @@ int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
         /* Merging only makes sense if both halves agree on ownership: a
          * node covering both a shared view and an owned allocation
          * could not be torn down correctly either way round. */
-        if (cur->owns_pages != owns_pages) {
+        if (cur->owns_pages != owns_pages || cur->backing) {
             irq_spin_unlock(&mm->lock);
             return -1;
         }
@@ -291,7 +436,7 @@ int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
         struct vma *dead = cur;
         cur = cur->next;
         if (prev) prev->next = cur; else mm->vmas = cur;
-        kfree(dead);
+        vma_release(dead);
     }
 
     struct vma *node = kmalloc(sizeof(struct vma));
@@ -301,7 +446,10 @@ int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
     }
     node->base       = base;
     node->size       = end - base;
+    node->flags      = VM_USER;
     node->owns_pages = owns_pages;
+    node->backing    = NULL;
+    node->backing_offset = 0;
     node->next       = cur;
     if (prev) prev->next = node; else mm->vmas = node;
 
@@ -373,7 +521,10 @@ virt_addr_t vm_allocate_region(struct vm_space *mm, size_t size, int flags) {
     }
     node->base       = cursor;
     node->size       = size;
+    node->flags      = flags;
     node->owns_pages = true;   /* freshly allocated here, ours to free */
+    node->backing    = NULL;
+    node->backing_offset = 0;
     node->next       = cur;
     if (prev)
         prev->next = node;
@@ -446,7 +597,10 @@ virt_addr_t vm_allocate_region_at(struct vm_space *mm, virt_addr_t addr,
     }
     node->base       = addr;
     node->size       = size;
+    node->flags      = flags;
     node->owns_pages = true;
+    node->backing    = NULL;
+    node->backing_offset = 0;
     node->next       = cur;
     if (prev)
         prev->next = node;
@@ -476,6 +630,356 @@ void vm_free_region(struct vm_space *mm, virt_addr_t addr, size_t size) {
     irq_spin_lock(&mm->lock);
     carve_range_locked(mm, addr, end);
     irq_spin_unlock(&mm->lock);
+}
+
+static struct vma *split_vma_locked(struct vma *v, virt_addr_t cut) {
+    if (cut <= v->base || cut >= v->base + v->size)
+        return v;
+    struct vma *tail = kmalloc(sizeof(*tail));
+    if (!tail)
+        return NULL;
+    *tail = *v;
+    tail->base = cut;
+    tail->size = v->base + v->size - cut;
+    tail->backing_offset += cut - v->base;
+    backing_retain(tail->backing);
+    v->size = cut - v->base;
+    v->next = tail;
+    return tail;
+}
+
+int vm_protect_region(struct vm_space *mm, virt_addr_t addr, size_t size,
+                      int flags) {
+    if (!mm || (addr & (PAGE_SIZE - 1)) || !size)
+        return -EINVAL;
+    if (size > (size_t)-1 - (PAGE_SIZE - 1))
+        return -EINVAL;
+    size = align_up(size, PAGE_SIZE);
+    virt_addr_t end = addr + size;
+    if (end < addr)
+        return -EINVAL;
+
+    irq_spin_lock(&mm->lock);
+    virt_addr_t cursor = addr;
+    struct vma *v = mm->vmas;
+    while (v && v->base + v->size <= cursor) v = v->next;
+    while (cursor < end) {
+        if (!v || v->base > cursor) {
+            irq_spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+        virt_addr_t covered = v->base + v->size;
+        if (covered > end) covered = end;
+        for (virt_addr_t va = cursor; va < covered; va += PAGE_SIZE) {
+            if (!pte_lookup(mm->ttbr0, va)) {
+                irq_spin_unlock(&mm->lock);
+                return -ENOMEM;
+            }
+        }
+        if ((flags & VM_WRITE) && v->backing
+                && v->backing->type == VM_BACKING_FILE_SHARED
+                && !v->backing->writable_allowed) {
+            irq_spin_unlock(&mm->lock);
+            return -EACCES;
+        }
+        cursor = covered;
+        v = v->next;
+    }
+
+    v = mm->vmas;
+    while (v && v->base + v->size <= addr) v = v->next;
+    if (v && v->base < addr) {
+        v = split_vma_locked(v, addr);
+        if (!v) {
+            irq_spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+    }
+    for (struct vma *cur = v; cur && cur->base < end; cur = cur->next) {
+        if (cur->base + cur->size > end && !split_vma_locked(cur, end)) {
+            irq_spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+        cur->flags = (cur->flags & (VM_USER | VM_NOCACHE))
+                   | (flags & (VM_READ | VM_WRITE | VM_EXEC));
+        if ((cur->flags & VM_WRITE) && cur->backing
+                && cur->backing->type == VM_BACKING_FILE_SHARED)
+            cur->backing->may_be_dirty = true;
+        uint64_t attrs = arch_translate_vm_flags(cur->flags);
+        for (size_t off = 0; off < cur->size; off += PAGE_SIZE) {
+            virt_addr_t va = cur->base + off;
+            uint64_t pte = pte_lookup(mm->ttbr0, va);
+            phys_addr_t phys = pte & PAGE_ADDR_MASK;
+            unmap_page(mm->ttbr0, va);
+            if (map_page(mm->ttbr0, va, phys, attrs) != 0) {
+                irq_spin_unlock(&mm->lock);
+                flush_tlb();
+                return -EIO;
+            }
+        }
+    }
+    flush_tlb();
+    irq_spin_unlock(&mm->lock);
+    return 0;
+}
+
+static struct vm_backing *backing_alloc(enum vm_backing_type type,
+                                        size_t size) {
+    struct vm_backing *b = kmalloc(sizeof(*b));
+    if (!b) return NULL;
+    memset(b, 0, sizeof(*b));
+    b->lock = (spinlock_t)SPINLOCK_INIT;
+    b->refs = 1;
+    b->type = type;
+    b->size = size;
+    b->page_count = size / PAGE_SIZE;
+    b->pages = kmalloc(b->page_count * sizeof(*b->pages));
+    if (!b->pages) {
+        kfree(b);
+        return NULL;
+    }
+    memset(b->pages, 0, b->page_count * sizeof(*b->pages));
+    return b;
+}
+
+static virt_addr_t map_backing(struct vm_space *mm, virt_addr_t addr,
+                               struct vm_backing *backing, int flags,
+                               bool fixed) {
+    irq_spin_lock(&mm->lock);
+    struct vma *prev = NULL;
+    virt_addr_t base;
+    if (fixed) {
+        if ((addr & (PAGE_SIZE - 1)) || addr < mm->heap_start
+                || addr + backing->size < addr
+                || addr + backing->size > mm->heap_end) {
+            irq_spin_unlock(&mm->lock);
+            return 0;
+        }
+        carve_range_locked(mm, addr, addr + backing->size);
+        if (!check_fixed_locked(mm, addr, backing->size, &prev)) {
+            irq_spin_unlock(&mm->lock);
+            return 0;
+        }
+        base = addr;
+    } else {
+        base = find_gap_locked(mm, backing->size, &prev);
+        if (!base) {
+            irq_spin_unlock(&mm->lock);
+            return 0;
+        }
+    }
+    struct vma *next = prev ? prev->next : mm->vmas;
+    uint64_t attrs = arch_translate_vm_flags(flags);
+    size_t mapped = 0;
+    for (; mapped < backing->size; mapped += PAGE_SIZE) {
+        if (map_page(mm->ttbr0, base + mapped,
+                     backing->pages[mapped / PAGE_SIZE], attrs) != 0)
+            break;
+    }
+    if (mapped != backing->size) {
+        for (size_t off = 0; off < mapped; off += PAGE_SIZE)
+            unmap_page(mm->ttbr0, base + off);
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+    struct vma *node = kmalloc(sizeof(*node));
+    if (!node) {
+        for (size_t off = 0; off < mapped; off += PAGE_SIZE)
+            unmap_page(mm->ttbr0, base + off);
+        irq_spin_unlock(&mm->lock);
+        return 0;
+    }
+    node->base = base;
+    node->size = backing->size;
+    node->flags = flags;
+    node->owns_pages = true;
+    node->backing = backing;
+    node->backing_offset = 0;
+    node->next = next;
+    if (prev) prev->next = node; else mm->vmas = node;
+    irq_spin_unlock(&mm->lock);
+    return base;
+}
+
+virt_addr_t vm_allocate_shared_region(struct vm_space *mm, virt_addr_t addr,
+                                      size_t size, int flags, bool fixed) {
+    if (!mm || !size || size > (size_t)-1 - (PAGE_SIZE - 1))
+        return 0;
+    size = align_up(size, PAGE_SIZE);
+    struct vm_backing *b = backing_alloc(VM_BACKING_ANON_SHARED, size);
+    if (!b) return 0;
+    for (size_t i = 0; i < b->page_count; i++) {
+        b->pages[i] = (phys_addr_t)pmm_alloc_page();
+        if (!b->pages[i]) {
+            backing_release(b);
+            return 0;
+        }
+        memset(phys_to_virt_hhdm(b->pages[i]), 0, PAGE_SIZE);
+    }
+    virt_addr_t result = map_backing(mm, addr, b, flags, fixed);
+    if (!result) backing_release(b);
+    return result;
+}
+
+static struct vm_file_page *file_page_get(struct vfs_node *node,
+                                          size_t offset, int *error) {
+    irq_spin_lock(&file_page_lock);
+    for (struct vm_file_page *p = file_pages; p; p = p->next) {
+        if (p->node == node && p->offset == offset) {
+            p->refs++;
+            irq_spin_unlock(&file_page_lock);
+            return p;
+        }
+    }
+    irq_spin_unlock(&file_page_lock);
+
+    struct vm_file_page *fresh = kmalloc(sizeof(*fresh));
+    phys_addr_t phys = (phys_addr_t)pmm_alloc_page();
+    if (!fresh || !phys) {
+        if (fresh) kfree(fresh);
+        if (phys) pmm_free_page((void *)phys);
+        *error = -ENOMEM;
+        return NULL;
+    }
+    memset(phys_to_virt_hhdm(phys), 0, PAGE_SIZE);
+    long got = node->ops->read(node, offset, phys_to_virt_hhdm(phys), PAGE_SIZE);
+    if (got < 0) {
+        pmm_free_page((void *)phys);
+        kfree(fresh);
+        *error = (int)got;
+        return NULL;
+    }
+    fresh->node = node;
+    fresh->offset = offset;
+    fresh->phys = phys;
+    fresh->refs = 1;
+    vfs_node_retain(node);
+
+    irq_spin_lock(&file_page_lock);
+    /* Another CPU could have populated it while the VFS read ran. */
+    for (struct vm_file_page *p = file_pages; p; p = p->next) {
+        if (p->node == node && p->offset == offset) {
+            p->refs++;
+            irq_spin_unlock(&file_page_lock);
+            vfs_node_release(node);
+            pmm_free_page((void *)phys);
+            kfree(fresh);
+            return p;
+        }
+    }
+    fresh->next = file_pages;
+    file_pages = fresh;
+    irq_spin_unlock(&file_page_lock);
+    return fresh;
+}
+
+static void shared_file_copy(struct vfs_node *node, size_t offset,
+                             void *buffer, size_t size, bool into_cache) {
+    if (!node || !buffer || !size || offset + size < offset)
+        return;
+    irq_spin_lock(&file_page_lock);
+    for (struct vm_file_page *p = file_pages; p; p = p->next) {
+        if (p->node != node || p->offset + PAGE_SIZE <= offset
+                || p->offset >= offset + size)
+            continue;
+        size_t start = p->offset > offset ? p->offset : offset;
+        size_t end = p->offset + PAGE_SIZE < offset + size
+                   ? p->offset + PAGE_SIZE : offset + size;
+        char *cache = (char *)phys_to_virt_hhdm(p->phys) + (start - p->offset);
+        char *caller = (char *)buffer + (start - offset);
+        if (into_cache)
+            memmove(cache, caller, end - start);
+        else
+            memmove(caller, cache, end - start);
+    }
+    irq_spin_unlock(&file_page_lock);
+}
+
+void vm_shared_file_read_overlay(struct vfs_node *node, size_t offset,
+                                 void *buffer, size_t size) {
+    shared_file_copy(node, offset, buffer, size, false);
+}
+
+void vm_shared_file_written(struct vfs_node *node, size_t offset,
+                            const void *buffer, size_t size) {
+    shared_file_copy(node, offset, (void *)buffer, size, true);
+}
+
+virt_addr_t vm_map_file_shared(struct vm_space *mm, virt_addr_t addr,
+                               size_t size, int flags, bool fixed,
+                               struct vfs_node *node, size_t file_offset,
+                               size_t file_bytes, bool writable_allowed,
+                               int *error) {
+    if (error) *error = -ENOMEM;
+    if (!mm || !node || !node->ops || !node->ops->read || !size
+            || size > (size_t)-1 - (PAGE_SIZE - 1)) {
+        if (error) *error = -EINVAL;
+        return 0;
+    }
+    if ((flags & VM_WRITE) && !writable_allowed) {
+        if (error) *error = -EACCES;
+        return 0;
+    }
+    size = align_up(size, PAGE_SIZE);
+    struct vm_backing *b = backing_alloc(VM_BACKING_FILE_SHARED, size);
+    if (!b) return 0;
+    b->file_pages = kmalloc(b->page_count * sizeof(*b->file_pages));
+    if (!b->file_pages) {
+        backing_release(b);
+        return 0;
+    }
+    memset(b->file_pages, 0, b->page_count * sizeof(*b->file_pages));
+    b->node = node;
+    vfs_node_retain(node);
+    b->file_offset = file_offset;
+    b->file_bytes = file_bytes < size ? file_bytes : size;
+    b->writable_allowed = writable_allowed;
+    b->may_be_dirty = (flags & VM_WRITE) != 0;
+    for (size_t i = 0; i < b->page_count; i++) {
+        int page_error = -ENOMEM;
+        struct vm_file_page *page = file_page_get(
+            node, file_offset + i * PAGE_SIZE, &page_error);
+        if (!page) {
+            if (error) *error = page_error;
+            backing_release(b);
+            return 0;
+        }
+        b->file_pages[i] = page;
+        b->pages[i] = page->phys;
+    }
+    virt_addr_t result = map_backing(mm, addr, b, flags, fixed);
+    if (!result) backing_release(b);
+    else if (error) *error = 0;
+    return result;
+}
+
+int vm_sync_region(struct vm_space *mm, virt_addr_t addr, size_t size) {
+    if (!mm || (addr & (PAGE_SIZE - 1)) || !size
+            || size > (size_t)-1 - (PAGE_SIZE - 1))
+        return -EINVAL;
+    size = align_up(size, PAGE_SIZE);
+    virt_addr_t end = addr + size;
+    if (end < addr) return -EINVAL;
+
+    irq_spin_lock(&mm->lock);
+    virt_addr_t cursor = addr;
+    for (struct vma *v = mm->vmas; v && cursor < end; v = v->next) {
+        if (v->base + v->size <= cursor) continue;
+        if (v->base > cursor) {
+            irq_spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+        virt_addr_t stop = v->base + v->size < end ? v->base + v->size : end;
+        int result = backing_sync(v->backing,
+            v->backing_offset + (cursor - v->base), stop - cursor);
+        if (result < 0) {
+            irq_spin_unlock(&mm->lock);
+            return result;
+        }
+        cursor = stop;
+    }
+    irq_spin_unlock(&mm->lock);
+    return cursor == end ? 0 : -ENOMEM;
 }
 
 /*
@@ -542,7 +1046,10 @@ virt_addr_t vm_map_region(struct vm_space *mm, phys_addr_t phys, size_t size, in
 
     node->base       = cursor;
     node->size       = span;
+    node->flags      = flags;
     node->owns_pages = false;  /* a view, not an allocation */
+    node->backing    = NULL;
+    node->backing_offset = 0;
     node->next       = cur;
     if (prev) prev->next = node; else mm->vmas = node;
 
@@ -597,7 +1104,10 @@ virt_addr_t vm_map_region_at(struct vm_space *mm, virt_addr_t addr,
 
     node->base       = addr;
     node->size       = span;
+    node->flags      = flags;
     node->owns_pages = false;
+    node->backing    = NULL;
+    node->backing_offset = 0;
     node->next       = cur;
     if (prev) prev->next = node; else mm->vmas = node;
 
@@ -663,7 +1173,11 @@ struct vm_space *vm_space_clone(struct vm_space *parent) {
             goto fail;
         node->base       = v->base;
         node->size       = v->size;
+        node->flags      = v->flags;
         node->owns_pages = v->owns_pages;
+        node->backing    = v->backing;
+        node->backing_offset = v->backing_offset;
+        backing_retain(node->backing);
         node->next       = NULL;
         if (tail) tail->next = node; else child->vmas = node;
         tail = node;
@@ -680,7 +1194,7 @@ struct vm_space *vm_space_clone(struct vm_space *parent) {
             phys_addr_t src = (phys_addr_t)(pte & PAGE_ADDR_MASK);
             phys_addr_t dst = src;
 
-            if (v->owns_pages) {
+            if (v->owns_pages && !v->backing) {
                 dst = (phys_addr_t)pmm_alloc_page();
                 if (!dst)
                     goto fail;
@@ -688,7 +1202,7 @@ struct vm_space *vm_space_clone(struct vm_space *parent) {
             }
 
             if (map_page_raw(child->ttbr0, va, dst, pte) != 0) {
-                if (v->owns_pages)
+                if (v->owns_pages && !v->backing)
                     pmm_free_page((void *)dst);
                 goto fail;
             }

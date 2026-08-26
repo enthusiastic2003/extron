@@ -27,6 +27,11 @@
  * ordinary memory. Ignored if PAGE_CACHE_DISABLE is also set. */
 #define PAGE_NORMAL_NC     (1ULL << 9)
 #define PAGE_NX            (1ULL << 63) // No Execute (if supported)
+/* Semantic input to map_page(), consumed by AArch64's descriptor encoder:
+ * keep the page present for kernel bookkeeping but grant no EL0 access.
+ * Bit 62 is outside the physical-address field and is never stored in the
+ * final descriptor. */
+#define PAGE_NO_ACCESS     (1ULL << 62)
 
 // Mask to extract the physical address from an entry (drops the flags)
 #define PAGE_ADDR_MASK     0x000FFFFFFFFFF000ULL

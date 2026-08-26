@@ -1,5 +1,6 @@
 #include <kernel/console.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/mm/uvm.h>
 #include <kernel/errno.h>
 #include <kernel/mm/kheap.h>
 #include <kernel/klibc/string.h>
@@ -1191,14 +1192,20 @@ void vfs_clear_setid(struct vfs_node *node) {
 long vfs_read(struct vfs_node *node, size_t offset, void *buffer, size_t count) {
     if (!node || !node->ops || !node->ops->read)
         return -EINVAL;
-    return node->ops->read(node, offset, buffer, count);
+    long result = node->ops->read(node, offset, buffer, count);
+    if (result > 0)
+        vm_shared_file_read_overlay(node, offset, buffer, (size_t)result);
+    return result;
 }
 
 long vfs_write(struct vfs_node *node, size_t offset,
                const void *buffer, size_t count) {
     if (!node || !node->ops || !node->ops->write)
         return -EINVAL;
-    return node->ops->write(node, offset, buffer, count);
+    long result = node->ops->write(node, offset, buffer, count);
+    if (result > 0)
+        vm_shared_file_written(node, offset, buffer, (size_t)result);
+    return result;
 }
 
 int vfs_readdir(struct vfs_node *node, size_t index, struct vfs_dirent *entry) {

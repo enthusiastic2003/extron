@@ -17,6 +17,9 @@
 #include <fcntl.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/wait.h>
 #include <sys/mman.h>
 
 /* usr/include/extron/fb.h isn't reachable from here — it's included via
@@ -57,6 +60,157 @@ static void test_anonymous(void) {
     check("writes to an anonymous mapping are visible immediately", all_set);
 
     check("munmap() succeeds", munmap(region, length) == 0);
+}
+
+static void test_anonymous_shared(void) {
+    unsigned char *shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check("anonymous MAP_SHARED succeeds", shared != MAP_FAILED);
+    if (shared == MAP_FAILED) return;
+    shared[0] = 0x11;
+    pid_t child = fork();
+    check("fork() with anonymous shared memory succeeds", child >= 0);
+    if (child == 0) {
+        shared[0] = 0x7B;
+        _exit(0);
+    }
+    if (child > 0) {
+        int status = 0;
+        check("waitpid() for shared-memory child succeeds",
+              waitpid(child, &status, 0) == child && WIFEXITED(status));
+        check("parent observes child's MAP_SHARED write", shared[0] == 0x7B);
+    }
+    check("munmap() anonymous shared memory succeeds",
+          munmap(shared, 4096) == 0);
+}
+
+static void test_mprotect(void) {
+    unsigned char *pages = mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check("mmap() for mprotect test succeeds", pages != MAP_FAILED);
+    if (pages == MAP_FAILED) return;
+    pages[0] = 1; pages[4096] = 2; pages[8192] = 3;
+    check("mprotect() can protect only the middle page",
+          mprotect(pages + 4096, 4096, PROT_NONE) == 0);
+    check("mprotect split leaves neighboring pages accessible",
+          pages[0] == 1 && pages[8192] == 3);
+
+    pid_t child = fork();
+    if (child == 0) {
+        volatile unsigned char value = pages[4096];
+        (void)value;
+        _exit(99);
+    }
+    int status = 0;
+    check("PROT_NONE faults only the child process",
+          child > 0 && waitpid(child, &status, 0) == child
+          && WIFSIGNALED(status) && WTERMSIG(status) == 11);
+    check("mprotect() restores middle-page read/write access",
+          mprotect(pages + 4096, 4096, PROT_READ | PROT_WRITE) == 0);
+    pages[4096] = 0x44;
+    check("restored middle page is writable", pages[4096] == 0x44);
+
+    errno = 0;
+    check("mprotect() rejects an unmapped range with ENOMEM",
+          mprotect((void *)0x1f000000, 4096, PROT_READ) == -1
+          && errno == ENOMEM);
+    errno = 0;
+    check("mprotect() rejects unknown protection bits",
+          mprotect(pages, 4096, 0x4000) == -1 && errno == EINVAL);
+    check("munmap() mprotect test region succeeds",
+          munmap(pages, 3 * 4096) == 0);
+}
+
+static void test_file_shared(void) {
+    const char *path = "/mmap-shared-test.tmp";
+    unsigned char initial[4096];
+    memset(initial, 0, sizeof(initial));
+    memcpy(initial, "before", 7);
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+    check("create writable file for MAP_SHARED", fd >= 0);
+    if (fd < 0) return;
+    check("seed MAP_SHARED test file", write(fd, initial, sizeof(initial)) == 4096);
+
+    unsigned char *first = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, fd, 0);
+    unsigned char *second = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED, fd, 0);
+    check("two file MAP_SHARED mappings succeed",
+          first != MAP_FAILED && second != MAP_FAILED);
+    if (first == MAP_FAILED || second == MAP_FAILED) {
+        close(fd);
+        if (first != MAP_FAILED) munmap(first, 4096);
+        if (second != MAP_FAILED) munmap(second, 4096);
+        unlink(path);
+        return;
+    }
+    memcpy(first, "shared", 7);
+    check("second mapping immediately observes first mapping",
+          memcmp(second, "shared", 7) == 0);
+    char through_read[8] = {0};
+    check("seek fd while shared mappings are active", lseek(fd, 0, SEEK_SET) == 0);
+    check("ordinary read() observes a shared mapping write",
+          read(fd, through_read, 7) == 7 && !memcmp(through_read, "shared", 7));
+    check("seek fd for ordinary write() coherence", lseek(fd, 32, SEEK_SET) == 32);
+    check("ordinary write() succeeds while mappings are active",
+          write(fd, "ordinary", 8) == 8);
+    check("shared mapping observes ordinary write() immediately",
+          !memcmp(second + 32, "ordinary", 8));
+
+    pid_t child = fork();
+    if (child == 0) {
+        memcpy(second + 64, "child", 6);
+        _exit(0);
+    }
+    int status = 0;
+    check("file-shared child exits normally",
+          child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status));
+    check("parent observes child's file MAP_SHARED write",
+          !memcmp(first + 64, "child", 6));
+    close(fd);
+    check("msync(MS_SYNC) writes shared pages through VFS",
+          msync(first, 4096, MS_SYNC) == 0);
+    check("shared mappings outlive their original fd",
+          memcmp(second, "shared", 7) == 0);
+    check("unmap both shared views", munmap(first, 4096) == 0
+          && munmap(second, 4096) == 0);
+
+    fd = open(path, O_RDONLY);
+    char persisted[8] = {0};
+    check("reopen MAP_SHARED test file", fd >= 0);
+    if (fd >= 0) {
+        check("msync data persists through ordinary read()",
+              read(fd, persisted, 7) == 7 && !memcmp(persisted, "shared", 7));
+        unsigned char *readonly = mmap(NULL, 4096, PROT_READ,
+                                       MAP_SHARED, fd, 0);
+        check("read-only MAP_SHARED mapping succeeds", readonly != MAP_FAILED);
+        if (readonly != MAP_FAILED) {
+            errno = 0;
+            check("mprotect cannot add shared write access to O_RDONLY fd",
+                  mprotect(readonly, 4096, PROT_READ | PROT_WRITE) == -1
+                  && errno == EACCES);
+            munmap(readonly, 4096);
+        }
+        close(fd);
+    }
+
+    fd = open(path, O_RDWR);
+    unsigned char *private = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE, fd, 0);
+    check("file MAP_PRIVATE mapping succeeds", private != MAP_FAILED);
+    if (private != MAP_FAILED) {
+        memcpy(private, "private", 8);
+        check("MAP_PRIVATE change is visible in its own mapping",
+              !memcmp(private, "private", 8));
+        check("msync on MAP_PRIVATE is harmless", msync(private, 4096, MS_SYNC) == 0);
+        munmap(private, 4096);
+        lseek(fd, 0, SEEK_SET);
+        memset(persisted, 0, sizeof(persisted));
+        check("MAP_PRIVATE change was not written to the file",
+              read(fd, persisted, 7) == 7 && !memcmp(persisted, "shared", 7));
+    }
+    if (fd >= 0) close(fd);
+    unlink(path);
 }
 
 static void test_framebuffer_device(void) {
@@ -199,8 +353,37 @@ static void test_map_fixed(void) {
 }
 
 static void test_bad_arguments(void) {
+    errno = 0;
+    check("mmap rejects both MAP_SHARED and MAP_PRIVATE",
+          mmap(NULL, 4096, PROT_READ,
+               MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED
+          && errno == EINVAL);
+    errno = 0;
+    check("mmap rejects a missing sharing mode",
+          mmap(NULL, 4096, PROT_READ, MAP_ANONYMOUS, -1, 0) == MAP_FAILED
+          && errno == EINVAL);
+    errno = 0;
+    check("mmap rejects a zero-length mapping",
+          mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+              == MAP_FAILED && errno == EINVAL);
+    errno = 0;
+    check("anonymous mmap rejects a nonzero offset",
+          mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 4096)
+              == MAP_FAILED && errno == EINVAL);
+    errno = 0;
+    check("munmap rejects a misaligned address",
+          munmap((void *)0x10000001, 4096) == -1 && errno == EINVAL);
+    errno = 0;
+    check("munmap rejects a zero-length range",
+          munmap((void *)0x10000000, 0) == -1 && errno == EINVAL);
+
     int fd = open("/opt/tests/hello.txt", O_RDONLY);
     check("open a plain file for file-backed mmap check", fd >= 0);
+
+    errno = 0;
+    check("file mmap rejects a misaligned offset",
+          mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 1) == MAP_FAILED
+          && errno == EINVAL);
     
     void *r2 = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
     check("mmap() on a regular file succeeds", r2 != MAP_FAILED);
@@ -219,6 +402,9 @@ int main(void) {
     printf("\n[mmap_test] === real mmap()/munmap(), two backings ===\n");
 
     test_anonymous();
+    test_anonymous_shared();
+    test_mprotect();
+    test_file_shared();
     test_framebuffer_device();
     test_map_fixed();
     test_bad_arguments();
