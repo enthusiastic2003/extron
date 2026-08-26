@@ -39,6 +39,7 @@ fi
 
 if [ -f "$INITRD_DIR/nano" ]; then
     cp "$INITRD_DIR/nano" "$ROOTFS_DIR/bin/nano"
+cp "$INITRD_DIR/test_terminfo" "$ROOTFS_DIR/bin/test_terminfo"
 fi
 
 # Distribute Doom
@@ -75,8 +76,19 @@ fi
 if [ -d "$INITRD_DIR/usr" ]; then
     cp -r "$INITRD_DIR/usr"/* "$ROOTFS_DIR/usr/" 2>/dev/null || true
 fi
+mkdir -p "$ROOTFS_DIR/usr/lib"
+if compgen -G "third_party/ncurses-6.4/lib/*.so*" >/dev/null; then
+    cp -a third_party/ncurses-6.4/lib/*.so* "$ROOTFS_DIR/usr/lib/"
+fi
 if [ -d "$INITRD_DIR/local" ]; then
     cp -r "$INITRD_DIR/local"/* "$ROOTFS_DIR/usr/local/" 2>/dev/null || true
+fi
+
+# The new dynamic ncurses expects terminfo at /usr/share/terminfo
+# but the initrd data has it in /usr/local/share/terminfo
+mkdir -p "$ROOTFS_DIR/usr/share"
+if [ -d "$ROOTFS_DIR/usr/local/share/terminfo" ]; then
+    cp -r "$ROOTFS_DIR/usr/local/share/terminfo" "$ROOTFS_DIR/usr/share/terminfo"
 fi
 
 # Calculate required size in MB (with some buffer)
