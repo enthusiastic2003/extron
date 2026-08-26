@@ -95,6 +95,7 @@
 #define SYS_MMAP        69
 #define SYS_MUNMAP      70
 #define SYS_PAUSE       72
+#define SYS_MPROTECT    73
 
 
 using main_fn = int (*)(int, char **);
@@ -829,6 +830,12 @@ int sys_vm_map(void *hint, size_t size, int prot, int flags, int fd, off_t offse
 
 int sys_vm_unmap(void *pointer, size_t size) {
     long ret = syscall2(SYS_MUNMAP, (long)pointer, size);
+    if (ret < 0) return -ret;
+    return 0;
+}
+
+int sys_vm_protect(void *pointer, size_t size, int prot) {
+    long ret = syscall3(SYS_MPROTECT, (long)pointer, size, prot);
     if (ret < 0) return -ret;
     return 0;
 }
