@@ -23,6 +23,7 @@
 #define SYS_FUTEX_WAIT  33
 #define SYS_FUTEX_WAKE  34
 #define SYS_MMAP        69
+#define SYS_MUNMAP      70
 #define SYS_MPROTECT    73
 
 namespace {
@@ -147,6 +148,11 @@ int sys_vm_map(void *hint, size_t size, int prot, int flags, int fd,
         return -result;
     *window = reinterpret_cast<void *>(result);
     return 0;
+}
+
+int sys_vm_unmap(void *pointer, size_t size) {
+    long result = syscall2(SYS_MUNMAP, reinterpret_cast<long>(pointer), size);
+    return result < 0 ? -result : 0;
 }
 
 int sys_vm_protect(void *pointer, size_t size, int prot) {

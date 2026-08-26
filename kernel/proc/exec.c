@@ -9,6 +9,7 @@
 #include <kernel/mm/uvm.h>
 #include <kernel/console.h>
 #include <kernel/klibc/string.h>
+#include <kernel/drivers/timer.h>
 #include <arch/irq_spinlock.h>
 
 /* Fixed per-proc user stack VA — same for every proc, safe since each
@@ -43,11 +44,12 @@
 #define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
 
 /* AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, AT_UID,
- * AT_EUID, AT_GID, AT_EGID, AT_EXECFN, plus the AT_NULL terminator — see
+ * AT_EUID, AT_GID, AT_EGID, AT_RANDOM, AT_EXECFN, plus AT_NULL — see
  * build_arg_stack()'s auxv block below. Each entry is a (type, value)
  * pair of two uint64_t words. */
-#define EXEC_AUXV_ENTRIES 12
+#define EXEC_AUXV_ENTRIES 13
 #define EXEC_PATH_BYTES 128
+#define EXEC_RANDOM_BYTES 16
 
 /* The whole argument block has to fit in the single page it is written
  * into, or build_arg_stack() would run off the bottom of that page and
@@ -57,9 +59,43 @@
  * terminator, the auxv block, plus 16 bytes of alignment slack. */
 _Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES
                + EXEC_PATH_BYTES
+               + EXEC_RANDOM_BYTES
                + (EXEC_MAX_ARGS + EXEC_MAX_ENVS + 3) * sizeof(uint64_t)
                + EXEC_AUXV_ENTRIES * 2 * sizeof(uint64_t) + 16
                < PAGE_SIZE, "exec argument block must fit one stack page");
+
+static spinlock_t exec_random_lock = SPINLOCK_INIT;
+static uint64_t exec_random_sequence;
+
+/* SplitMix64 is used here as a mixer, not claimed as a CSPRNG. Extron does
+ * not have a hardware-entropy driver yet. Combining the high-resolution ARM
+ * counter with allocation addresses and a serialized per-exec sequence gives
+ * each new image different AT_RANDOM bytes and is sufficient to exercise the
+ * ELF ABI and seed mlibc's stack guard during bring-up. Security-grade
+ * unpredictability still requires a real entropy source and kernel CSPRNG. */
+static uint64_t exec_random_mix(uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+static void fill_exec_random(uint8_t bytes[EXEC_RANDOM_BYTES],
+                             phys_addr_t stack_phys,
+                             const struct elf_aux_info *aux) {
+    irq_spin_lock(&exec_random_lock);
+    uint64_t sequence = ++exec_random_sequence;
+    irq_spin_unlock(&exec_random_lock);
+
+    uint64_t seed = timer_uptime_ns()
+                  ^ ((uint64_t)stack_phys << 17)
+                  ^ ((uint64_t)aux->entry << 7)
+                  ^ sequence;
+    uint64_t words[2];
+    words[0] = exec_random_mix(seed);
+    words[1] = exec_random_mix(words[0] ^ timer_uptime_ns() ^ sequence);
+    memcpy(bytes, words, sizeof(words));
+}
 
 /*
  * Lay out a REAL argc/argv/envp stack — the actual AArch64/SysV ELF
@@ -107,6 +143,12 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     virt_addr_t  str_va[EXEC_MAX_ARGS];
     virt_addr_t  env_va[EXEC_MAX_ENVS];
     size_t       off = PAGE_SIZE;
+
+    uint8_t random_bytes[EXEC_RANDOM_BYTES];
+    fill_exec_random(random_bytes, top_phys, aux);
+    off -= sizeof(random_bytes);
+    memcpy(page + off, random_bytes, sizeof(random_bytes));
+    virt_addr_t random_va = page_va + off;
 
     size_t exec_len = strlen(exec_path) + 1;
     off -= exec_len;
@@ -181,6 +223,7 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     AUXV(AT_EUID,   euid);
     AUXV(AT_GID,    gid);
     AUXV(AT_EGID,   egid);
+    AUXV(AT_RANDOM, random_va);
     AUXV(AT_EXECFN, execfn_va);
     AUXV(AT_NULL,   0);
     #undef AUXV

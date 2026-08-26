@@ -68,7 +68,9 @@ MLIBC_LIBC    := $(MLIBC_SYSROOT)/lib/libc.a
 MLIBC_LDSO    := $(MLIBC_SYSROOT)/lib/ld.so
 MLIBC_LIBC_SO := $(MLIBC_SYSROOT)/lib/libc.so
 MLIBC_TEST_DSO := $(BUILD)/initrd/lib/libextron_rtld_test.so
-MLIBC_C_SRC   := $(filter-out usr/mlibc_tests/libextron_rtld_test.c,\
+MLIBC_TEST_DEP_DSO := $(BUILD)/initrd/lib/libextron_rtld_dep.so
+MLIBC_C_SRC   := $(filter-out usr/mlibc_tests/libextron_rtld_test.c \
+                  usr/mlibc_tests/libextron_rtld_dep.c,\
                   $(wildcard usr/mlibc_tests/*.c))
 # Built into initrd's tests/ subdirectory rather than flat at the root —
 # this suite has grown to 20+ binaries, which was drowning out the
@@ -146,17 +148,48 @@ $(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 # First real dynamic-linker fixture. The explicit -L must precede the
 # toolchain's built-in static-only sysroot, or its libc.a wins before this
 # repository's libc.so is considered.
-$(MLIBC_TEST_DSO): usr/mlibc_tests/libextron_rtld_test.c
+$(MLIBC_TEST_DEP_DSO): usr/mlibc_tests/libextron_rtld_dep.c
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" -fPIC -shared \
-		-nostdlib -Wl,-soname,libextron_rtld_test.so $< -o $@
+		-nostdlib -Wl,-soname,libextron_rtld_dep.so,-z,relro,-z,now $< -o $@
+
+$(MLIBC_TEST_DSO): usr/mlibc_tests/libextron_rtld_test.c $(MLIBC_TEST_DEP_DSO)
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" -fPIC -shared \
+		-nostdlib -L"$(abspath $(BUILD))/initrd/lib" \
+		-Wl,-soname,libextron_rtld_test.so,-z,relro,-z,now $< \
+		-lextron_rtld_dep -o $@
 
 $(BUILD)/initrd/tests/mlibc_dynamic_test.elf: usr/mlibc_tests/mlibc_dynamic_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" \
 		-L"$(abspath $(BUILD))/initrd/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so $< -lextron_rtld_test -o $@ -O1
+		-Wl,--dynamic-linker=/lib/ld.so,-rpath-link,$(abspath $(BUILD))/initrd/lib \
+		$< -lextron_rtld_test -o $@ -O1
+
+# Late-loading fixture: deliberately do not link libextron_rtld_test.so here.
+# Its absence from DT_NEEDED is part of the test; dlopen() must discover and
+# relocate it after main() has already started.
+$(BUILD)/initrd/tests/mlibc_dlopen_test.elf: usr/mlibc_tests/mlibc_dlopen_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
+
+$(BUILD)/initrd/tests/mlibc_dlthread_test.elf: usr/mlibc_tests/mlibc_dlthread_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
+
+# Full-RELRO fixture. Its child deliberately writes into PT_GNU_RELRO and
+# must receive SIGSEGV while the parent and shell survive.
+$(BUILD)/initrd/tests/mlibc_relro_test.elf: usr/mlibc_tests/mlibc_relro_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so,-z,relro,-z,now $< -o $@ -O1
 
 # Legacy kernel-only PT_INTERP regression fixture: this deliberately uses a
 # tiny raw-syscall interpreter so failures in kernel handoff remain separable
@@ -200,7 +233,7 @@ $(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC
 	mkdir -p $(dir $@)
 	cp $(BUSYBOX_DIR)/busybox $@
 
-$(INITRD): $(INITRD_ELF) $(INITRD_DATA) $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
+$(INITRD): $(INITRD_ELF) $(INITRD_DATA) $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO) $(MLIBC_TEST_DEP_DSO)
 	./build_ext2_root.sh
 
 run: $(KERNEL_IMG) $(INITRD)

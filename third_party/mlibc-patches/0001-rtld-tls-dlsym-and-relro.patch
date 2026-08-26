@@ -1,0 +1,94 @@
+diff --git a/options/rtld/generic/linker.cpp b/options/rtld/generic/linker.cpp
+index 974a1be8..e73ce1c2 100644
+--- a/options/rtld/generic/linker.cpp
++++ b/options/rtld/generic/linker.cpp
+@@ -507,6 +507,10 @@ void ObjectRepository::_fetchFromPhdrs(SharedObject *object, void *phdr_pointer,
+ 					getAllocator()
+ 			};
+ 		} break;
++		case PT_GNU_RELRO:
++			object->relroStart = phdr->p_vaddr;
++			object->relroSize = phdr->p_memsz;
++			break;
+ 		default:
+ 			//FIXME warn about unknown phdrs
+ 			break;
+@@ -682,12 +686,14 @@ frg::expected<LinkerError, void> ObjectRepository::_fetchFromFile(SharedObject *
+ 			object->tlsImagePtr = (void *)(object->baseAddress + phdr->p_vaddr);
+ 		}else if(phdr->p_type == PT_DYNAMIC) {
+ 			object->dynamic = (elf_dyn *)(object->baseAddress + phdr->p_vaddr);
++		}else if(phdr->p_type == PT_GNU_RELRO) {
++			object->relroStart = phdr->p_vaddr;
++			object->relroSize = phdr->p_memsz;
+ 		}else if(phdr->p_type == PT_INTERP
+ 				|| phdr->p_type == PT_PHDR
+ 				|| phdr->p_type == PT_NOTE
+ 				|| phdr->p_type == PT_RISCV_ATTRIBUTES
+ 				|| phdr->p_type == PT_GNU_EH_FRAME
+-				|| phdr->p_type == PT_GNU_RELRO
+ 				|| phdr->p_type == PT_GNU_STACK
+ 				|| phdr->p_type == PT_GNU_PROPERTY) {
+ 			// ignore the phdr
+@@ -1118,7 +1124,8 @@ SharedObject::SharedObject(const char *name, frg::string<MemoryAllocator> path,
+ 		: name(name, getAllocator()), path(std::move(path)),
+ 		interpreterPath(getAllocator()), soName(nullptr),
+ 		isMainObject(is_main_object), objectRts(object_rts), inLinkMap(false),
+-		baseAddress(0), localScope(local_scope), dynamic(nullptr),
++		baseAddress(0), relroStart(0), relroSize(0),
++		localScope(local_scope), dynamic(nullptr),
+ 		globalOffsetTable(nullptr), entry(nullptr), tlsSegmentSize(0),
+ 		tlsAlignment(0), tlsImageSize(0), tlsImagePtr(nullptr),
+ 		tlsInitialized(false), hashTableOffset(0), symbolTableOffset(0),
+@@ -1788,6 +1795,25 @@ void Loader::linkObjects(SharedObject *root) {
+ 	}
+ 
+ 	for(auto object : _linkBfs) {
++		// Relocations are complete now. Protect every complete page covered by
++		// PT_GNU_RELRO before constructors or user code can modify it. The final
++		// partial page is deliberately excluded: it can also contain ordinary
++		// writable data, and ELF linkers arrange fully protected RELRO to end on
++		// a page boundary.
++		if(object->objectRts >= _linkRts && object->relroSize) {
++			uintptr_t start = (object->baseAddress + object->relroStart)
++					& ~(mlibc::page_size - 1);
++			uintptr_t end = (object->baseAddress + object->relroStart
++					+ object->relroSize) & ~(mlibc::page_size - 1);
++			if(end > start) {
++				if(!mlibc::sys_vm_protect)
++					__ensure(!"sys_vm_protect not provided for PT_GNU_RELRO");
++				if(mlibc::sys_vm_protect(reinterpret_cast<void *>(start),
++						end - start, PROT_READ))
++					__ensure(!"sys_vm_protect failed for PT_GNU_RELRO");
++			}
++		}
++
+ 		object->wasLinked = true;
+ 
+ 		if(object->inLinkMap)
+diff --git a/options/rtld/generic/linker.hpp b/options/rtld/generic/linker.hpp
+index 63189498..8b1c580b 100644
+--- a/options/rtld/generic/linker.hpp
++++ b/options/rtld/generic/linker.hpp
+@@ -165,6 +165,8 @@ struct SharedObject {
+ 
+ 	// base address this shared object was loaded to
+ 	uintptr_t baseAddress;
++	uintptr_t relroStart;
++	size_t relroSize;
+ 
+ 	Scope *localScope;
+ 
+diff --git a/options/rtld/generic/main.cpp b/options/rtld/generic/main.cpp
+index b2c10e66..c34da669 100644
+--- a/options/rtld/generic/main.cpp
++++ b/options/rtld/generic/main.cpp
+@@ -789,6 +789,9 @@ void *__dlapi_resolve(void *handle, const char *string, void *returnAddress, con
+ 		lastError = "Cannot resolve requested symbol";
+ 		return nullptr;
+ 	}
++	if (ELF_ST_TYPE(target->symbol()->st_info) == STT_TLS)
++		return reinterpret_cast<char *>(accessDtv(target->object()))
++				+ target->symbol()->st_value;
+ 	return reinterpret_cast<void *>(target->virtualAddress());
+ }
+ 

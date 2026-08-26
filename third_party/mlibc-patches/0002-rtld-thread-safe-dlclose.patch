@@ -1,0 +1,724 @@
+--- a/options/rtld/generic/linker.hpp
++++ b/options/rtld/generic/linker.hpp
+@@ -19,6 +19,7 @@
+ struct SymbolVersion;
+ 
+ extern uint64_t rtsCounter;
++extern uint64_t rtsUnloadCounter;
+ 
+ enum class TlsModel {
+ 	null,
+@@ -76,6 +77,8 @@
+ 	SharedObject *findCaller(void *address);
+ 
+ 	SharedObject *findLoadedObject(frg::string_view name);
++	bool isLoadedObject(SharedObject *object);
++	bool closeObject(SharedObject *object);
+ 
+ 	void addObjectToDestructQueue(SharedObject *object);
+ 	void destructObjects();
+@@ -100,12 +103,16 @@
+ 	void _discoverDependencies(SharedObject *object, Scope *localScope, uint64_t rts);
+ 
+ 	void _addLoadedObject(SharedObject *object);
++	void _removeLoadedObject(SharedObject *object);
++	void _registerLocalScope(Scope *scope);
++	void _collectEmptyScopes();
+ 
+ 	frg::hash_map<frg::string_view, SharedObject *,
+ 			frg::hash<frg::string_view>, MemoryAllocator> _nameMap;
++	frg::vector<Scope *, MemoryAllocator> _localScopes;
+ 
+ 	// Used for destructing the objects, stores all the objects in the order they are initialized.
+-	frg::stack<SharedObject *, MemoryAllocator> _destructQueue;
++	frg::vector<SharedObject *, MemoryAllocator> _destructQueue;
+ };
+ 
+ // --------------------------------------------------------
+@@ -167,6 +174,8 @@
+ 	uintptr_t baseAddress;
+ 	uintptr_t relroStart;
+ 	size_t relroSize;
++	size_t mapSize;
++	bool ownsPhdr;
+ 
+ 	Scope *localScope;
+ 
+@@ -233,6 +242,9 @@
+ 	ssize_t tlsOffset;
+ 
+ 	uint64_t globalRts;
++	size_t openCount;
++	bool noDelete;
++	bool unloadReachable;
+ 	bool wasLinked;
+ 
+ 	bool scheduledForInit;
+@@ -341,6 +353,7 @@
+ 
+ 	// TLS indices.
+ 	frg::vector<SharedObject *, MemoryAllocator> indices;
++	frg::vector<Tcb *, MemoryAllocator> activeTcbs;
+ };
+ 
+ extern frg::manual_box<RuntimeTlsMap> runtimeTlsMap;
+@@ -351,6 +364,7 @@
+ // Tries to access the DTV, if not allocated, or object doesn't have
+ // PT_TLS, return nullptr.
+ void *tryAccessDtv(SharedObject *object);
++void releaseTlsForObject(SharedObject *object);
+ 
+ // --------------------------------------------------------
+ // ObjectSymbol
+@@ -464,6 +478,8 @@
+ 	Scope(bool isGlobal = false);
+ 
+ 	void appendObject(SharedObject *object);
++	void removeObject(SharedObject *object);
++	bool empty() const;
+ 
+ 	frg::optional<ObjectSymbol> resolveSymbol(frg::string_view string, uint64_t skipRts, ResolveFlags flags,
+ 			frg::optional<SymbolVersion> version);
+@@ -527,4 +543,3 @@
+ // --------------------------------------------------------
+ 
+ uintptr_t *rtld_auxvector();
+-
+--- a/options/rtld/generic/linker.cpp
++++ b/options/rtld/generic/linker.cpp
+@@ -76,6 +76,7 @@
+ // object became global). This mechanism is used to determine which
+ // part of the global scope is considered for symbol resolution.
+ uint64_t rtsCounter = 2;
++uint64_t rtsUnloadCounter = 0;
+ 
+ namespace {
+ 
+@@ -183,6 +184,7 @@
+ : loadedObjects{getAllocator()},
+ 	dependencyQueue{getAllocator()},
+ 	_nameMap{frg::hash<frg::string_view>{}, getAllocator()},
++	_localScopes{getAllocator()},
+ 	_destructQueue{getAllocator()} {}
+ 
+ SharedObject *ObjectRepository::injectObjectFromDts(frg::string_view name,
+@@ -338,6 +340,7 @@
+ 	if(fd == -1)
+ 		return LinkerError::notFound;
+ 
++	bool ownsScope = createScope;
+ 	if (createScope) {
+ 		__ensure(localScope == nullptr);
+ 
+@@ -354,12 +357,16 @@
+ 	closeOrDie(fd);
+ 	if(!result) {
+ 		frg::destruct(getAllocator(), object);
++		if(ownsScope)
++			frg::destruct(getAllocator(), localScope);
+ 		return result.error();
+ 	}
+ 
+ 	_parseDynamic(object);
+ 	_parseVerdef(object);
+ 	_addLoadedObject(object);
++	if(ownsScope)
++		_registerLocalScope(localScope);
+ 
+ 	return object;
+ }
+@@ -375,6 +382,7 @@
+ 	if (auto obj = findLoadedObject(name))
+ 		return obj;
+ 
++	bool ownsScope = createScope;
+ 	if (createScope) {
+ 		__ensure(localScope == nullptr);
+ 
+@@ -392,18 +400,24 @@
+ 	int fd;
+ 	if(mlibc::sys_open((no_prefix + '\0').data(), O_RDONLY, 0, &fd)) {
+ 		frg::destruct(getAllocator(), object);
++		if(ownsScope)
++			frg::destruct(getAllocator(), localScope);
+ 		return LinkerError::notFound;
+ 	}
+ 	auto result = _fetchFromFile(object, fd);
+ 	closeOrDie(fd);
+ 	if(!result) {
+ 		frg::destruct(getAllocator(), object);
++		if(ownsScope)
++			frg::destruct(getAllocator(), localScope);
+ 		return result.error();
+ 	}
+ 
+ 	_parseDynamic(object);
+ 	_parseVerdef(object);
+ 	_addLoadedObject(object);
++	if(ownsScope)
++		_registerLocalScope(localScope);
+ 
+ 	return object;
+ }
+@@ -447,6 +461,14 @@
+ 	return nullptr;
+ }
+ 
++bool ObjectRepository::isLoadedObject(SharedObject *target) {
++	for(auto object : loadedObjects) {
++		if(object == target)
++			return true;
++	}
++	return false;
++}
++
+ void ObjectRepository::addObjectToDestructQueue(SharedObject *object) {
+ 	_destructQueue.push(object);
+ }
+@@ -455,7 +477,7 @@
+ 
+ void ObjectRepository::destructObjects() {
+ 	while (_destructQueue.size() > 0) {
+-		auto top = _destructQueue.top();
++		auto top = _destructQueue[_destructQueue.size() - 1];
+ 		doDestruct(top);
+ 		_destructQueue.pop();
+ 	}
+@@ -579,6 +601,8 @@
+ 	__ensure(!(object->baseAddress & (hugeSize - 1)));
+ 
+ 	highest_address = (highest_address + mlibc::page_size - 1) & ~(mlibc::page_size - 1);
++	object->mapSize = highest_address;
++	object->ownsPhdr = true;
+ 
+ #if MLIBC_MMAP_ALLOCATE_DSO
+ 	void *mappedAddr = nullptr;
+@@ -796,9 +820,9 @@
+ 		case DT_FLAGS_1:
+ 			if(dynamic->d_un.d_val & DF_1_NOW)
+ 				object->eagerBinding = true;
++			if(dynamic->d_un.d_val & DF_1_NODELETE)
++				object->noDelete = true;
+ 			// The DF_1_PIE flag is informational only. It is used by e.g file(1).
+-			// The DF_1_NODELETE flag has a similar effect to RTLD_NODELETE, both of which we
+-			// ignore because we don't implement dlclose().
+ 			if(dynamic->d_un.d_val & ~(DF_1_NOW | DF_1_PIE | DF_1_NODELETE))
+ 				mlibc::infoLogger() << "\e[31mrtld: DT_FLAGS_1(" << frg::hex_fmt{dynamic->d_un.d_val}
+ 						<< ") is not implemented correctly!\e[39m"
+@@ -1124,7 +1148,7 @@
+ 		: name(name, getAllocator()), path(std::move(path)),
+ 		interpreterPath(getAllocator()), soName(nullptr),
+ 		isMainObject(is_main_object), objectRts(object_rts), inLinkMap(false),
+-		baseAddress(0), relroStart(0), relroSize(0),
++		baseAddress(0), relroStart(0), relroSize(0), mapSize(0), ownsPhdr(false),
+ 		localScope(local_scope), dynamic(nullptr),
+ 		globalOffsetTable(nullptr), entry(nullptr), tlsSegmentSize(0),
+ 		tlsAlignment(0), tlsImageSize(0), tlsImagePtr(nullptr),
+@@ -1135,7 +1159,8 @@
+ 		lazyExplicitAddend(false), symbolicResolution(false),
+ 		eagerBinding(false), haveStaticTls(false),
+ 		dependencies(getAllocator()), tlsModel(TlsModel::null),
+-		tlsOffset(0), globalRts(0), wasLinked(false),
++		tlsOffset(0), globalRts(0), openCount(0), noDelete(false),
++		unloadReachable(false), wasLinked(false),
+ 		scheduledForInit(false), onInitStack(false),
+ 		wasInitialized(false) { }
+ 
+@@ -1325,12 +1350,121 @@
+ 	object->wasDestroyed = true;
+ }
+ 
++void ObjectRepository::_registerLocalScope(Scope *scope) {
++	_localScopes.push_back(scope);
++}
++
++void ObjectRepository::_collectEmptyScopes() {
++	size_t output = 0;
++	for(size_t i = 0; i < _localScopes.size(); i++) {
++		if(_localScopes[i]->empty()) {
++			frg::destruct(getAllocator(), _localScopes[i]);
++		}else{
++			_localScopes[output++] = _localScopes[i];
++		}
++	}
++	_localScopes.resize(output);
++}
++
++void ObjectRepository::_removeLoadedObject(SharedObject *object) {
++	__ensure(object->objectRts > 1);
++	__ensure(!object->unloadReachable);
++
++	globalScope->removeObject(object);
++	for(auto scope : _localScopes)
++		scope->removeObject(object);
++
++	if(object->inLinkMap) {
++		if(object->linkMap.prev)
++			object->linkMap.prev->next = object->linkMap.next;
++		if(object->linkMap.next)
++			object->linkMap.next->prev = object->linkMap.prev;
++		object->inLinkMap = false;
++	}
++
++	releaseTlsForObject(object);
++	_nameMap.remove(object->name);
++
++	auto removePointer = [object](auto &vector) {
++		size_t output = 0;
++		for(size_t i = 0; i < vector.size(); i++) {
++			if(vector[i] != object)
++				vector[output++] = vector[i];
++		}
++		vector.resize(output);
++	};
++	removePointer(loadedObjects);
++	removePointer(dependencyQueue);
++	removePointer(_destructQueue);
++
++	if(object->mapSize) {
++		if(mlibc::sys_vm_unmap(reinterpret_cast<void *>(object->baseAddress),
++				object->mapSize))
++			__ensure(!"sys_vm_unmap failed while unloading DSO");
++	}
++	if(object->ownsPhdr)
++		getAllocator().deallocate(object->phdrPointer,
++				object->phdrCount * object->phdrEntrySize);
++
++	frg::destruct(getAllocator(), object);
++	++rtsUnloadCounter;
++}
++
++bool ObjectRepository::closeObject(SharedObject *object) {
++	if(!isLoadedObject(object))
++		return false;
++
++	if(object->openCount) {
++		--object->openCount;
++	}else if(object->objectRts > 1) {
++		return false;
++	}
++	if(object->openCount)
++		return true;
++
++	for(auto loaded : loadedObjects)
++		loaded->unloadReachable = false;
++
++	frg::vector<SharedObject *, MemoryAllocator> queue{getAllocator()};
++	for(auto loaded : loadedObjects) {
++		if(loaded->objectRts == 1 || loaded->openCount || loaded->noDelete) {
++			loaded->unloadReachable = true;
++			queue.push_back(loaded);
++		}
++	}
++	for(size_t i = 0; i < queue.size(); i++) {
++		for(auto dependency : queue[i]->dependencies) {
++			if(!dependency->unloadReachable) {
++				dependency->unloadReachable = true;
++				queue.push_back(dependency);
++			}
++		}
++	}
++
++	// The initialization queue stores dependencies before their users. Walk it
++	// backwards so destructors run users-before-dependencies.
++	for(size_t i = _destructQueue.size(); i > 0; i--) {
++		if(!_destructQueue[i - 1]->unloadReachable)
++			doDestruct(_destructQueue[i - 1]);
++	}
++
++	frg::vector<SharedObject *, MemoryAllocator> unload{getAllocator()};
++	for(auto loaded : loadedObjects) {
++		if(!loaded->unloadReachable)
++			unload.push_back(loaded);
++	}
++	for(size_t i = unload.size(); i > 0; i--)
++		_removeLoadedObject(unload[i - 1]);
++	_collectEmptyScopes();
++	return true;
++}
++
+ // --------------------------------------------------------
+ // RuntimeTlsMap
+ // --------------------------------------------------------
+ 
+ RuntimeTlsMap::RuntimeTlsMap()
+-: initialPtr{0}, initialLimit{0}, indices{getAllocator()} { }
++: initialPtr{0}, initialLimit{0}, indices{getAllocator()}, activeTcbs{getAllocator()} { }
+ 
+ void initTlsObjects(Tcb *tcb, const frg::vector<SharedObject *, MemoryAllocator> &objects, bool checkInitialized) {
+ 	// Initialize TLS segments that follow the static model.
+@@ -1415,6 +1549,8 @@
+ 	memset(tcb_ptr->dtvPointers, 0, sizeof(void *) * runtimeTlsMap->indices.size());
+ 	for(size_t i = 0; i < runtimeTlsMap->indices.size(); ++i) {
+ 		auto object = runtimeTlsMap->indices[i];
++		if(!object)
++			continue;
+ 		if(object->tlsModel != TlsModel::initial)
+ 			continue;
+ 
+@@ -1424,6 +1560,7 @@
+ 			tcb_ptr->dtvPointers[i] = reinterpret_cast<char *>(tcb_ptr) + object->tlsOffset;
+ 		}
+ 	}
++	runtimeTlsMap->activeTcbs.push_back(tcb_ptr);
+ 
+ 	return tcb_ptr;
+ }
+@@ -1472,6 +1609,25 @@
+ 	return (void *)((char *)tcb_ptr->dtvPointers[object->tlsIndex] + TLS_DTV_OFFSET);
+ }
+ 
++void releaseTlsForObject(SharedObject *object) {
++	if(object->tlsModel == TlsModel::null)
++		return;
++
++	for(auto tcb : runtimeTlsMap->activeTcbs) {
++		if(object->tlsIndex >= tcb->dtvSize)
++			continue;
++		void *pointer = tcb->dtvPointers[object->tlsIndex];
++		if(!pointer)
++			continue;
++		if(object->tlsModel == TlsModel::dynamic)
++			getAllocator().deallocate(pointer, object->tlsSegmentSize);
++		tcb->dtvPointers[object->tlsIndex] = nullptr;
++	}
++
++	__ensure(object->tlsIndex < runtimeTlsMap->indices.size());
++	runtimeTlsMap->indices[object->tlsIndex] = nullptr;
++}
++
+ // --------------------------------------------------------
+ // ObjectSymbol
+ // --------------------------------------------------------
+@@ -1658,6 +1814,19 @@
+ 	_objects.push(object);
+ }
+ 
++void Scope::removeObject(SharedObject *object) {
++	size_t output = 0;
++	for(size_t i = 0; i < _objects.size(); i++) {
++		if(_objects[i] != object)
++			_objects[output++] = _objects[i];
++	}
++	_objects.resize(output);
++}
++
++bool Scope::empty() const {
++	return _objects.empty();
++}
++
+ frg::optional<ObjectSymbol> Scope::resolveGlobalOrLocal(Scope &globalScope,
+ 		Scope *localScope, frg::string_view string, uint64_t skipRts, ResolveFlags flags,
+ 		frg::optional<SymbolVersion> version) {
+@@ -1830,6 +1999,20 @@
+ 	}
+ }
+ 
++static void assignTlsIndex(SharedObject *object, bool permitReuse) {
++	if(permitReuse) {
++		for(size_t i = 0; i < runtimeTlsMap->indices.size(); i++) {
++			if(!runtimeTlsMap->indices[i]) {
++				object->tlsIndex = i;
++				runtimeTlsMap->indices[i] = object;
++				return;
++			}
++		}
++	}
++	object->tlsIndex = runtimeTlsMap->indices.size();
++	runtimeTlsMap->indices.push_back(object);
++}
++
+ void Loader::_buildTlsMaps() {
+ 	if(_isInitialLink) {
+ 		__ensure(runtimeTlsMap->initialPtr == 0);
+@@ -1844,9 +2027,7 @@
+ 			if(object->tlsSegmentSize == 0)
+ 				continue;
+ 
+-			// Allocate an index for the object.
+-			object->tlsIndex = runtimeTlsMap->indices.size();
+-			runtimeTlsMap->indices.push_back(object);
++			assignTlsIndex(object, false);
+ 
+ 			object->tlsModel = TlsModel::initial;
+ 
+@@ -1883,9 +2064,7 @@
+ 			if(object->tlsSegmentSize == 0)
+ 				continue;
+ 
+-			// Allocate an index for the object.
+-			object->tlsIndex = runtimeTlsMap->indices.size();
+-			runtimeTlsMap->indices.push_back(object);
++			assignTlsIndex(object, true);
+ 
+ 			// There are some libraries (e.g. Mesa) that require static TLS even though
+ 			// they expect to be dynamically loaded.
+@@ -2302,4 +2481,3 @@
+ 		}
+ 	}
+ }
+-
+--- a/options/rtld/generic/main.cpp
++++ b/options/rtld/generic/main.cpp
+@@ -3,6 +3,7 @@
+ #include <link.h>
+ 
+ #include <frg/manual_box.hpp>
++#include <frg/mutex.hpp>
+ #include <frg/small_vector.hpp>
+ 
+ #include <abi-bits/auxv.h>
+@@ -11,6 +12,7 @@
+ #include <mlibc/rtld-config.hpp>
+ #include <mlibc/rtld-abi.hpp>
+ #include <mlibc/stack_protector.hpp>
++#include <mlibc/lock.hpp>
+ #include <internal-config.h>
+ #include <abi-bits/auxv.h>
+ 
+@@ -48,6 +50,13 @@
+ frg::manual_box<Scope> globalScope;
+ 
+ frg::manual_box<RuntimeTlsMap> runtimeTlsMap;
++frg::manual_box<RecursiveFutexLock> rtldLock;
++
++struct DlErrorSlot {
++	int tid;
++	const char *error;
++};
++frg::manual_box<frg::vector<DlErrorSlot, MemoryAllocator>> dlErrorSlots;
+ 
+ // We use a small vector to avoid memory allocation for the default library paths
+ frg::manual_box<frg::small_vector<frg::string_view, MLIBC_NUM_DEFAULT_LIBRARY_PATHS, MemoryAllocator>> libraryPaths;
+@@ -201,6 +210,7 @@
+ #endif
+ 
+ extern "C" void *lazyRelocate(SharedObject *object, unsigned int rel_index) {
++	frg::unique_lock lock{*rtldLock};
+ 	__ensure(object->lazyExplicitAddend);
+ 	auto reloc = (elf_rela *)(object->baseAddress + object->lazyRelocTableOffset
+ 			+ rel_index * sizeof(elf_rela));
+@@ -223,6 +233,7 @@
+ }
+ 
+ extern "C" [[ gnu::visibility("default") ]] void *__rtld_allocateTcb() {
++	frg::unique_lock lock{*rtldLock};
+ 	auto tcb = allocateTcb();
+ 	initTlsObjects(tcb, globalScope->_objects, false);
+ 	return tcb;
+@@ -294,6 +305,8 @@
+ 		__ensure(!"sys_tcb_set() failed");
+ 	mlibc::tcb_available_flag = true;
+ 
++	rtldLock.initialize();
++	dlErrorSlots.initialize(getAllocator());
+ 	runtimeTlsMap.initialize();
+ 	libraryPaths.initialize(getAllocator());
+ 	preloads.initialize(getAllocator());
+@@ -575,7 +588,28 @@
+ 	return executableSO->entry;
+ }
+ 
+-const char *lastError;
++static void setLastError(const char *error) {
++	int tid = mlibc::this_tid();
++	for(auto &slot : *dlErrorSlots) {
++		if(slot.tid == tid) {
++			slot.error = error;
++			return;
++		}
++	}
++	dlErrorSlots->push_back({tid, error});
++}
++
++static const char *takeLastError() {
++	int tid = mlibc::this_tid();
++	for(auto &slot : *dlErrorSlots) {
++		if(slot.tid == tid) {
++			auto error = slot.error;
++			slot.error = nullptr;
++			return error;
++		}
++	}
++	return nullptr;
++}
+ 
+ extern "C" [[ gnu::visibility("default") ]] uintptr_t *__dlapi_entrystack() {
+ 	return entryStack;
+@@ -583,13 +617,13 @@
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+ const char *__dlapi_error() {
+-	auto error = lastError;
+-	lastError = nullptr;
+-	return error;
++	frg::unique_lock lock{*rtldLock};
++	return takeLastError();
+ }
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+ void *__dlapi_get_tls(struct __abi_tls_entry *entry) {
++	frg::unique_lock lock{*rtldLock};
+ 	return reinterpret_cast<char *>(accessDtv(entry->object)) + entry->offset;
+ }
+ 
+@@ -613,14 +647,17 @@
+ 	 * found exactly that way, building extron's aarch64 sysdeps.
+ 	 * There are, correctly, no objects to destruct when nothing was
+ 	 * ever tracked into the repository in the first place. */
+-	if (initialRepository.valid())
++	if (initialRepository.valid() && rtldLock.valid()) {
++		frg::unique_lock lock{*rtldLock};
+ 		initialRepository->destructObjects();
++	}
+ }
+ 
+ #if __MLIBC_POSIX_OPTION
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+ void *__dlapi_open(const char *file, int flags, void *returnAddress) {
++	frg::unique_lock lock{*rtldLock};
+ 	if (logDlCalls)
+ 		mlibc::infoLogger() << "rtld: __dlapi_open(" << (file ? file : "nullptr") << ")" << frg::endlog;
+ 
+@@ -630,7 +667,6 @@
+ 	if(!file)
+ 		return executableSO;
+ 
+-	// TODO: Thread-safety!
+ 	auto rts = rtsCounter++;
+ 
+ 	SharedObject *object;
+@@ -642,6 +678,10 @@
+ 			object->globalRts = rts;
+ 			globalScope->appendObject(object);
+ 		}
++		if(!object) {
++			setLastError("Requested DSO is not loaded");
++			return nullptr;
++		}
+ 	} else {
+ 		bool isGlobal = flags & RTLD_GLOBAL;
+ 		Scope *newScope = isGlobal ? globalScope.get() : nullptr;
+@@ -665,29 +705,32 @@
+ 			case LinkerError::success:
+ 				__builtin_unreachable();
+ 			case LinkerError::notFound:
+-				lastError = "Cannot locate requested DSO";
++				setLastError("Cannot locate requested DSO");
+ 				break;
+ 			case LinkerError::fileTooShort:
+-				lastError = "File too short";
++				setLastError("File too short");
+ 				break;
+ 			case LinkerError::notElf:
+-				lastError = "File is not an ELF file";
++				setLastError("File is not an ELF file");
+ 				break;
+ 			case LinkerError::wrongElfType:
+-				lastError = "File has wrong ELF type";
++				setLastError("File has wrong ELF type");
+ 				break;
+ 			case LinkerError::outOfMemory:
+-				lastError = "Out of memory";
++				setLastError("Out of memory");
+ 				break;
+ 			case LinkerError::invalidProgramHeader:
+-				lastError = "File has invalid program header";
++				setLastError("File has invalid program header");
+ 				break;
+ 			}
+ 			return nullptr;
+ 		}
+ 
+ 		object = objectResult.value();
+-		initialRepository->discoverDependenciesFromLoadedObject(object);
++		if(!object->dependenciesDiscovered) {
++			initialRepository->discoverDependenciesFromLoadedObject(object);
++			object->dependenciesDiscovered = true;
++		}
+ 		for (size_t i = 0; i < initialRepository->dependencyQueue.size(); i++) {
+ 			auto current = initialRepository->dependencyQueue[i];
+ 			if(!current->dependenciesDiscovered) {
+@@ -700,6 +743,9 @@
+ 		linker.linkObjects(object);
+ 		linker.initObjects(initialRepository.get());
+ 	}
++	object->openCount++;
++	if(flags & RTLD_NODELETE)
++		object->noDelete = true;
+ 
+ 	dl_debug_state();
+ 
+@@ -708,6 +754,12 @@
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+ void *__dlapi_resolve(void *handle, const char *string, void *returnAddress, const char *version) {
++	frg::unique_lock lock{*rtldLock};
++	if(handle != RTLD_DEFAULT && handle != RTLD_NEXT
++			&& !initialRepository->isLoadedObject(reinterpret_cast<SharedObject *>(handle))) {
++		setLastError("Invalid or closed DSO handle");
++		return nullptr;
++	}
+ 	if (logDlCalls) {
+ 		const char *name;
+ 		bool quote = false;
+@@ -786,7 +838,7 @@
+ 		if (logDlCalls)
+ 			mlibc::infoLogger() << "rtld: could not resolve \"" << string << "\"" << frg::endlog;
+ 
+-		lastError = "Cannot resolve requested symbol";
++		setLastError("Cannot resolve requested symbol");
+ 		return nullptr;
+ 	}
+ 	if (ELF_ST_TYPE(target->symbol()->st_info) == STT_TLS)
+@@ -806,6 +858,7 @@
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
++	frg::unique_lock lock{*rtldLock};
+ 	if (logDlCalls)
+ 		mlibc::infoLogger() << "rtld: __dlapi_reverse(" << ptr << ")" << frg::endlog;
+ 
+@@ -905,9 +958,13 @@
+ }
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+-int __dlapi_close(void *) {
+-	if (logDlCalls)
+-		mlibc::infoLogger() << "mlibc: dlclose() is a no-op" << frg::endlog;
++int __dlapi_close(void *handle) {
++	frg::unique_lock lock{*rtldLock};
++	if(!initialRepository->closeObject(reinterpret_cast<SharedObject *>(handle))) {
++		setLastError("Invalid or already closed DSO handle");
++		return -1;
++	}
++	dl_debug_state();
+ 	return 0;
+ }
+ 
+@@ -915,6 +972,7 @@
+ 
+ extern "C" [[ gnu::visibility("default") ]]
+ int __dlapi_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void*), void *data) {
++	frg::unique_lock lock{*rtldLock};
+ 	int last_return = 0;
+ 	for (auto object : initialRepository->loadedObjects) {
+ 		struct dl_phdr_info info;
+@@ -929,7 +987,7 @@
+ 		info.dlpi_phdr = static_cast<ElfW(Phdr)*>(object->phdrPointer);
+ 		info.dlpi_phnum = object->phdrCount;
+ 		info.dlpi_adds = rtsCounter;
+-		info.dlpi_subs = 0; // TODO(geert): implement dlclose().
++		info.dlpi_subs = rtsUnloadCounter;
+ 		if (object->tlsModel != TlsModel::null)
+ 			info.dlpi_tls_modid = object->tlsIndex;
+ 		else
+@@ -956,6 +1014,7 @@
+ #if __MLIBC_GLIBC_OPTION
+ 
+ extern "C" [[gnu::visibility("default")]] int __dlapi_find_object(void *address, dl_find_object *result) {
++	frg::unique_lock lock{*rtldLock};
+ 	for(const SharedObject *object : initialRepository->loadedObjects) {
+ 		if(object->baseAddress > reinterpret_cast<uintptr_t>(address))
+ 			continue;

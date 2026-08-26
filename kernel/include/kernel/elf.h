@@ -171,6 +171,7 @@ typedef enum {
 #define AT_EUID   12
 #define AT_GID    13
 #define AT_EGID   14
+#define AT_RANDOM 25 /* pointer to 16 bytes of per-exec random seed data */
 #define AT_EXECFN 31 /* pathname passed to execve() */
 
 #endif /* ELF_H */
