@@ -4,18 +4,13 @@ add_pt_interp.py IN_ELF INTERP_PATH OUT_ELF
 
 Splices a PT_INTERP program header onto an existing, already-linked
 static ET_EXEC ELF64/little-endian binary, without disturbing any of
-its existing content or offsets — used to build a PT_INTERP regression
-fixture (see usr/mlibc_tests/mlibc_ptinterp_victim.c) since this
-project's toolchain has no real dynamic linker to link against yet, so
-there's no ordinary way to get a real PT_INTERP segment out of it.
+its existing content or offsets. This legacy fixture remains useful as
+a kernel handoff test alongside the real mlibc dynamic linker.
 
-Approach: every existing byte of the input file stays exactly where it
-is — this only APPENDS two things past the end of the file: the
-INTERP_PATH string, and a brand-new program header table (a copy of
-the original entries plus one new PT_INTERP entry) — then repoints
-e_phoff/e_phnum at that new table. Nothing already in the file (any
-existing p_offset/p_vaddr, or the ELF header's own e_entry) needs to
-change, since nothing already there moved.
+The new header is placed in the linker's zero padding immediately after
+the existing program-header table, keeping AT_PHDR inside the first
+PT_LOAD as required by real dynamic linkers. Only the interpreter string
+is appended to the file.
 """
 import os
 import struct
@@ -54,8 +49,6 @@ def main():
               file=sys.stderr)
         return 1
 
-    old_table = bytes(data[e_phoff:e_phoff + e_phnum * e_phentsize])
-
     # Append the interpreter path string.
     interp_bytes = interp_path.encode("utf-8") + b"\x00"
     interp_str_off = len(data)
@@ -73,12 +66,20 @@ def main():
         1,                   # p_align
     )
 
-    # New, contiguous program header table: the untouched original
-    # entries plus the new one, placed after the interp string.
-    new_table_off = len(data)
-    data += old_table + new_phdr
-
-    struct.pack_into("<Q", data, EHDR_E_PHOFF_OFF, new_table_off)
+    new_header_off = e_phoff + e_phnum * e_phentsize
+    new_header_end = new_header_off + PHDR_SIZE
+    containing_load = False
+    for i in range(e_phnum):
+        ph = struct.unpack_from(PHDR_FORMAT, data, e_phoff + i * e_phentsize)
+        p_type, p_offset, p_filesz = ph[0], ph[2], ph[5]
+        if p_type == 1 and new_header_off >= p_offset and new_header_end <= p_offset + p_filesz:
+            containing_load = True
+            break
+    if not containing_load or any(data[new_header_off:new_header_end]):
+        print(f"{in_path}: no zero PT_LOAD padding for another program header",
+              file=sys.stderr)
+        return 1
+    data[new_header_off:new_header_end] = new_phdr
     struct.pack_into("<H", data, EHDR_E_PHNUM_OFF, e_phnum + 1)
 
     with open(out_path, "wb") as f:

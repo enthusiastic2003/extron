@@ -65,7 +65,11 @@ USER_DATA    := $(wildcard usr/*.txt) $(wildcard usr/*.wad) usr/nano $(shell fin
 MLIBC_GCC     ?= $(HOME)/extron-toolkit/toolchain/bin/aarch64-extron-gcc
 MLIBC_SYSROOT := usr/mlibc-sysroot
 MLIBC_LIBC    := $(MLIBC_SYSROOT)/lib/libc.a
-MLIBC_C_SRC   := $(wildcard usr/mlibc_tests/*.c)
+MLIBC_LDSO    := $(MLIBC_SYSROOT)/lib/ld.so
+MLIBC_LIBC_SO := $(MLIBC_SYSROOT)/lib/libc.so
+MLIBC_TEST_DSO := $(BUILD)/initrd/lib/libextron_rtld_test.so
+MLIBC_C_SRC   := $(filter-out usr/mlibc_tests/libextron_rtld_test.c,\
+                  $(wildcard usr/mlibc_tests/*.c))
 # Built into initrd's tests/ subdirectory rather than flat at the root —
 # this suite has grown to 20+ binaries, which was drowning out the
 # handful of things (sh, doom.elf, reboot.elf, hello.txt) an interactive
@@ -139,14 +143,24 @@ $(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
 
-# mlibc_ptinterp_victim.elf regression fixture: compiled exactly like every
-# other usr/mlibc_tests/*.c above, then tools/add_pt_interp.py splices a
-# PT_INTERP segment onto the compiled binary pointing at
-# /opt/tests/mlibc_fake_interp.elf (see that script and both .c files'
-# own header comments for why — this project has no real ld.so to link
-# against yet, so there's no ordinary way to produce a real PT_INTERP
-# segment). Make prefers this specific target rule over the tests/%.elf
-# pattern rule above for this one file, so the pattern rule is untouched.
+# First real dynamic-linker fixture. The explicit -L must precede the
+# toolchain's built-in static-only sysroot, or its libc.a wins before this
+# repository's libc.so is considered.
+$(MLIBC_TEST_DSO): usr/mlibc_tests/libextron_rtld_test.c
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" -fPIC -shared \
+		-nostdlib -Wl,-soname,libextron_rtld_test.so $< -o $@
+
+$(BUILD)/initrd/tests/mlibc_dynamic_test.elf: usr/mlibc_tests/mlibc_dynamic_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
+	mkdir -p $(dir $@)
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" \
+		-L"$(abspath $(BUILD))/initrd/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so $< -lextron_rtld_test -o $@ -O1
+
+# Legacy kernel-only PT_INTERP regression fixture: this deliberately uses a
+# tiny raw-syscall interpreter so failures in kernel handoff remain separable
+# from failures in the real mlibc ld.so exercised by mlibc_dynamic_test.elf.
 $(BUILD)/initrd/tests/mlibc_ptinterp_victim.elf: usr/mlibc_tests/mlibc_ptinterp_victim.c $(MLIBC_LIBC) tools/add_pt_interp.py
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@.tmp -static -O1
@@ -186,7 +200,7 @@ $(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC
 	mkdir -p $(dir $@)
 	cp $(BUSYBOX_DIR)/busybox $@
 
-$(INITRD): $(INITRD_ELF) $(INITRD_DATA)
+$(INITRD): $(INITRD_ELF) $(INITRD_DATA) $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
 	./build_ext2_root.sh
 
 run: $(KERNEL_IMG) $(INITRD)

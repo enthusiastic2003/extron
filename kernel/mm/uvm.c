@@ -399,7 +399,38 @@ int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
     if (end <= base)
         return -1;
 
+    /* Allocate before modifying the list. Previously an allocation failure
+     * after absorbing overlapping ELF VMAs lost the old bookkeeping nodes,
+     * so exec failure could leak all pages they had described. */
+    struct vma *node = kmalloc(sizeof(struct vma));
+    if (!node)
+        return -1;
+
     irq_spin_lock(&mm->lock);
+
+    /* Validate the entire overlap set before removing any node. A range can
+     * span more than one VMA; discovering an incompatible backing after an
+     * earlier compatible node had already been removed would make failure
+     * non-transactional. */
+    virt_addr_t merged_base = base;
+    virt_addr_t merged_end = end;
+    for (struct vma *scan = mm->vmas; scan; scan = scan->next) {
+        if (scan->base + scan->size <= merged_base)
+            continue;
+        if (scan->base >= merged_end)
+            break;
+        if (scan->owns_pages != owns_pages || scan->backing) {
+            irq_spin_unlock(&mm->lock);
+            kfree(node);
+            return -1;
+        }
+        if (scan->base < merged_base)
+            merged_base = scan->base;
+        if (scan->base + scan->size > merged_end)
+            merged_end = scan->base + scan->size;
+    }
+    base = merged_base;
+    end = merged_end;
 
     /* Absorb every node this range genuinely OVERLAPS into a single
      * one. Two PT_LOAD segments routinely share a page — text ending
@@ -426,10 +457,6 @@ int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
         /* Merging only makes sense if both halves agree on ownership: a
          * node covering both a shared view and an owned allocation
          * could not be torn down correctly either way round. */
-        if (cur->owns_pages != owns_pages || cur->backing) {
-            irq_spin_unlock(&mm->lock);
-            return -1;
-        }
         if (cur->base < base) base = cur->base;
         if (cur->base + cur->size > end) end = cur->base + cur->size;
 
@@ -439,11 +466,6 @@ int vm_insert_region(struct vm_space *mm, virt_addr_t base, size_t size,
         vma_release(dead);
     }
 
-    struct vma *node = kmalloc(sizeof(struct vma));
-    if (!node) {
-        irq_spin_unlock(&mm->lock);
-        return -1;
-    }
     node->base       = base;
     node->size       = end - base;
     node->flags      = VM_USER;

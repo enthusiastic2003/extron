@@ -5,7 +5,16 @@ sysdep_supported_options = {
 	'bsd': false,
 }
 
-add_project_arguments('-D_GNU_SOURCE', language: ['c', 'cpp'])
+# Extron has real file-backed MAP_PRIVATE mappings and mprotect(). Let the
+# runtime linker reserve DSO address space through mmap() instead of using
+# mlibc's fixed 0x41000000 fallback, which is outside Extron's mmap arena.
+internal_conf.set10('MLIBC_MAP_DSO_SEGMENTS', true)
+internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', true)
+
+# Cortex-A72 predates LSE. More importantly, ld.so must not require libgcc's
+# __aarch64_* atomic helpers before it has loaded any shared libraries.
+add_project_arguments('-D_GNU_SOURCE', '-mno-outline-atomics',
+    language: ['c', 'cpp'])
 
 # Add any hardware capabilities you are missing here
 # libc_hw_caps += {
@@ -13,8 +22,9 @@ add_project_arguments('-D_GNU_SOURCE', language: ['c', 'cpp'])
 #    'missing_file_locking': true,
 #}
 
-# Compile our generic.cpp into both the dynamic linker and the standard library
-# rtld_sources += files('generic/generic.cpp')
+# ld.so runs before libc.so exists. Keep its syscall surface deliberately
+# small and independent from libc startup, pthread cancellation, and stdio.
+rtld_sources += files('generic/rtld.cpp')
 libc_sources += files('generic/generic.cpp', 'generic/thread.cpp',
     'thread_entry.S', 'signals.S')
 

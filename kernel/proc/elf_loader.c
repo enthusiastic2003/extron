@@ -54,10 +54,11 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size,
         return ELF_ERR_ENTRY;
 
     /* 8. Program header table must be within bounds */
+    uint64_t phdr_bytes = (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
     if (ehdr->e_phoff == 0 ||
         ehdr->e_phnum == 0 ||
         ehdr->e_phentsize != sizeof(Elf64_Phdr) ||
-        ehdr->e_phoff + (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr) > size)
+        ehdr->e_phoff > size || phdr_bytes > size - ehdr->e_phoff)
         return ELF_ERR_PHOFF;
 
     /* 9. Program header entry size must match what we expect */
@@ -79,17 +80,80 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size,
      * actually copy out and later resolve through the VFS: its bytes
      * must lie within the buffer, and fit (with room for a NUL) in
      * the fixed-size buffer struct elf_aux_info offers for it. */
+    bool entry_is_executable = false;
+    bool phdr_is_loaded = false;
     for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            if (phdr[i].p_filesz > phdr[i].p_memsz ||
+                phdr[i].p_offset > size ||
+                phdr[i].p_filesz > size - phdr[i].p_offset ||
+                phdr[i].p_vaddr > UINT64_MAX - phdr[i].p_memsz)
+                return ELF_ERR_SEGMENT;
+            /* GNU ld can emit an empty placeholder LOAD whose offset and
+             * virtual address are not congruent. It maps no bytes, so its
+             * alignment has no runtime meaning. */
+            if (!phdr[i].p_memsz)
+                continue;
+            if (phdr[i].p_align > 1 &&
+                ((phdr[i].p_align & (phdr[i].p_align - 1)) ||
+                 (phdr[i].p_vaddr & (phdr[i].p_align - 1)) !=
+                 (phdr[i].p_offset & (phdr[i].p_align - 1))))
+                return ELF_ERR_SEGMENT;
+            if ((phdr[i].p_flags & PF_X) &&
+                ehdr->e_entry >= phdr[i].p_vaddr &&
+                ehdr->e_entry < phdr[i].p_vaddr + phdr[i].p_memsz)
+                entry_is_executable = true;
+            if (ehdr->e_phoff >= phdr[i].p_offset &&
+                ehdr->e_phoff + phdr_bytes <= phdr[i].p_offset + phdr[i].p_filesz)
+                phdr_is_loaded = true;
+        }
         if (phdr[i].p_type != PT_INTERP)
             continue;
         if (phdr[i].p_filesz == 0 ||
             phdr[i].p_filesz > (uint64_t)ELF_INTERP_PATH_MAX - 1 ||
-            phdr[i].p_offset + phdr[i].p_filesz > size)
+            phdr[i].p_offset > size ||
+            phdr[i].p_filesz > size - phdr[i].p_offset ||
+            ((const char *)buffer)[phdr[i].p_offset + phdr[i].p_filesz - 1] != '\0')
             return ELF_ERR_INTERP;
-        break;
     }
 
+    if (!entry_is_executable || !phdr_is_loaded)
+        return ELF_ERR_SEGMENT;
+
     return ELF_OK;
+}
+
+static uint64_t load_page_flags(const Elf64_Phdr *phdr, Elf64_Half phnum,
+                                virt_addr_t bias, virt_addr_t page_va) {
+    bool writable = false;
+    bool executable = false;
+    for (Elf64_Half i = 0; i < phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD || !phdr[i].p_memsz)
+            continue;
+        virt_addr_t start = phdr[i].p_vaddr + bias;
+        virt_addr_t end = start + phdr[i].p_memsz;
+        if (page_va + PAGE_SIZE <= start || page_va >= end)
+            continue;
+        writable |= (phdr[i].p_flags & PF_W) != 0;
+        executable |= (phdr[i].p_flags & PF_X) != 0;
+    }
+    uint64_t flags = PAGE_PRESENT | PAGE_USER;
+    if (writable) flags |= PAGE_WRITE;
+    if (!executable) flags |= PAGE_NX;
+    return flags;
+}
+
+static bool earlier_load_covers_page(const Elf64_Phdr *phdr, Elf64_Half limit,
+                                     virt_addr_t bias, virt_addr_t page_va) {
+    for (Elf64_Half i = 0; i < limit; i++) {
+        if (phdr[i].p_type != PT_LOAD || !phdr[i].p_memsz)
+            continue;
+        virt_addr_t start = phdr[i].p_vaddr + bias;
+        virt_addr_t end = start + phdr[i].p_memsz;
+        if (page_va < end && page_va + PAGE_SIZE > start)
+            return true;
+    }
+    return false;
 }
 
 int parse_and_load_binary(virt_addr_t binary_mem_loc,
@@ -114,6 +178,20 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
     const Elf64_Phdr *phdr =
         (const Elf64_Phdr *)((uint8_t *)ehdr + ehdr->e_phoff);
 
+    /* Validate every bias-adjusted range before installing the first page.
+     * load_page_flags() scans later segments too, so doing this lazily inside
+     * the mapping loop would still expose wrapped future ranges. */
+    for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD || !phdr[i].p_memsz)
+            continue;
+        if (phdr[i].p_vaddr > UINT64_MAX - bias ||
+            phdr[i].p_vaddr + bias > UINT64_MAX - phdr[i].p_memsz)
+            return ELF_ERR_SEGMENT;
+        uint64_t delta = (phdr[i].p_vaddr + bias) & (PAGE_SIZE - 1);
+        if (phdr[i].p_memsz > UINT64_MAX - delta - (PAGE_SIZE - 1))
+            return ELF_ERR_SEGMENT;
+    }
+
     memset(out_aux, 0, sizeof(*out_aux));
     for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_INTERP)
@@ -127,17 +205,14 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
         break;
     }
 
-    /* The program header table's runtime address for AT_PHDR: the
-     * first PT_LOAD's own p_vaddr (ELF_USER_EXPECTED_BASE when
-     * bias == 0, enforced above; typically 0 for a PIE interpreter,
-     * but read rather than assumed) plus e_phoff plus bias — true only
-     * because e_phoff always falls inside that first segment's file
-     * range at its very start (p_offset == 0), which is how every
-     * toolchain lays out an ELF, PIE or not. */
-    Elf64_Addr first_load_vaddr = 0;
+    /* Locate the program headers in whichever PT_LOAD actually contains
+     * them; p_offset is not required to be zero by the ELF ABI. */
+    Elf64_Addr phdr_va = 0;
+    uint64_t phdr_bytes = (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
     for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD) {
-            first_load_vaddr = phdr[i].p_vaddr;
+        if (phdr[i].p_type == PT_LOAD && ehdr->e_phoff >= phdr[i].p_offset &&
+            ehdr->e_phoff + phdr_bytes <= phdr[i].p_offset + phdr[i].p_filesz) {
+            phdr_va = bias + phdr[i].p_vaddr + (ehdr->e_phoff - phdr[i].p_offset);
             break;
         }
     }
@@ -173,17 +248,8 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
             (pflags & PF_X) ? 'X' : '-'
         );
 
-        uint64_t page_flags = PAGE_PRESENT | PAGE_USER;
-
-        if(pflags & PF_W)
-            page_flags |= PAGE_WRITE;
-
-        if(!(pflags & PF_X))
-            page_flags |= PAGE_NX;
-
         /* ELF segments may not be page aligned */
         uint64_t aligned_vaddr  = vaddr  & ~(PAGE_SIZE - 1);
-        uint64_t aligned_offset = offset & ~(PAGE_SIZE - 1);
 
         uint64_t page_delta = vaddr - aligned_vaddr;
 
@@ -193,12 +259,29 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
         uint64_t total_pages =
             (total_mem + PAGE_SIZE - 1) / PAGE_SIZE;
 
-        const uint8_t *file_base =
-            (const uint8_t *)binary_mem_loc + aligned_offset;
+        /* Record the complete segment before mapping pages. If allocation or
+         * page-table construction fails, vm_space_destroy() can now unwind
+         * every page from this partially loaded segment as well. */
+        if (mm && vm_insert_region(mm, aligned_vaddr,
+                                   total_pages * PAGE_SIZE, true) != 0) {
+            kprintf("[LOADER] could not record segment at 0x%llx\n", aligned_vaddr);
+            return -2;
+        }
 
         for(uint64_t page = 0; page < total_pages; page++) {
-            phys_addr_t phys =
-                (phys_addr_t)pmm_alloc_page();
+            virt_addr_t page_va = aligned_vaddr + page * PAGE_SIZE;
+            phys_addr_t phys = virt_to_phys(user_pml4, page_va);
+            bool existing = phys != 0;
+
+            /* Reuse only a boundary page belonging to an earlier PT_LOAD in
+             * this same ELF. Anything else is a real main/interpreter/stack
+             * collision and must abort exec rather than overwrite it. */
+            if (existing && !earlier_load_covers_page(phdr, i, bias, page_va)) {
+                kprintf("[LOADER] VA collision at 0x%llx\n", page_va);
+                return -2;
+            }
+            if (!existing)
+                phys = (phys_addr_t)pmm_alloc_page();
 
             /* pmm_alloc_page() returns NULL on exhaustion now instead of
              * panicking. Unchecked, phys_to_virt_hhdm(0) below would
@@ -210,66 +293,32 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
                 return -1;
             }
 
-            uint8_t *dst =
-                (uint8_t *)phys_to_virt_hhdm(phys);
+            uint8_t *dst = (uint8_t *)phys_to_virt_hhdm(phys);
 
-            memset(dst, 0, PAGE_SIZE);
+            if (!existing)
+                memset(dst, 0, PAGE_SIZE);
 
-            uint64_t page_file_offset =
-                page * PAGE_SIZE;
-
-            uint64_t segment_file_start =
-                page_delta;
-
-            if(page_file_offset + PAGE_SIZE > segment_file_start &&
-               page_file_offset < segment_file_start + filesz) {
-
-                uint64_t copy_start_in_page = 0;
-
-                if(segment_file_start > page_file_offset)
-                    copy_start_in_page =
-                        segment_file_start - page_file_offset;
-
-                uint64_t file_data_offset =
-                    page_file_offset + copy_start_in_page;
-
-                uint64_t remaining =
-                    segment_file_start + filesz - file_data_offset;
-
-                uint64_t copy_size =
-                    PAGE_SIZE - copy_start_in_page;
-
-                if(copy_size > remaining)
-                    copy_size = remaining;
-
-                memcpy(
-                    dst + copy_start_in_page,
-                    file_base + file_data_offset,
-                    copy_size
-                );
+            virt_addr_t copy_start = page_va > vaddr ? page_va : vaddr;
+            virt_addr_t file_end = vaddr + filesz;
+            virt_addr_t copy_end = page_va + PAGE_SIZE < file_end
+                                 ? page_va + PAGE_SIZE : file_end;
+            if (copy_start < copy_end) {
+                memcpy(dst + (copy_start - page_va),
+                       (const uint8_t *)binary_mem_loc + offset + (copy_start - vaddr),
+                       copy_end - copy_start);
             }
 
-            map_page(
-                user_pml4,
-                aligned_vaddr + page * PAGE_SIZE,
-                phys,
-                page_flags
-            );
-        }
-
-        /* Tell the address space this segment exists. Segments commonly
-         * share a page at their boundary (text ending partway into the
-         * page data begins in), so these spans overlap — vm_insert_region()
-         * coalesces rather than describing that page twice. */
-        if (mm && vm_insert_region(mm, aligned_vaddr,
-                                   total_pages * PAGE_SIZE, true) != 0) {
-            kprintf("[LOADER] could not record segment at 0x%llx\n", aligned_vaddr);
-            return -2;
+            if (!existing && map_page(user_pml4, page_va, phys,
+                    load_page_flags(phdr, ehdr->e_phnum, bias, page_va)) != 0) {
+                pmm_free_page((void *)phys);
+                kprintf("[LOADER] could not map page at 0x%llx\n", page_va);
+                return -2;
+            }
         }
     }
 
     out_aux->entry     = ehdr->e_entry + bias;
-    out_aux->phdr_va   = first_load_vaddr + ehdr->e_phoff + bias;
+    out_aux->phdr_va   = phdr_va;
     out_aux->phnum     = ehdr->e_phnum;
     out_aux->phentsize = ehdr->e_phentsize;
 
@@ -280,4 +329,3 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
 
     return 0;
 }
-

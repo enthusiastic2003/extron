@@ -146,7 +146,8 @@ typedef enum {
     ELF_ERR_PHENTSIZE   = -9,  /* Program header entry size mismatch */
     ELF_ERR_ENTRY       = -10, /* Entry point is null */
     ELF_ERR_BASE        = -11,
-    ELF_ERR_INTERP      = -12  /* PT_INTERP segment out of bounds or too long */
+    ELF_ERR_INTERP      = -12, /* PT_INTERP segment out of bounds or too long */
+    ELF_ERR_SEGMENT     = -13  /* malformed or out-of-file PT_LOAD */
 } Elf64_ValidationResult;
 
 
@@ -170,5 +171,6 @@ typedef enum {
 #define AT_EUID   12
 #define AT_GID    13
 #define AT_EGID   14
+#define AT_EXECFN 31 /* pathname passed to execve() */
 
 #endif /* ELF_H */

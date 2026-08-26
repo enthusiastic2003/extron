@@ -1,5 +1,5 @@
 /*
- * PT_INTERP regression fixture. Built normally (a plain static
+ * Kernel-only PT_INTERP regression fixture. Built normally (a plain static
  * ET_EXEC, same as every other usr/mlibc_tests/*.c), then
  * tools/add_pt_interp.py splices a PT_INTERP segment onto the
  * compiled binary pointing at /opt/tests/mlibc_fake_interp.elf — see

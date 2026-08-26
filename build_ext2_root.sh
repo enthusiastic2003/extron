@@ -10,6 +10,7 @@ echo "=== Building Ext2 Root Filesystem ==="
 # Clean and create rootfs layout
 rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR/bin"
+mkdir -p "$ROOTFS_DIR/lib"
 mkdir -p "$ROOTFS_DIR/dev"
 mkdir -p "$ROOTFS_DIR/tmp"
 mkdir -p "$ROOTFS_DIR/etc"
@@ -18,6 +19,15 @@ mkdir -p "$ROOTFS_DIR/opt/doom"
 mkdir -p "$ROOTFS_DIR/opt/tests"
 mkdir -p "$ROOTFS_DIR/root"
 mkdir -p "$ROOTFS_DIR/usr/local"
+
+# The real mlibc runtime linker and its first shared dependency. Keep these
+# sourced from the checked sysroot so the compiler and root filesystem always
+# use the exact same ABI build.
+cp "usr/mlibc-sysroot/lib/ld.so" "$ROOTFS_DIR/lib/ld.so"
+cp "usr/mlibc-sysroot/lib/libc.so" "$ROOTFS_DIR/lib/libc.so"
+if [ -f "$INITRD_DIR/lib/libextron_rtld_test.so" ]; then
+    cp "$INITRD_DIR/lib/libextron_rtld_test.so" "$ROOTFS_DIR/lib/"
+fi
 
 # Distribute system binaries to /bin
 if [ -f "$INITRD_DIR/sh" ]; then

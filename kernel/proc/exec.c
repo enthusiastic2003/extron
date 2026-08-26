@@ -43,10 +43,11 @@
 #define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
 
 /* AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, AT_UID,
- * AT_EUID, AT_GID, AT_EGID, plus the AT_NULL terminator — see
+ * AT_EUID, AT_GID, AT_EGID, AT_EXECFN, plus the AT_NULL terminator — see
  * build_arg_stack()'s auxv block below. Each entry is a (type, value)
  * pair of two uint64_t words. */
-#define EXEC_AUXV_ENTRIES 11
+#define EXEC_AUXV_ENTRIES 12
+#define EXEC_PATH_BYTES 128
 
 /* The whole argument block has to fit in the single page it is written
  * into, or build_arg_stack() would run off the bottom of that page and
@@ -55,6 +56,7 @@
  * argv pointer array, argv's NULL terminator, envp's (empty) NULL
  * terminator, the auxv block, plus 16 bytes of alignment slack. */
 _Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES
+               + EXEC_PATH_BYTES
                + (EXEC_MAX_ARGS + EXEC_MAX_ENVS + 3) * sizeof(uint64_t)
                + EXEC_AUXV_ENTRIES * 2 * sizeof(uint64_t) + 16
                < PAGE_SIZE, "exec argument block must fit one stack page");
@@ -92,6 +94,7 @@ _Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES
  * the new stack simply isn't reachable by its own VA yet.
  */
 static virt_addr_t build_arg_stack(phys_addr_t top_phys,
+                                   const char *exec_path,
                                    const char *const *args, int argc,
                                    const char *const *envp, int envc,
                                    const struct elf_aux_info *aux,
@@ -104,6 +107,11 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     virt_addr_t  str_va[EXEC_MAX_ARGS];
     virt_addr_t  env_va[EXEC_MAX_ENVS];
     size_t       off = PAGE_SIZE;
+
+    size_t exec_len = strlen(exec_path) + 1;
+    off -= exec_len;
+    memcpy(page + off, exec_path, exec_len);
+    virt_addr_t execfn_va = page_va + off;
 
     for (int i = envc - 1; i >= 0; i--) {
         size_t len = strlen(envp[i]) + 1;
@@ -173,6 +181,7 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     AUXV(AT_EUID,   euid);
     AUXV(AT_GID,    gid);
     AUXV(AT_EGID,   egid);
+    AUXV(AT_EXECFN, execfn_va);
     AUXV(AT_NULL,   0);
     #undef AUXV
 
@@ -261,6 +270,11 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     if (!binary)
         return -1;
     if (argc < 1 || argc > EXEC_MAX_ARGS) {
+        kfree(binary);
+        return -1;
+    }
+    if (strlen(binary_path) + 1 > EXEC_PATH_BYTES) {
+        kprintf("[EXEC] executable path is too long for initial stack\n");
         kfree(binary);
         return -1;
     }
@@ -373,7 +387,7 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     }
 
     out->entry   = real_start;
-    out->user_sp = build_arg_stack(top_phys, args, argc, envp, envc, &aux,
+    out->user_sp = build_arg_stack(top_phys, binary_path, args, argc, envp, envc, &aux,
                                    interp_base,
                                    aux_uid, aux_euid, aux_gid, aux_egid,
                                    &out->argv);

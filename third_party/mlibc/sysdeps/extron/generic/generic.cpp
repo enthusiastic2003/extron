@@ -128,7 +128,9 @@ struct path_at_request {
  * consistent, process-unique value is correct when there is only ever
  * one module, which is always true here: fully static, no PIE, no
  * dlopen. */
+#ifdef MLIBC_STATIC_BUILD
 extern "C" void *__dso_handle = &__dso_handle;
+#endif
 
 /* __ehdr_start: read by interpreterMain() (options/rtld/generic/
  * main.cpp) — the MLIBC_STATIC_BUILD branch of __dlapi_enter()'s own
