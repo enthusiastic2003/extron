@@ -151,7 +151,7 @@ $(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 # First real dynamic-linker fixture. The explicit -L must precede the
 # toolchain's built-in static-only sysroot, or its libc.a wins before this
 # repository's libc.so is considered.
-$(MLIBC_TEST_DEP_DSO): usr/mlibc_tests/libextron_rtld_dep.c
+$(BUILD)/initrd/lib/libextron_rtld_dep.so: usr/mlibc_tests/libextron_rtld_dep.c
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" -fPIC -shared \
 		-nostdlib -Wl,-soname,libextron_rtld_dep.so,-z,relro,-z,now $< -o $@
@@ -192,7 +192,7 @@ $(BUILD)/initrd/tests/mlibc_relro_test.elf: usr/mlibc_tests/mlibc_relro_test.c $
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
-		-z,relro,-z,now $< -o $@ -O1
+		-Wl,-z,relro,-z,now $< -o $@ -O1
 
 
 
