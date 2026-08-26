@@ -200,10 +200,18 @@ static void test_map_fixed(void) {
 
 static void test_bad_arguments(void) {
     int fd = open("/opt/tests/hello.txt", O_RDONLY);
-    check("open a plain ramfs file for the ENODEV check", fd >= 0);
+    check("open a plain file for file-backed mmap check", fd >= 0);
+    
     void *r2 = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
-    check("mmap() on a file with no mmap op fails, doesn't corrupt state",
-          r2 == MAP_FAILED);
+    check("mmap() on a regular file succeeds", r2 != MAP_FAILED);
+    
+    /* Verify we actually read the file's contents into the memory.
+     * hello.txt starts with "Hello from Extron" or similar.
+     * We just check if the first character is 'H'. */
+    if (r2 != MAP_FAILED) {
+        check("file-backed mmap populated the data", ((char *)r2)[0] == 'H');
+        check("munmap() of the file-backed region succeeds", munmap(r2, 4096) == 0);
+    }
     close(fd);
 }
 

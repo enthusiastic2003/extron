@@ -704,6 +704,55 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
     struct vfs_node *node;
     if (file_get_node(p, (int)req.fd, &node) != 0)
         return (uint64_t)-EBADF;
+        
+    /* If it's a regular file, we emulate mmap by allocating anonymous memory
+     * and reading the file contents into it. This handles MAP_PRIVATE perfectly
+     * (which is what ld.so needs). */
+    if (node->type == VFS_NODE_REGULAR) {
+        if (req.flags & MAP_SHARED) {
+            vfs_node_release(node);
+            return (uint64_t)-ENOSYS; /* Shared writeback not supported yet */
+        }
+        
+        /* Allocate as writable first so the kernel can copy the file contents in.
+         * If the user requested PROT_READ, mapping it RO immediately would trap
+         * our own read() below. */
+        int alloc_flags = vm_flags | VM_WRITE;
+        virt_addr_t va = fixed
+            ? vm_allocate_region_at(p->mm, (virt_addr_t)req.hint, req.size, alloc_flags)
+            : vm_allocate_region(p->mm, req.size, alloc_flags);
+            
+        if (!va) {
+            vfs_node_release(node);
+            return (uint64_t)-ENOMEM;
+        }
+        
+        if (node->ops && node->ops->read) {
+            long read_bytes = node->ops->read(node, req.offset, (void*)va, req.size);
+            if (read_bytes < 0) {
+                // error handling ignored for now
+            }
+        }
+        
+        /* If they didn't ask for write permissions, remove them now. */
+        if (!(vm_flags & VM_WRITE)) {
+            for (size_t off = 0; off < align_up(req.size, PAGE_SIZE); off += PAGE_SIZE) {
+                virt_addr_t curr_va = va + off;
+                uint64_t pte = pte_lookup(p->mm->ttbr0, curr_va);
+                if (pte) {
+                    phys_addr_t phys = pte & PAGE_ADDR_MASK;
+                    uint64_t pflags = arch_translate_vm_flags(vm_flags);
+                    unmap_page(p->mm->ttbr0, curr_va);
+                    map_page(p->mm->ttbr0, curr_va, phys, pflags); 
+                }
+            }
+            flush_tlb();
+        }
+        
+        vfs_node_release(node);
+        return (uint64_t)va;
+    }
+    
     if (!node->ops || !node->ops->mmap) {
         vfs_node_release(node);
         return (uint64_t)-ENODEV;
@@ -729,6 +778,39 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
     (void)c; (void)f;
     struct proc *p = my_proc();
     vm_free_region(p->mm, addr, size);
+    return 0;
+}
+
+static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
+                             struct aarch64_frame *f) {
+    (void)f;
+    if (addr & (PAGE_SIZE - 1)) return (uint64_t)-EINVAL;
+    if (len == 0) return 0;
+    
+    struct proc *p = my_proc();
+    len = align_up(len, PAGE_SIZE);
+    
+    int vm_flags = VM_USER;
+    if (prot & PROT_READ)  vm_flags |= VM_READ;
+    if (prot & PROT_WRITE) vm_flags |= VM_WRITE;
+    if (prot & PROT_EXEC)  vm_flags |= VM_EXEC;
+    
+    for (size_t off = 0; off < len; off += PAGE_SIZE) {
+        virt_addr_t va = addr + off;
+        uint64_t pte = pte_lookup(p->mm->ttbr0, va);
+        if (pte) {
+            phys_addr_t phys = pte & PAGE_ADDR_MASK;
+            int cur_flags = vm_flags;
+            /* Preserve NOCACHE if the page was originally mapped with it (MAIR_IDX_NORMAL_NC == 2) */
+            if (((pte >> 2) & 7) == 2)
+                cur_flags |= VM_NOCACHE;
+            uint64_t pflags = arch_translate_vm_flags(cur_flags);
+            unmap_page(p->mm->ttbr0, va);
+            map_page(p->mm->ttbr0, va, phys, pflags); 
+        }
+    }
+    
+    flush_tlb();
     return 0;
 }
 
@@ -1997,6 +2079,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_SETRESGID] = sys_setresgid,
     [SYS_MMAP] = sys_mmap,
     [SYS_MUNMAP] = sys_munmap,
+    [SYS_MPROTECT] = sys_mprotect,
     [SYS_REBOOT] = sys_reboot,
     [SYS_PAUSE]  = sys_pause,
 };

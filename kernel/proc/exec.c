@@ -285,8 +285,17 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     out->ttbr0 = ttbr0;
 
     struct elf_aux_info aux;
+    
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)binary;
+    uint64_t main_bias = 0;
+    if (binary_size >= sizeof(Elf64_Ehdr) && 
+        ehdr->e_ident[EI_MAG0] == ELFMAG0 && 
+        ehdr->e_type == ET_DYN) {
+        main_bias = ELF_USER_EXPECTED_BASE;
+    }
+    
     int load_result = parse_and_load_binary((virt_addr_t)binary, binary_size,
-                                            ttbr0, 0, &aux, mm);
+                                            ttbr0, main_bias, &aux, mm);
     kfree(binary);
     if (load_result != 0) {
         kprintf("[EXEC] ELF load failed for %s\n", binary_path);
