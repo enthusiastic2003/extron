@@ -19,7 +19,7 @@ int main(void) {
     check("a missing DSO fails without terminating the process", !missing);
     check("dlerror() explains the missing DSO", dlerror() != NULL);
 
-    void *dependency_handle = dlopen("libextron_rtld_dep.so", RTLD_NOW | RTLD_LOCAL);
+    void *dependency_handle = dlopen("/opt/tests/libextron_rtld_dep.so", RTLD_NOW | RTLD_LOCAL);
     int (*dependency_value)(void) = dependency_handle
         ? (int (*)(void))dlsym(dependency_handle, "extron_dep_value") : NULL;
     void (*set_dependency_destructor_counter)(int *) = dependency_handle
@@ -28,8 +28,8 @@ int main(void) {
     check("the dependency DSO loads directly", dependency_value
           && dependency_value() == 8);
 
-    void *handle = dlopen("libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
-    void *second_handle = dlopen("libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
+    void *handle = dlopen("/opt/tests/libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
+    void *second_handle = dlopen("/opt/tests/libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
     check("dlopen() loads a DSO absent from DT_NEEDED", handle != NULL);
     check("a second dlopen() returns the existing DSO", second_handle == handle);
     if (!handle) {
@@ -120,7 +120,7 @@ int main(void) {
     check("a repeated close is rejected",
           dlclose(second_handle) != 0 && dlerror() != NULL);
 
-    void *reopened = dlopen("libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
+    void *reopened = dlopen("/opt/tests/libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
     int (*reopened_value)(void) = reopened
         ? (int (*)(void))dlsym(reopened, "extron_dso_value") : NULL;
     check("the unloaded DSO can be loaded and initialized again",

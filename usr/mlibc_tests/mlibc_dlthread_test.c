@@ -18,7 +18,7 @@ static void fail(void) {
 
 static void *worker(void *argument) {
     intptr_t id = (intptr_t)argument;
-    void *handle = dlopen("libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
+    void *handle = dlopen("/opt/tests/libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fail();
         return NULL;
@@ -42,7 +42,7 @@ static void *worker(void *argument) {
         fail();
 
     for (int iteration = 0; iteration < ITERATIONS; iteration++) {
-        handle = dlopen("libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
+        handle = dlopen("/opt/tests/libextron_rtld_test.so", RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
             fail();
             continue;

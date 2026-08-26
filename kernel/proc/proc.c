@@ -56,10 +56,7 @@ static int thread_init(struct thread *t, struct proc *p, uint64_t tid,
 
     t->kernel_stack_base = region + PAGE_SIZE;
     t->kernel_stack_top  = region + (THREAD_KERNEL_STACK_PAGES + 1) * PAGE_SIZE;
-    kprintf("[THREAD] PID %lu TID %lu kernel stack: %p - %p (guard page at %p)\n",
-            (unsigned long)p->pid, (unsigned long)t->tid,
-            (void *)t->kernel_stack_base, (void *)t->kernel_stack_top,
-            (void *)region);
+
 
     /* forkret-style bootstrap: pre-populate the saved context as if this
      * proc had already been switched out once, with lr pointing at the

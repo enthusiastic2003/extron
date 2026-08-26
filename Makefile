@@ -83,7 +83,6 @@ MLIBC_ELF     := $(patsubst usr/mlibc_tests/%.c,$(BUILD)/initrd/tests/%.elf,$(ML
 
 INITRD_ELF   := $(patsubst usr/%.c,$(BUILD)/initrd/%.elf,$(USER_C_SRC)) \
                 $(MLIBC_ELF) \
-                $(BUILD)/initrd/tests/mlibc_fake_interp.elf \
                 $(BUILD)/initrd/doom.elf \
                 $(BUILD)/initrd/sh
 
@@ -115,7 +114,7 @@ DOOM_OBJ  := $(patsubst %,$(BUILD)/doom/%.o,$(DOOM_SRC)) \
              $(BUILD)/doom/doomgeneric_extron.o
 DOOM_DEPS := $(DOOM_OBJ:.o=.d)
 DOOM_CFLAGS := --sysroot="$(abspath $(MLIBC_SYSROOT))" -O2 -Wall -Wextra \
-               -MMD -MP \
+               -MMD -MP -fPIE \
                -I$(DOOM_DIR) -DNORMALUNIX -DLINUX \
                -Wno-unused-but-set-variable
 INITRD_DATA  := $(patsubst usr/%,$(BUILD)/initrd/%,$(USER_DATA))
@@ -137,13 +136,17 @@ $(KERNEL_ELF): $(OBJ) kernel/arch/aarch64/linker.ld
 $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
-$(BUILD)/initrd/%.elf: usr/%.c $(MLIBC_LIBC)
+$(BUILD)/initrd/%.elf: usr/%.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	mkdir -p $(dir $@)
-	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
 
-$(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LIBC)
+$(BUILD)/initrd/tests/%.elf: usr/mlibc_tests/%.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	mkdir -p $(dir $@)
-	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@ -static -O1
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so $< -o $@ -O1
 
 # First real dynamic-linker fixture. The explicit -L must precede the
 # toolchain's built-in static-only sysroot, or its libc.a wins before this
@@ -157,7 +160,7 @@ $(MLIBC_TEST_DSO): usr/mlibc_tests/libextron_rtld_test.c $(MLIBC_TEST_DEP_DSO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" -fPIC -shared \
 		-nostdlib -L"$(abspath $(BUILD))/initrd/lib" \
-		-Wl,-soname,libextron_rtld_test.so,-z,relro,-z,now $< \
+		-Wl,-soname,libextron_rtld_test.so,-z,relro,-z,now,-rpath=/opt/tests $< \
 		-lextron_rtld_dep -o $@
 
 $(BUILD)/initrd/tests/mlibc_dynamic_test.elf: usr/mlibc_tests/mlibc_dynamic_test.c $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO)
@@ -165,7 +168,7 @@ $(BUILD)/initrd/tests/mlibc_dynamic_test.elf: usr/mlibc_tests/mlibc_dynamic_test
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" \
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" \
 		-L"$(abspath $(BUILD))/initrd/lib" -fPIE -pie \
-		-Wl,--dynamic-linker=/lib/ld.so,-rpath-link,$(abspath $(BUILD))/initrd/lib \
+		-Wl,--dynamic-linker=/lib/ld.so,-rpath-link,$(abspath $(BUILD))/initrd/lib,-rpath=/opt/tests \
 		$< -lextron_rtld_test -o $@ -O1
 
 # Late-loading fixture: deliberately do not link libextron_rtld_test.so here.
@@ -191,22 +194,7 @@ $(BUILD)/initrd/tests/mlibc_relro_test.elf: usr/mlibc_tests/mlibc_relro_test.c $
 		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
 		-Wl,--dynamic-linker=/lib/ld.so,-z,relro,-z,now $< -o $@ -O1
 
-# Legacy kernel-only PT_INTERP regression fixture: this deliberately uses a
-# tiny raw-syscall interpreter so failures in kernel handoff remain separable
-# from failures in the real mlibc ld.so exercised by mlibc_dynamic_test.elf.
-$(BUILD)/initrd/tests/mlibc_ptinterp_victim.elf: usr/mlibc_tests/mlibc_ptinterp_victim.c $(MLIBC_LIBC) tools/add_pt_interp.py
-	mkdir -p $(dir $@)
-	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $< -o $@.tmp -static -O1
-	python3 tools/add_pt_interp.py $@.tmp /opt/tests/mlibc_fake_interp.elf $@
-	rm -f $@.tmp
 
-# mlibc_fake_interp.elf: hand-written freestanding AArch64 (raw syscalls,
-# no mlibc startup/TLS/auxv parsing at all) standing in for a real
-# dynamic linker in the PT_INTERP fixture above — see that file's own
-# header comment for why it can't just be an ordinary mlibc test binary.
-$(BUILD)/initrd/tests/mlibc_fake_interp.elf: usr/mlibc_tests/mlibc_fake_interp.S
-	mkdir -p $(dir $@)
-	$(MLIBC_GCC) -nostdlib -static -o $@ $<
 
 $(BUILD)/initrd/%: usr/%
 	mkdir -p $(dir $@)
@@ -214,18 +202,19 @@ $(BUILD)/initrd/%: usr/%
 
 $(BUILD)/doom/%.o: $(DOOM_DIR)/%.c
 	mkdir -p $(dir $@)
-	$(MLIBC_GCC) $(DOOM_CFLAGS) -c $< -o $@
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $(DOOM_CFLAGS) -c $< -o $@
 
-$(BUILD)/doom/doomgeneric_extron.o: usr/doom/doomgeneric_extron.c
+$(BUILD)/doom/%.o: usr/doom/%.c
 	mkdir -p $(dir $@)
-	$(MLIBC_GCC) $(DOOM_CFLAGS) -c $< -o $@
+	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $(DOOM_CFLAGS) -c $< -o $@
 
-$(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(MLIBC_LIBC)
+$(BUILD)/initrd/doom.elf: $(DOOM_OBJ) $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	mkdir -p $(dir $@)
 	$(MLIBC_GCC) --sysroot="$(abspath $(MLIBC_SYSROOT))" $(DOOM_OBJ) \
-		-o $@ -static -O2
+		-L"$(abspath $(MLIBC_SYSROOT))/lib" -fPIE -pie \
+		-Wl,--dynamic-linker=/lib/ld.so -o $@ -O2
 
-$(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC_LIBC)
+$(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC_LDSO) $(MLIBC_LIBC_SO)
 	tools/configure_busybox.sh
 	$(MAKE) -C $(BUSYBOX_DIR) -j4 CCACHE_DISABLE=1 \
 		CROSS_COMPILE="$(BUSYBOX_CROSS)" \

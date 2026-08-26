@@ -26,7 +26,7 @@ mkdir -p "$ROOTFS_DIR/usr/local"
 cp "usr/mlibc-sysroot/lib/ld.so" "$ROOTFS_DIR/lib/ld.so"
 cp "usr/mlibc-sysroot/lib/libc.so" "$ROOTFS_DIR/lib/libc.so"
 if compgen -G "$INITRD_DIR/lib/*.so" >/dev/null; then
-    cp "$INITRD_DIR"/lib/*.so "$ROOTFS_DIR/lib/"
+    cp "$INITRD_DIR"/lib/*.so "$ROOTFS_DIR/opt/tests/"
 fi
 
 # Distribute system binaries to /bin

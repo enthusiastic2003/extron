@@ -235,18 +235,7 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
         Elf64_Xword memsz  = phdr[i].p_memsz;
         Elf64_Word  pflags = phdr[i].p_flags;
 
-        kprintf(
-            "[LOADER] PT_LOAD: "
-            "vaddr=0x%llx offset=0x%llx "
-            "filesz=%llu memsz=%llu flags=%c%c%c\n",
-            vaddr,
-            offset,
-            filesz,
-            memsz,
-            (pflags & PF_R) ? 'R' : '-',
-            (pflags & PF_W) ? 'W' : '-',
-            (pflags & PF_X) ? 'X' : '-'
-        );
+
 
         /* ELF segments may not be page aligned */
         uint64_t aligned_vaddr  = vaddr  & ~(PAGE_SIZE - 1);
@@ -322,10 +311,7 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
     out_aux->phnum     = ehdr->e_phnum;
     out_aux->phentsize = ehdr->e_phentsize;
 
-    kprintf(
-        "[LOADER] Binary loaded, entry point: 0x%llx\n",
-        out_aux->entry
-    );
+
 
     return 0;
 }
