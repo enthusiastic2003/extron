@@ -19,8 +19,15 @@ make -j8 > /dev/null
 
 echo "=== Copying readline into SYSROOT and RootFS ==="
 # Readline creates shlib/libreadline.so.8.2 and libhistory.so.8.2
-cp shlib/libreadline.so.8* "$SYSROOT/lib/"
-cp shlib/libhistory.so.8* "$SYSROOT/lib/"
+cp shlib/libreadline.so.8.2 "$SYSROOT/lib/"
+cp shlib/libhistory.so.8.2 "$SYSROOT/lib/"
+
+cd "$SYSROOT/lib"
+ln -sf libreadline.so.8.2 libreadline.so.8
+ln -sf libreadline.so.8 libreadline.so
+ln -sf libhistory.so.8.2 libhistory.so.8
+ln -sf libhistory.so.8 libhistory.so
+cd - > /dev/null
 
 # Also copy headers so bash can find them
 mkdir -p "$SYSROOT/usr/include/readline"
