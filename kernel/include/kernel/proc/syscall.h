@@ -91,6 +91,10 @@
 #define SYS_MPROTECT      73
 #define SYS_MSYNC         74
 #define SYS_PPOLL         75
+#define SYS_GETRUSAGE     76
+#define SYS_GETRLIMIT     77
+#define SYS_SETRLIMIT     78
+#define SYS_WAIT4         79
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

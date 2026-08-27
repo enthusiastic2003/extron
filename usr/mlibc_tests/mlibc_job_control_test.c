@@ -108,6 +108,13 @@ int main(void) {
         int exit_status = 0;
         int completed = waitpid(waiter, &exit_status, 0) == waiter
             && WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 42;
+        if (!(child_blocked && stopped && event_while_stopped
+                && continued && completed))
+            printf("[job_test] blocked-read detail: ready=%d stopped=%d "
+                   "event=%d continued=%d completed=%d stop=0x%x "
+                   "continue=0x%x exit=0x%x\n",
+                   child_blocked, stopped, event_while_stopped, continued,
+                   completed, stop_status, continue_status, exit_status);
         failures += report("stopped pipe read retains its blocked operation",
                            child_blocked && stopped && event_while_stopped
                            && continued && completed);

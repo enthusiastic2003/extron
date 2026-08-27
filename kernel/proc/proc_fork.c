@@ -82,6 +82,7 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
                * sizeof(parent->supplementary_groups[0]));
     child->file_umask = parent->file_umask;
     irq_spin_unlock(&parent->cred_lock);
+    resource_process_fork(child, parent);
     child->user_argc = parent->user_argc;
     child->user_argv = parent->user_argv;
     signal_process_fork(child, parent);

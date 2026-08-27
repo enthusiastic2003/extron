@@ -99,8 +99,8 @@ static void test_dup_family(void) {
           dup2(999, 5) == -1 && errno == EBADF);
 
     errno = 0;
-    check("dup2() with an out-of-range newfd reports EINVAL",
-          dup2(STDOUT_FILENO, 99999) == -1 && errno == EINVAL);
+    check("dup2() with an out-of-range newfd reports EBADF",
+          dup2(STDOUT_FILENO, 99999) == -1 && errno == EBADF);
 
     /* PROC_MAX_FDS is 32 (kernel/include/kernel/fs/file.h); opening well
      * past that guarantees the table is genuinely full, not just low. */

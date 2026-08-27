@@ -40,7 +40,7 @@
  * is no guard page, so overflow silently corrupts whatever sits below
  * rather than faulting. 128KB is cheap per process and leaves room for
  * the DOOM port's call depth. */
-#define USER_STACK_PAGES 32
+#define USER_STACK_PAGES (EXEC_USER_STACK_BYTES / PAGE_SIZE)
 #define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
 
 /* AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, AT_UID,

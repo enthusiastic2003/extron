@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdlib.h>            // exit() — the real termination path, see __mlibc_start_main
+#include <unistd.h>
+#include <sys/resource.h>
 #include <mlibc/elf/startup.h> // mlibc::entry_stack — argc/argv, parsed by __dlapi_enter()
 #include <mlibc/tcb.hpp>
 
@@ -98,6 +100,10 @@
 #define SYS_MPROTECT    73
 #define SYS_MSYNC       74
 #define SYS_PPOLL       75
+#define SYS_GETRUSAGE   76
+#define SYS_GETRLIMIT   77
+#define SYS_SETRLIMIT   78
+#define SYS_WAIT4       79
 
 
 using main_fn = int (*)(int, char **);
@@ -480,7 +486,7 @@ int sys_fork(pid_t *child) {
  * wrapper (which never went through this file at all, so the gap was
  * invisible until something used the real libc entry point).
  *
- * The kernel's own SYS_WAIT (kernel/proc/syscall.c's sys_wait()) now
+ * The kernel's wait implementation (kernel/proc/syscall.c's wait_common())
  * takes a real pid selector (-1 for "any child") and WNOHANG/WUNTRACED/
  * WCONTINUED, via proc_find_waitable_child() — this used to be narrower
  * (blocking-only, "any child" only), which is what the paragraph here
@@ -488,17 +494,26 @@ int sys_fork(pid_t *child) {
  * outside that set is still refused (with a plain failure, not ENOSYS —
  * there's nothing left this sysdep can't express).
  */
+struct wait4_request {
+    int64_t selector;
+    int32_t options;
+    int32_t reserved;
+    uint64_t status;
+    uint64_t usage;
+};
+
 int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
-    (void)ru;
     if (flags & ~(WNOHANG | WUNTRACED | WCONTINUED))
         return EINVAL;
 
     int st = 0;
-    long reaped = syscall3(SYS_WAIT, (long)&st, pid, flags);
+    wait4_request request{pid, flags, 0,
+        reinterpret_cast<uint64_t>(&st), reinterpret_cast<uint64_t>(ru)};
+    long reaped = syscall1(SYS_WAIT4, reinterpret_cast<long>(&request));
     if (reaped < 0)
-        return ECHILD; /* the kernel's only failure mode: no children at all */
+        return static_cast<int>(-reaped);
 
-    /* The kernel's SYS_WAIT hands back either the raw value the child passed
+    /* The kernel hands back either the raw value the child passed
      * to sys_exit() (42 means literally 42), or a negative signal number for
      * a fatal EL0 fault. WIFEXITED/WEXITSTATUS
      * (sysdeps/extron/include/abi-bits/wait.h, same encoding as Linux)
@@ -521,6 +536,32 @@ int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret
             *status = st < 0 ? (-st & 0x7f) : ((st & 0xff) << 8);
     }
     *ret_pid = (pid_t)reaped;
+    return 0;
+}
+
+int sys_getrusage(int scope, struct rusage *usage) {
+    long ret = syscall2(SYS_GETRUSAGE, scope, reinterpret_cast<long>(usage));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_getrlimit(int resource, struct rlimit *limit) {
+    long ret = syscall2(SYS_GETRLIMIT, resource, reinterpret_cast<long>(limit));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_setrlimit(int resource, const struct rlimit *limit) {
+    long ret = syscall2(SYS_SETRLIMIT, resource, reinterpret_cast<long>(limit));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_sysconf(int number, long *result) {
+    if (number != _SC_OPEN_MAX)
+        return EINVAL;
+    struct rlimit limit;
+    int error = sys_getrlimit(RLIMIT_NOFILE, &limit);
+    if (error)
+        return error;
+    *result = static_cast<long>(limit.rlim_cur);
     return 0;
 }
 

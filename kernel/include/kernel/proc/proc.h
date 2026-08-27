@@ -8,6 +8,7 @@
 #include <kernel/sync/spinlock.h>
 #include <kernel/fs/file.h>
 #include <kernel/proc/signal.h>
+#include <kernel/proc/resource.h>
 
 struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular include */
 struct proc;
@@ -106,6 +107,8 @@ struct thread {
     uint64_t            wait_original_mask;  /* mask restored by signal return */
     uint64_t            signal_pending;      /* thread-directed pending signals */
     struct signal_info  signal_info[SIGNAL_MAX + 1];
+    uint64_t            cpu_account_start_ns;
+    enum resource_cpu_mode cpu_account_mode;
     struct thread       *next_in_process;
 };
 
@@ -138,6 +141,12 @@ struct proc {
     uint32_t            supplementary_groups[VFS_GROUP_MAX];
     size_t              supplementary_group_count;
     uint32_t            file_umask;
+    spinlock_t          resource_lock;
+    struct proc_rlimit  resource_limits[PROC_RLIMIT_COUNT];
+    uint64_t            cpu_user_ns;
+    uint64_t            cpu_system_ns;
+    uint64_t            children_user_ns;
+    uint64_t            children_system_ns;
     int                 exit_status;
     bool                exited;
     bool                stopped;

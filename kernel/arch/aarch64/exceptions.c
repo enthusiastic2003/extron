@@ -4,6 +4,7 @@
 #include <kernel/panic.h>
 #include <kernel/proc/syscall.h>
 #include <kernel/proc/sched.h>
+#include <kernel/proc/resource.h>
 #include <stdbool.h>
 
 /*
@@ -90,6 +91,8 @@ static int fault_signal(uint32_t ec) {
 }
 
 void exception_dispatch(struct aarch64_frame *f, int type) {
+    resource_account_exception_enter(f);
+
     if (type == AARCH64_EXC_IRQ || type == AARCH64_EXC_FIQ) {
         /* GICC_IAR/GICC_EOIR are the same registers regardless of which
          * line (IRQ or FIQ) signaled the core — see
@@ -102,6 +105,7 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
             /* Spurious — GIC's "no pending interrupt" sentinel. Not a
              * real interrupt; must NOT be EOI'd (there's nothing to
              * acknowledge completion of). */
+            resource_account_exception_leave(f);
             return;
         }
 
@@ -126,6 +130,8 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
         }
 
         signal_deliver_pending(f);
+
+        resource_account_exception_leave(f);
 
         return;
     }
@@ -158,6 +164,7 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
          * so the user stack pointer survives this round trip for free. */
         f->x[0] = syscall_dispatch(f);
         signal_deliver_pending(f);
+        resource_account_exception_leave(f);
         return;
     }
 
@@ -178,8 +185,10 @@ void exception_dispatch(struct aarch64_frame *f, int type) {
     struct thread *thread = my_thread();
     if (from_el0 && cur && thread) {
         int signal = fault_signal(ec);
-        if (signal_deliver_sync(f, signal))
+        if (signal_deliver_sync(f, signal)) {
+            resource_account_exception_leave(f);
             return;
+        }
         kprintf("\n[USER FAULT] pid=%lu tid=%lu signal=%d (%s)\n"
                 "ELR=%p ESR=%p FAR=%p\n",
                 (unsigned long)cur->pid, (unsigned long)thread->tid,

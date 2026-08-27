@@ -46,6 +46,25 @@ the direct parent. The raw kernel status is a negative signal number; Extron's
 mlibc translates it into POSIX wait status so `WIFSIGNALED()` and `WTERMSIG()`
 work. An EL1 exception remains a kernel panic.
 
+## Resource limits and accounting
+
+Resource limits are process-wide, shared by every thread, inherited by
+`fork()`, and preserved by `execve()`. `RLIMIT_NOFILE` is enforced by the
+common descriptor allocator for open, pipe, dup, and fcntl duplication;
+lowering it does not invalidate descriptors that are already open.
+`sysconf(_SC_OPEN_MAX)` reports that process's current soft limit. The fixed
+128 KiB userspace stack and the absence of core dumps are reported truthfully
+as fixed `RLIMIT_STACK` and zero `RLIMIT_CORE` values. Other limits remain
+unlimited, and attempts to install a finite value are rejected until the
+kernel has the machinery to enforce it.
+
+High-resolution user and system CPU time is charged at exception boundaries
+and context switches. Sleeping, stopped, and idle time is excluded; worker
+threads contribute to the owning process. Reaping transfers a child's own and
+already-reaped descendant usage into the parent's `RUSAGE_CHILDREN` totals,
+and the resource-aware wait path supplies per-child usage to `wait4()`.
+Resource fields for which the kernel has no accounting yet remain zero.
+
 ## Signals
 
 The signal-delivery layer supports process-wide dispositions and pending

@@ -11,6 +11,7 @@
 #include <kernel/drivers/power.h>
 #include <kernel/proc/exec.h>
 #include <kernel/proc/futex.h>
+#include <kernel/proc/resource.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/errno.h>
@@ -594,6 +595,8 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t flags,
                          struct aarch64_frame *f) {
     (void)f;
     if (flags & ~O_CLOEXEC)
+        return (uint64_t)-EINVAL;
+    if ((int)oldfd == (int)newfd && (flags & O_CLOEXEC))
         return (uint64_t)-EINVAL;
     return (uint64_t)file_dup2(my_proc(), (int)oldfd, (int)newfd,
                                !!(flags & O_CLOEXEC));
@@ -2064,21 +2067,19 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
  * process. That leaks the orphan's memory until reboot, and is worth
  * fixing when there's a shell to own the problem.
  */
-static uint64_t sys_wait(uint64_t status_addr, uint64_t selector_raw,
-                         uint64_t options_raw,
-                         struct aarch64_frame *f) {
-    (void)f;
+static uint64_t wait_common(uint64_t status_addr, int64_t selector,
+                            int options, uint64_t usage_addr) {
     struct proc *p = my_proc();
-    int64_t selector = (int64_t)selector_raw;
-    int options = (int)options_raw;
     if ((options & ~(1 | 2 | 8)) != 0)
-        return (uint64_t)-1;
+        return (uint64_t)-EINVAL;
 
     if (status_addr && !user_buffer_ok(p, status_addr, sizeof(int))) {
         kprintf("[SYSCALL wait] rejected status pointer %p from pid %lu\n",
                 (void *)status_addr, (unsigned long)p->pid);
-        return (uint64_t)-1;
+        return (uint64_t)-EFAULT;
     }
+    if (usage_addr && !user_buffer_ok(p, usage_addr, sizeof(struct user_rusage)))
+        return (uint64_t)-EFAULT;
 
     for (;;) {
         bool any_children = false;
@@ -2089,14 +2090,21 @@ static uint64_t sys_wait(uint64_t status_addr, uint64_t selector_raw,
         if (child) {
             uint64_t pid = child->pid;
             bool exited = child->exited;
-            if (exited)
+            struct user_rusage usage;
+            memset(&usage, 0, sizeof(usage));
+            if (exited) {
+                resource_reap_child(p, child, &usage);
                 proc_destroy(child);
+            } else if (usage_addr)
+                resource_get_self_usage(child, &usage);
             if (status_addr)
                 *(int *)status_addr = event_status;
+            if (usage_addr)
+                *(struct user_rusage *)usage_addr = usage;
             return pid;
         }
         if (!any_children)
-            return (uint64_t)-1;
+            return (uint64_t)-ECHILD;
         if (options & 1) /* WNOHANG */
             return 0;
 
@@ -2115,6 +2123,74 @@ static uint64_t sys_wait(uint64_t status_addr, uint64_t selector_raw,
         thread_set_sleeping(t);
         schedule();
     }
+}
+
+static uint64_t sys_wait(uint64_t status_addr, uint64_t selector_raw,
+                         uint64_t options_raw,
+                         struct aarch64_frame *f) {
+    (void)f;
+    return wait_common(status_addr, (int64_t)selector_raw,
+                       (int)options_raw, 0);
+}
+
+struct user_wait4_request {
+    int64_t selector;
+    int32_t options;
+    int32_t reserved;
+    uint64_t status;
+    uint64_t usage;
+};
+
+static uint64_t sys_wait4(uint64_t request_addr, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_addr, sizeof(struct user_wait4_request)))
+        return (uint64_t)-EFAULT;
+    struct user_wait4_request request =
+        *(const struct user_wait4_request *)request_addr;
+    return wait_common(request.status, request.selector,
+                       request.options, request.usage);
+}
+
+static uint64_t sys_getrusage(uint64_t scope_raw, uint64_t usage_addr,
+                              uint64_t c, struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, usage_addr, sizeof(struct user_rusage)))
+        return (uint64_t)-EFAULT;
+    int64_t scope = (int64_t)scope_raw;
+    if (scope == PROC_RUSAGE_SELF)
+        resource_get_self_usage(p, (struct user_rusage *)usage_addr);
+    else if (scope == PROC_RUSAGE_CHILDREN)
+        resource_get_children_usage(p, (struct user_rusage *)usage_addr);
+    else
+        return (uint64_t)-EINVAL;
+    return 0;
+}
+
+static uint64_t sys_getrlimit(uint64_t resource, uint64_t limit_addr,
+                              uint64_t c, struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, limit_addr, sizeof(struct proc_rlimit)))
+        return (uint64_t)-EFAULT;
+    struct proc_rlimit limit;
+    int result = resource_get_limit(p, (int)resource, &limit);
+    if (result < 0)
+        return (uint64_t)result;
+    *(struct proc_rlimit *)limit_addr = limit;
+    return 0;
+}
+
+static uint64_t sys_setrlimit(uint64_t resource, uint64_t limit_addr,
+                              uint64_t c, struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, limit_addr, sizeof(struct proc_rlimit)))
+        return (uint64_t)-EFAULT;
+    struct proc_rlimit limit = *(const struct proc_rlimit *)limit_addr;
+    return (uint64_t)resource_set_limit(p, (int)resource, &limit);
 }
 
 static const syscall_fn syscall_table[] = {
@@ -2194,6 +2270,10 @@ static const syscall_fn syscall_table[] = {
     [SYS_PPOLL] = sys_ppoll,
     [SYS_REBOOT] = sys_reboot,
     [SYS_PAUSE]  = sys_pause,
+    [SYS_GETRUSAGE] = sys_getrusage,
+    [SYS_GETRLIMIT] = sys_getrlimit,
+    [SYS_SETRLIMIT] = sys_setrlimit,
+    [SYS_WAIT4] = sys_wait4,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

@@ -96,6 +96,7 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->rgid = p->egid = p->sgid = 0;
     p->supplementary_group_count = 0;
     p->file_umask = 022;
+    resource_process_init(p);
     p->exit_status = 0;
     p->exited = false;
     p->stopped = false;

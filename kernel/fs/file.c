@@ -101,7 +101,8 @@ static int descriptor_ok(struct proc *p, int fd) {
 static int free_descriptor_from(struct proc *p, int minimum) {
     if (!p || minimum < 0)
         return -1;
-    for (int fd = minimum; fd < PROC_MAX_FDS; fd++)
+    uint64_t limit = resource_nofile_limit(p);
+    for (int fd = minimum; fd < (int)limit; fd++)
         if (!p->files[fd])
             return fd;
     return -1;
@@ -295,6 +296,8 @@ int file_pipe(struct proc *p, int fds[2], int flags) {
 int file_dup(struct proc *p, int oldfd, int minimum, int cloexec) {
     if (!descriptor_ok(p, oldfd))
         return -EBADF;
+    if (minimum < 0 || (uint64_t)minimum >= resource_nofile_limit(p))
+        return -EINVAL;
     int newfd = free_descriptor_from(p, minimum);
     if (newfd < 0)
         return -EMFILE;
@@ -305,10 +308,12 @@ int file_dup(struct proc *p, int oldfd, int minimum, int cloexec) {
 }
 
 int file_dup2(struct proc *p, int oldfd, int newfd, int cloexec) {
-    if (!descriptor_ok(p, oldfd) || newfd < 0 || newfd >= PROC_MAX_FDS)
-        return !descriptor_ok(p, oldfd) ? -EBADF : -EINVAL;
+    if (!descriptor_ok(p, oldfd))
+        return -EBADF;
     if (oldfd == newfd)
         return newfd;
+    if (newfd < 0 || (uint64_t)newfd >= resource_nofile_limit(p))
+        return -EBADF;
     struct open_file *source = p->files[oldfd];
     file_retain(source);
     if (p->files[newfd])

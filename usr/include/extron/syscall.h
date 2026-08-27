@@ -77,6 +77,10 @@
 #define SYS_FCHDIR      66
 #define SYS_REBOOT      71
 #define SYS_PPOLL       75
+#define SYS_GETRUSAGE   76
+#define SYS_GETRLIMIT   77
+#define SYS_SETRLIMIT   78
+#define SYS_WAIT4       79
 
 struct extron_thread_create_args {
     uintptr_t entry;

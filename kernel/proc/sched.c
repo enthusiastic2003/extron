@@ -125,6 +125,8 @@ static void install_and_switch(struct thread *old, struct thread *next) {
     __asm__ volatile ("mrs %0, daif" : "=r"(daif));
     __asm__ volatile ("msr daifset, #3" ::: "memory");
 
+    resource_account_switch(old, next);
+
     next->state = THREAD_RUNNING;
     current_thread = next;
 
@@ -211,6 +213,9 @@ void schedule(void) {
          * while flagged THREAD_SLEEPING, and thread_wakeup_expired() then
          * kept re-queuing it, producing duplicate run-queue entries and
          * self-switches). Wait for a real wakeup instead. */
+        /* Do not charge time spent parked in WFI to the blocked process
+         * whose kernel stack happens to host the idle loop. */
+        resource_account_switch(old, NULL);
         next = sched_idle_wait();
     }
 
@@ -219,6 +224,7 @@ void schedule(void) {
          * own sleep expired, or its channel was signalled). We ARE old:
          * no context switch, no address-space swap — just drop the
          * SLEEPING flag and let the caller unwind back to userland. */
+        resource_account_switch(NULL, old);
         old->state = THREAD_RUNNING;
         return;
     }

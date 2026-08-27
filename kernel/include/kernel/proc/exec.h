@@ -32,6 +32,11 @@
 #define EXEC_MAX_ENVS  32
 #define EXEC_ENV_BYTES 2048   /* total bytes of argv strings */
 
+/* The current stack is eagerly mapped and fixed-size. Resource-limit
+ * reporting uses this same definition so RLIMIT_STACK cannot drift away
+ * from what exec actually constructs. */
+#define EXEC_USER_STACK_BYTES (128UL * 1024UL)
+
 /* A fully built, not-yet-installed user address space. execve()'s whole
  * safety argument is that this can be constructed and thrown away
  * without the caller's own address space ever being touched. */

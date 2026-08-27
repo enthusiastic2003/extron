@@ -9,6 +9,7 @@
 #define EINTR           4
 #define EIO             5
 #define EBADF           9
+#define ECHILD         10
 #define EAGAIN         11
 #define ENOMEM         12
 #define EACCES         13
@@ -31,5 +32,6 @@
 #define ENOSYS         38
 #define ENOTEMPTY      39
 #define ELOOP          40
+#define EOPNOTSUPP     95
 
 #endif
