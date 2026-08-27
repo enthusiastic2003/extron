@@ -65,6 +65,22 @@ already-reaped descendant usage into the parent's `RUSAGE_CHILDREN` totals,
 and the resource-aware wait path supplies per-child usage to `wait4()`.
 Resource fields for which the kernel has no accounting yet remain zero.
 
+## System identity and configuration
+
+`uname()` identifies Extron and AArch64, while a system-wide hostname backs
+both `uname().nodename` and `gethostname()`. Root may change it with
+`sethostname()`; the value is immediately visible across processes and is
+preserved across fork/exec, but is not persisted across a reboot.
+
+`sysconf()` reports kernel limits rather than mlibc's host-like fallbacks:
+descriptor and process-table ceilings, the 1000 Hz scheduler clock, argument
+and environment bytes, supplementary groups, page size, VFS symlink depth,
+single-core status, and firmware-described/free physical pages. Optional
+interfaces that are not implemented—such as POSIX CPU clocks, priority
+scheduling, POSIX timers, and `fsync()`—are explicitly reported unsupported.
+The current 3072-byte combined argument/environment limit is truthful but
+below POSIX's recommended minimum and remains an exec-stack limitation.
+
 ## Signals
 
 The signal-delivery layer supports process-wide dispositions and pending

@@ -1953,7 +1953,9 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
     (void)envp_addr;
     struct proc *p = my_proc();
 
-    char path[101];   /* tar's name field is 100 bytes; longer can't exist */
+    /* Execution is VFS-backed now, so its pathname limit is the VFS limit;
+     * the historical 100-byte tar-header restriction no longer applies. */
+    char path[VFS_PATH_MAX + 1];
     if (copy_user_string(p, path_addr, path, sizeof(path)) < 0) {
         kprintf("[SYSCALL execve] unreadable or oversized path\n");
         return (uint64_t)-1;
@@ -2193,6 +2195,257 @@ static uint64_t sys_setrlimit(uint64_t resource, uint64_t limit_addr,
     return (uint64_t)resource_set_limit(p, (int)resource, &limit);
 }
 
+struct user_utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
+
+static spinlock_t hostname_lock = SPINLOCK_INIT;
+static char system_hostname[65] = "extron";
+
+static uint64_t sys_uname(uint64_t address, uint64_t b, uint64_t c,
+                          struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, address, sizeof(struct user_utsname)))
+        return (uint64_t)-EFAULT;
+    struct user_utsname value;
+    memset(&value, 0, sizeof(value));
+    memcpy(value.sysname, "Extron", sizeof("Extron"));
+    memcpy(value.release, "0.1", sizeof("0.1"));
+    memcpy(value.version, "Extron POSIX", sizeof("Extron POSIX"));
+    memcpy(value.machine, "aarch64", sizeof("aarch64"));
+    irq_spin_lock(&hostname_lock);
+    memcpy(value.nodename, system_hostname, sizeof(value.nodename));
+    irq_spin_unlock(&hostname_lock);
+    *(struct user_utsname *)address = value;
+    return 0;
+}
+
+/* operation 0 gets a NUL-terminated name; operation 1 installs exactly
+ * length bytes and is restricted to root. The configured hostname is global,
+ * as it describes the running system rather than one process. */
+static uint64_t sys_hostname(uint64_t operation, uint64_t address,
+                             uint64_t length, struct aarch64_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (operation == 0) {
+        irq_spin_lock(&hostname_lock);
+        size_t needed = strlen(system_hostname) + 1;
+        if (length < needed) {
+            irq_spin_unlock(&hostname_lock);
+            return (uint64_t)-ERANGE;
+        }
+        if (!user_buffer_ok(p, address, needed)) {
+            irq_spin_unlock(&hostname_lock);
+            return (uint64_t)-EFAULT;
+        }
+        memcpy((void *)address, system_hostname, needed);
+        irq_spin_unlock(&hostname_lock);
+        return 0;
+    }
+    if (operation != 1)
+        return (uint64_t)-EINVAL;
+    struct vfs_cred cred;
+    proc_vfs_cred_snapshot(p, &cred);
+    if (cred.uid != 0)
+        return (uint64_t)-EPERM;
+    if (length > 64)
+        return (uint64_t)-EINVAL;
+    if (length && !user_buffer_ok(p, address, length))
+        return (uint64_t)-EFAULT;
+    irq_spin_lock(&hostname_lock);
+    if (length)
+        memcpy(system_hostname, (const void *)address, length);
+    system_hostname[length] = '\0';
+    irq_spin_unlock(&hostname_lock);
+    return 0;
+}
+
+/* mlibc's _SC_* numbers are part of Extron's userspace ABI. Unsupported
+ * optional facilities return -1 as a successful value; an unknown selector
+ * returns EINVAL. Keeping the result in an output pointer distinguishes those
+ * two cases from the kernel's usual negative errno convention. */
+static uint64_t sys_sysconf(uint64_t number, uint64_t result_address,
+                            uint64_t c, struct aarch64_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, result_address, sizeof(int64_t)))
+        return (uint64_t)-EFAULT;
+    int64_t result;
+    switch ((int)number) {
+        case 0:  result = EXEC_ARG_BYTES + EXEC_ENV_BYTES; break; /* ARG_MAX */
+        case 1:  result = PROC_MAX_PROCS - 1; break;              /* CHILD_MAX */
+        case 2:  result = timer_ticks_per_second(); break;        /* CLK_TCK */
+        case 3:  result = VFS_GROUP_MAX; break;                   /* NGROUPS_MAX */
+        case 4:  result = resource_nofile_limit(p); break;        /* OPEN_MAX */
+        case 5:  result = resource_nofile_limit(p); break;        /* STREAM_MAX */
+        case 7:  result = 1; break;                               /* JOB_CONTROL */
+        case 8:  result = 1; break;                               /* SAVED_IDS */
+        case 9:  result = -1; break;                              /* RTSIG */
+        case 10: result = -1; break;                              /* PRIORITY_SCHED */
+        case 11: result = -1; break;                              /* POSIX timers */
+        case 15: result = -1; break;                              /* FSYNC */
+        case 16: result = 200809L; break;                         /* MAPPED_FILES */
+        case 19: result = 200809L; break;                         /* MEMORY_PROTECTION */
+        case 29: result = -1; break;                              /* VERSION */
+        case 30: result = PAGE_SIZE; break;
+        case 60: result = 1024; break;                            /* IOV_MAX */
+        case 67: result = 200809L; break;                         /* THREADS */
+        case 68: result = 200809L; break;                         /* THREAD_SAFE */
+        case 73: result = 8; break;                               /* DTOR iterations */
+        case 74: result = 1024; break;                            /* THREAD_KEYS_MAX */
+        case 75: result = 16384; break;                           /* STACK_MIN */
+        case 76: result = PROC_MAX_PROCS; break;                  /* THREADS_MAX */
+        case 83: result = 1; break;                               /* CPUs configured */
+        case 84: result = 1; break;                               /* CPUs online */
+        case 85: result = (int64_t)pmm_total_usable_pages(); break;
+        case 86: result = (int64_t)pmm_free_pages(); break;
+        case 138: result = -1; break;                             /* process CPU clocks */
+        case 139: result = -1; break;                             /* thread CPU clocks */
+        case 149: result = 200809L; break;                        /* monotonic clock */
+        case 157: result = 200809L; break;                        /* shell */
+        case 173: result = VFS_SYMLINK_MAX; break;
+        case 180: result = 64; break;
+        default: return (uint64_t)-EINVAL;
+    }
+    *(int64_t *)result_address = result;
+    return 0;
+}
+
+struct user_statvfs {
+    uint64_t block_size, fragment_size;
+    uint64_t blocks, blocks_free, blocks_available;
+    uint64_t files, files_free, files_available;
+    uint64_t filesystem_id, flags, name_max;
+};
+
+struct user_statvfs_request {
+    int64_t operation;      /* 0 pathname, 1 descriptor */
+    int64_t fd;
+    uint64_t path;
+    uint64_t output;
+};
+
+static uint64_t sys_statvfs(uint64_t request_address, uint64_t b, uint64_t c,
+                            struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_address, sizeof(struct user_statvfs_request)))
+        return (uint64_t)-EFAULT;
+    struct user_statvfs_request request =
+        *(const struct user_statvfs_request *)request_address;
+    if (!user_buffer_ok(p, request.output, sizeof(struct user_statvfs)))
+        return (uint64_t)-EFAULT;
+
+    struct vfs_fs_info info;
+    int result;
+    if (request.operation == 1) {
+        if (request.fd < 0 || request.fd > INT32_MAX)
+            return (uint64_t)-EBADF;
+        struct vfs_node *node;
+        result = file_get_node(p, (int)request.fd, &node);
+        if (result < 0)
+            return (uint64_t)result;
+        result = vfs_statfs_node(node, &info);
+        vfs_node_release(node);
+    } else if (request.operation == 0) {
+        char path[VFS_PATH_MAX + 1];
+        long copied = copy_user_string(p, request.path, path, sizeof(path));
+        if (copied < 0)
+            return (uint64_t)copied;
+        if (!path[0])
+            return (uint64_t)-ENOENT;
+        struct vfs_path cwd, resolved;
+        if (proc_cwd_snapshot(p, &cwd) < 0)
+            return (uint64_t)-EIO;
+        struct vfs_cred cred;
+        proc_vfs_cred_snapshot(p, &cred);
+        result = vfs_lookup_path_as(&cwd, path, 1, &cred, &resolved);
+        vfs_path_release(&cwd);
+        if (result < 0)
+            return (uint64_t)result;
+        result = vfs_statfs_path(&resolved, &info);
+        vfs_path_release(&resolved);
+    } else
+        return (uint64_t)-EINVAL;
+    if (result < 0)
+        return (uint64_t)result;
+    struct user_statvfs output = {
+        info.block_size, info.fragment_size,
+        info.blocks, info.blocks_free, info.blocks_available,
+        info.files, info.files_free, info.files_available,
+        info.filesystem_id, info.flags, info.name_max,
+    };
+    *(struct user_statvfs *)request.output = output;
+    return 0;
+}
+
+struct user_pathconf_request {
+    int64_t operation;      /* 0 pathname, 1 descriptor */
+    int64_t fd;
+    int64_t name;
+    uint64_t path;
+    uint64_t output;
+};
+
+static uint64_t sys_pathconf(uint64_t request_address, uint64_t b, uint64_t c,
+                             struct aarch64_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_address, sizeof(struct user_pathconf_request)))
+        return (uint64_t)-EFAULT;
+    struct user_pathconf_request request =
+        *(const struct user_pathconf_request *)request_address;
+    if (!user_buffer_ok(p, request.output, sizeof(int64_t)))
+        return (uint64_t)-EFAULT;
+
+    if (request.operation == 1) {
+        if (request.fd < 0 || request.fd >= PROC_MAX_FDS || !p->files[request.fd])
+            return (uint64_t)-EBADF;
+    } else if (request.operation == 0) {
+        char path[VFS_PATH_MAX + 1];
+        long copied = copy_user_string(p, request.path, path, sizeof(path));
+        if (copied < 0)
+            return (uint64_t)copied;
+        if (!path[0])
+            return (uint64_t)-ENOENT;
+        struct vfs_path cwd, resolved;
+        if (proc_cwd_snapshot(p, &cwd) < 0)
+            return (uint64_t)-EIO;
+        struct vfs_cred cred;
+        proc_vfs_cred_snapshot(p, &cred);
+        int result = vfs_lookup_path_as(&cwd, path, 1, &cred, &resolved);
+        vfs_path_release(&cwd);
+        if (result < 0)
+            return (uint64_t)result;
+        vfs_path_release(&resolved);
+    } else
+        return (uint64_t)-EINVAL;
+
+    int64_t value;
+    switch ((int)request.name) {
+        case 0: value = 65535; break;             /* LINK_MAX */
+        case 1: value = TTY_CANON_MAX; break;
+        case 2: value = TTY_BUFFER_SIZE; break;
+        case 3: value = VFS_NAME_MAX; break;
+        case 4: value = VFS_PATH_MAX; break;
+        case 5: value = 4096; break;              /* PIPE_BUF */
+        case 6: value = 1; break;                 /* CHOWN_RESTRICTED */
+        case 7: value = 1; break;                 /* NO_TRUNC */
+        case 8: value = 0; break;                 /* _POSIX_VDISABLE */
+        case 9: value = 32; break;                /* FILESIZEBITS */
+        case 10: value = VFS_PATH_MAX; break;     /* SYMLINK_MAX */
+        default: return (uint64_t)-EINVAL;
+    }
+    *(int64_t *)request.output = value;
+    return 0;
+}
+
 static const syscall_fn syscall_table[] = {
     [SYS_READ]       = sys_read,
     [SYS_WRITE]      = sys_write,
@@ -2274,6 +2527,11 @@ static const syscall_fn syscall_table[] = {
     [SYS_GETRLIMIT] = sys_getrlimit,
     [SYS_SETRLIMIT] = sys_setrlimit,
     [SYS_WAIT4] = sys_wait4,
+    [SYS_UNAME] = sys_uname,
+    [SYS_HOSTNAME] = sys_hostname,
+    [SYS_SYSCONF] = sys_sysconf,
+    [SYS_STATVFS] = sys_statvfs,
+    [SYS_PATHCONF] = sys_pathconf,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

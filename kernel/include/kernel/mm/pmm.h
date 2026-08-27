@@ -38,6 +38,9 @@ void pmm_reserve_boot_region(uint64_t start, uint64_t size);
 void pmm_print_stats(void);
 /* Free page count, for leak checks across address-space teardown. */
 uint64_t pmm_free_pages(void);
+/* Total pages described as usable RAM by firmware, including pages that are
+ * currently occupied by the kernel and userspace. */
+uint64_t pmm_total_usable_pages(void);
 void scan_mb2_header(uint64_t );
 void init_pmm(uint64_t);
 void pmm_free_page(void*);

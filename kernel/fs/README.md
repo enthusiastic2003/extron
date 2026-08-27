@@ -191,6 +191,22 @@ losing euid also revokes the equivalent bypass for `setresgid()` — this
 kernel's only privilege signal is `euid == 0`, so a group triple set while
 still root does not survive a later drop to a non-root uid.
 
+## Filesystem and pathname configuration reporting
+
+`statvfs()` and `fstatvfs()` now route through the mount owning the resolved
+path or open vnode. Ext2 translates the block, reserved-block, inode, and free
+counts already maintained in its cached superblock; this is a read-only VFS
+adapter and does not change ext2 allocation or mutation code. Devfs reports a
+fixed, read-only namespace. Path and descriptor errors are validated before
+filesystem reporting, rather than returning fabricated global values.
+
+`pathconf()` and `fpathconf()` report the limits the common VFS, TTY, pipe, and
+ext2 implementations actually enforce: 255-byte names, 4096-byte paths and
+symlink targets, 40 followed symbolic links, 4096-byte atomic pipe writes, and
+the current terminal input limits. The VFS pathname ceiling was raised from
+1024 to libc's 4096-byte `PATH_MAX`; VFS-backed `execve()` now uses that same
+limit instead of retaining the obsolete 100-byte tar-header restriction.
+
 ## Deliberately deferred
 
 - access-control lists, capabilities, file flags, and a user/group database;

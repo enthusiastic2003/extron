@@ -13,6 +13,8 @@
 #include <stdlib.h>            // exit() — the real termination path, see __mlibc_start_main
 #include <unistd.h>
 #include <sys/resource.h>
+#include <sys/statvfs.h>
+#include <sys/utsname.h>
 #include <mlibc/elf/startup.h> // mlibc::entry_stack — argc/argv, parsed by __dlapi_enter()
 #include <mlibc/tcb.hpp>
 
@@ -104,6 +106,11 @@
 #define SYS_GETRLIMIT   77
 #define SYS_SETRLIMIT   78
 #define SYS_WAIT4       79
+#define SYS_UNAME       80
+#define SYS_HOSTNAME    81
+#define SYS_SYSCONF     82
+#define SYS_STATVFS     83
+#define SYS_PATHCONF    84
 
 
 using main_fn = int (*)(int, char **);
@@ -555,14 +562,70 @@ int sys_setrlimit(int resource, const struct rlimit *limit) {
 }
 
 int sys_sysconf(int number, long *result) {
-    if (number != _SC_OPEN_MAX)
-        return EINVAL;
-    struct rlimit limit;
-    int error = sys_getrlimit(RLIMIT_NOFILE, &limit);
-    if (error)
-        return error;
-    *result = static_cast<long>(limit.rlim_cur);
-    return 0;
+    long ret = syscall2(SYS_SYSCONF, number, reinterpret_cast<long>(result));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_uname(struct utsname *value) {
+    long ret = syscall1(SYS_UNAME, reinterpret_cast<long>(value));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_gethostname(char *buffer, size_t size) {
+    long ret = syscall3(SYS_HOSTNAME, 0, reinterpret_cast<long>(buffer), size);
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_sethostname(const char *buffer, size_t size) {
+    long ret = syscall3(SYS_HOSTNAME, 1, reinterpret_cast<long>(buffer), size);
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+struct statvfs_request {
+    int64_t operation;
+    int64_t fd;
+    uint64_t path;
+    uint64_t output;
+};
+
+int sys_statvfs(const char *path, struct statvfs *output) {
+    statvfs_request request{
+        0, -1, reinterpret_cast<uint64_t>(path), reinterpret_cast<uint64_t>(output)
+    };
+    long ret = syscall1(SYS_STATVFS, reinterpret_cast<long>(&request));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_fstatvfs(int fd, struct statvfs *output) {
+    statvfs_request request{
+        1, fd, 0, reinterpret_cast<uint64_t>(output)
+    };
+    long ret = syscall1(SYS_STATVFS, reinterpret_cast<long>(&request));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+struct pathconf_request {
+    int64_t operation;
+    int64_t fd;
+    int64_t name;
+    uint64_t path;
+    uint64_t output;
+};
+
+int sys_pathconf(const char *path, int name, long *result) {
+    pathconf_request request{
+        0, -1, name, reinterpret_cast<uint64_t>(path), reinterpret_cast<uint64_t>(result)
+    };
+    long ret = syscall1(SYS_PATHCONF, reinterpret_cast<long>(&request));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
+}
+
+int sys_fpathconf(int fd, int name, long *result) {
+    pathconf_request request{
+        1, fd, name, 0, reinterpret_cast<uint64_t>(result)
+    };
+    long ret = syscall1(SYS_PATHCONF, reinterpret_cast<long>(&request));
+    return ret < 0 ? static_cast<int>(-ret) : 0;
 }
 
 int sys_getpgid(pid_t pid, pid_t *pgid) {

@@ -10,6 +10,8 @@
 #include <kernel/proc/signal.h>
 #include <kernel/proc/resource.h>
 
+#define PROC_MAX_PROCS 256
+
 struct vm_space; /* kernel/mm/uvm.h — forward-declared to avoid a circular include */
 struct proc;
 

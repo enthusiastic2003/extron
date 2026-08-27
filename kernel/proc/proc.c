@@ -212,12 +212,10 @@ void proc_destroy(struct proc *p) {
  * Process table — ported from x86's kernel/proc/proc.c
  * (~/extron-x86-backup/): a fixed slot array + a lock + a monotonic
  * PID counter. Slots aren't tied to PIDs; lookup is a linear scan —
- * fine for a hobby kernel's MAX_PROCS, switch to a hash if it ever
+ * fine for a hobby kernel's PROC_MAX_PROCS, switch to a hash if it ever
  * shows up in profiles (x86's own comment, still true here).
  * ------------------------------------------------------------- */
-#define MAX_PROCS 256
-
-static struct proc *proc_table[MAX_PROCS];
+static struct proc *proc_table[PROC_MAX_PROCS];
 static size_t       proc_table_count = 0;
 static spinlock_t   proc_table_lock  = SPINLOCK_INIT;
 /* PIDs start at 1, not 0. fork() reports 0 to the child and the child's
@@ -227,16 +225,16 @@ static uint64_t     next_id          = 1;
 
 void proc_table_init(void) {
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++)
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++)
         proc_table[i] = NULL;
     proc_table_count = 0;
     next_id          = 1;
     irq_spin_unlock(&proc_table_lock);
-    kprintf("[PROC] Process table initialized (capacity %u)\n", (unsigned)MAX_PROCS);
+    kprintf("[PROC] Process table initialized (capacity %u)\n", (unsigned)PROC_MAX_PROCS);
 }
 
 static bool proc_table_add_locked(struct proc *p) {
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         if (!proc_table[i]) {
             proc_table[i] = p;
             proc_table_count++;
@@ -247,7 +245,7 @@ static bool proc_table_add_locked(struct proc *p) {
 }
 
 static void proc_table_remove_locked(struct proc *p) {
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         if (proc_table[i] == p) {
             proc_table[i] = NULL;
             proc_table_count--;
@@ -399,7 +397,7 @@ void proc_table_remove(struct proc *p) {
 struct proc *proc_lookup(uint64_t pid) {
     irq_spin_lock(&proc_table_lock);
     struct proc *found = NULL;
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         if (proc_table[i] && proc_table[i]->pid == pid) {
             found = proc_table[i];
             break;
@@ -427,7 +425,7 @@ struct proc *proc_find_zombie_child(struct proc *parent, bool *out_any_children)
     bool any = false;
 
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p || p->parent != parent)
             continue;
@@ -452,7 +450,7 @@ struct proc *proc_find_waitable_child(struct proc *parent, int64_t selector,
     struct proc *found = NULL;
     bool any = false;
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p || p->parent != parent)
             continue;
@@ -490,7 +488,7 @@ struct proc *proc_find_waitable_child(struct proc *parent, int64_t selector,
 bool proc_group_exists(uint64_t pgid, uint64_t sid) {
     bool found = false;
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++)
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++)
         if (proc_table[i] && !proc_table[i]->exited
                 && proc_table[i]->pgid == pgid
                 && proc_table[i]->sid == sid) {
@@ -506,10 +504,10 @@ void proc_for_each(void (*fn)(struct proc *, void *), void *arg) {
      * and wakeup() needs proc_table_lock itself.  Snapshot the table so no
      * callback runs beneath the global process-table lock.  Process objects
      * are not freed concurrently on the current single-core kernel. */
-    struct proc *snapshot[MAX_PROCS];
+    struct proc *snapshot[PROC_MAX_PROCS];
     size_t count = 0;
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         if (proc_table[i])
             snapshot[count++] = proc_table[i];
     }
@@ -536,7 +534,7 @@ void proc_dump_table(void) {
     kprintf("\n========================================\n");
     kprintf("PID TID STATE TTBR0 CHAN\n");
     kprintf("----------------------------------------\n");
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p) continue;
         for (struct thread *t = p->threads; t; t = t->next_in_process)
@@ -676,7 +674,7 @@ void sleep(void *chan, spinlock_t *lk) {
 
 void wakeup(void *chan) {
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p) continue;
         for (struct thread *t = p->threads; t; t = t->next_in_process)
@@ -700,7 +698,7 @@ void wakeup(void *chan) {
 
 void thread_wakeup_expired(uint64_t now) {
     irq_spin_lock(&proc_table_lock);
-    for (size_t i = 0; i < MAX_PROCS; i++) {
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p) continue;
         for (struct thread *t = p->threads; t; t = t->next_in_process)

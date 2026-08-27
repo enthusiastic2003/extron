@@ -28,6 +28,7 @@ struct phys_mem_info
 {
     virt_addr_t bmp_phys;
     uint64_t total_mem;
+    uint64_t total_usable_pages;
     
 } global_phys_mem_info;
 
@@ -213,6 +214,10 @@ uint64_t pmm_free_pages(void) {
     return max_pages - used_pages;
 }
 
+uint64_t pmm_total_usable_pages(void) {
+    return global_phys_mem_info.total_usable_pages;
+}
+
 void pmm_print_stats(void) {
     spin_lock(&pmm_lock);
 
@@ -279,6 +284,7 @@ void init_pmm(uint64_t mb2_addr) {
 
 
     // 3. Second Pass: Loop through MMAP and free AVAILABLE regions
+    global_phys_mem_info.total_usable_pages = 0;
     struct multiboot_tag* tag = (struct multiboot_tag*)(mb2_addr + 8);
     while (tag->type != MULTIBOOT_TAG_TYPE_END) {
         if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) { 
@@ -291,6 +297,11 @@ void init_pmm(uint64_t mb2_addr) {
                 
                 if (entry->type == MULTIBOOT_MEMORY_AVAILABLE) {
                     pmm_mark_free_region(entry->addr, entry->len);
+                    uint64_t begin = align_up(entry->addr, PAGE_SIZE);
+                    uint64_t end = align_down(entry->addr + entry->len, PAGE_SIZE);
+                    if (end > begin)
+                        global_phys_mem_info.total_usable_pages +=
+                            (end - begin) / PAGE_SIZE;
                 }
             }
         }

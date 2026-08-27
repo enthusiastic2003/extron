@@ -95,6 +95,11 @@
 #define SYS_GETRLIMIT     77
 #define SYS_SETRLIMIT     78
 #define SYS_WAIT4         79
+#define SYS_UNAME         80
+#define SYS_HOSTNAME      81
+#define SYS_SYSCONF       82
+#define SYS_STATVFS       83
+#define SYS_PATHCONF      84
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

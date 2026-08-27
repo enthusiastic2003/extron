@@ -267,6 +267,18 @@ static int devfs_symlink(struct vfs_mount *m, struct vfs_dentry *p, const char *
     return -EROFS;
 }
 
+static int devfs_statfs(struct vfs_mount *mount, struct vfs_fs_info *info) {
+    (void)mount;
+    memset(info, 0, sizeof(*info));
+    info->block_size = PAGE_SIZE;
+    info->fragment_size = PAGE_SIZE;
+    info->files = ENTRY_COUNT + 1;
+    info->filesystem_id = 0x6465766673ULL; /* "devfs" */
+    info->flags = VFS_FS_RDONLY;
+    info->name_max = VFS_NAME_MAX;
+    return 0;
+}
+
 static const struct vfs_fs_ops devfs_fs_ops = {
     .root = devfs_root,
     .lookup_child = devfs_lookup_child,
@@ -275,6 +287,7 @@ static const struct vfs_fs_ops devfs_fs_ops = {
     .rename = devfs_rename,
     .link = devfs_link,
     .symlink = devfs_symlink,
+    .statfs = devfs_statfs,
 };
 
 struct tty *devfs_get_tty(struct vfs_node *node) {

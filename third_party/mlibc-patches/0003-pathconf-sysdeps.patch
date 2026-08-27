@@ -1,0 +1,57 @@
+diff --git a/options/posix/generic/unistd.cpp b/options/posix/generic/unistd.cpp
+index d6cd0c3c..8c074c7f 100644
+--- a/options/posix/generic/unistd.cpp
++++ b/options/posix/generic/unistd.cpp
+@@ -263,9 +263,14 @@ int fexecve(int, char *const [], char *const []) {
+ 	__builtin_unreachable();
+ }
+ 
+-long fpathconf(int, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++long fpathconf(int fd, int name) {
++	MLIBC_CHECK_OR_ENOSYS(mlibc::sys_fpathconf, -1);
++	long result;
++	if(int e = mlibc::sys_fpathconf(fd, name, &result); e) {
++		errno = e;
++		return -1;
++	}
++	return result;
+ }
+ 
+ int fsync(int fd) {
+@@ -583,15 +588,14 @@ int nice(int nice) {
+ 	return new_nice;
+ }
+ 
+-long pathconf(const char *, int name) {
+-	switch (name) {
+-	case _PC_NAME_MAX:
+-		return NAME_MAX;
+-	default:
+-		mlibc::infoLogger() << "missing pathconf() entry " << name << frg::endlog;
+-		errno = EINVAL;
++long pathconf(const char *path, int name) {
++	MLIBC_CHECK_OR_ENOSYS(mlibc::sys_pathconf, -1);
++	long result;
++	if(int e = mlibc::sys_pathconf(path, name, &result); e) {
++		errno = e;
+ 		return -1;
+ 	}
++	return result;
+ }
+ 
+ int pause(void) {
+diff --git a/options/posix/include/mlibc/posix-sysdeps.hpp b/options/posix/include/mlibc/posix-sysdeps.hpp
+index b16314ae..c9bfb402 100644
+--- a/options/posix/include/mlibc/posix-sysdeps.hpp
++++ b/options/posix/include/mlibc/posix-sysdeps.hpp
+@@ -187,6 +187,8 @@ int sys_tcsetattr(int, int, const struct termios *attr);
+ 	socklen_t *actual_length);
+ [[gnu::weak]] int sys_gethostname(char *buffer, size_t bufsize);
+ [[gnu::weak]] int sys_sethostname(const char *buffer, size_t bufsize);
++[[gnu::weak]] int sys_pathconf(const char *path, int name, long *result);
++[[gnu::weak]] int sys_fpathconf(int fd, int name, long *result);
+ [[gnu::weak]] int sys_mkfifoat(int dirfd, const char *path, mode_t mode);
+ [[gnu::weak]] int sys_getentropy(void *buffer, size_t length);
+ [[gnu::weak]] int sys_mknodat(int dirfd, const char *path, int mode, int dev);

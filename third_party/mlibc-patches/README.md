@@ -11,6 +11,7 @@ the repository root with:
 ```sh
 git -C third_party/mlibc apply ../mlibc-patches/0001-rtld-tls-dlsym-and-relro.patch
 git -C third_party/mlibc apply ../mlibc-patches/0002-rtld-thread-safe-dlclose.patch
+git -C third_party/mlibc apply ../mlibc-patches/0003-pathconf-sysdeps.patch
 ```
 
 The patch fixes generic loader behavior rather than weakening mlibc for Extron:
@@ -20,3 +21,8 @@ have direct QEMU integration tests in `usr/mlibc_tests/`. The second patch adds
 serialized runtime-loader state, per-thread `dlerror()`, reference-counted
 dependency-aware unloading, destructor ordering, DTV cleanup, and real DSO
 unmapping.
+
+The third patch replaces mlibc's aborting `fpathconf()` placeholder and its
+single hard-coded `pathconf()` answer with ordinary weak sysdep hooks. Extron
+then supplies those hooks in its tracked platform sysdeps, including real
+pathname/descriptor validation and truthful VFS limits.

@@ -1486,6 +1486,33 @@ static int ext2_root(struct vfs_mount *mount, struct vfs_dentry **out)
     return 0;
 }
 
+/* Reporting only: read the already-maintained superblock counters through
+ * ext2's sector cache. This deliberately does not alter allocation or write
+ * paths, and therefore keeps the VFS information milestone out of ext2's
+ * storage logic. */
+static int ext2_statfs(struct vfs_mount *mount, struct vfs_fs_info *info)
+{
+    struct ext2_mount *m = (struct ext2_mount *)mount->private;
+    struct ext2_superblock sb;
+    int result = read_bytes(m, 1024, &sb, sizeof(sb));
+    if (result < 0)
+        return result;
+
+    memset(info, 0, sizeof(*info));
+    info->block_size = m->block_size;
+    info->fragment_size = m->block_size;
+    info->blocks = sb.s_blocks_count;
+    info->blocks_free = sb.s_free_blocks_count;
+    info->blocks_available = sb.s_free_blocks_count > sb.s_r_blocks_count
+        ? sb.s_free_blocks_count - sb.s_r_blocks_count : 0;
+    info->files = sb.s_inodes_count;
+    info->files_free = sb.s_free_inodes_count;
+    info->files_available = sb.s_free_inodes_count;
+    info->filesystem_id = EXT2_SUPER_MAGIC;
+    info->name_max = VFS_NAME_MAX;
+    return 0;
+}
+
 static int ext2_lookup_child_vfs(struct vfs_mount *mount,
                                  struct vfs_dentry *parent,
                                  const char *name,
@@ -2118,6 +2145,7 @@ const struct vfs_fs_ops ext2_fs_ops = {
     .rename         = ext2_node_rename,
     .link           = ext2_node_link,
     .symlink        = ext2_node_symlink,
+    .statfs         = ext2_statfs,
     .destroy_dentry = ext2_destroy_dentry,
 };
 

@@ -249,6 +249,22 @@ int vfs_root_path(struct vfs_path *out) {
     return 0;
 }
 
+int vfs_statfs_path(const struct vfs_path *path, struct vfs_fs_info *info) {
+    if (!path || !path->mount || !info)
+        return -EINVAL;
+    if (!path->mount->ops || !path->mount->ops->statfs)
+        return -ENOSYS;
+    return path->mount->ops->statfs(path->mount, info);
+}
+
+int vfs_statfs_node(struct vfs_node *node, struct vfs_fs_info *info) {
+    if (!node || !node->owner_mount || !info)
+        return -EINVAL;
+    if (!node->owner_mount->ops || !node->owner_mount->ops->statfs)
+        return -ENOSYS;
+    return node->owner_mount->ops->statfs(node->owner_mount, info);
+}
+
 static int replace_path(struct vfs_path *path, struct vfs_mount *mount,
                         struct vfs_dentry *dentry) {
     if (!path || !mount || !dentry)
@@ -404,6 +420,11 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
             }
         }
         child->owner_mount = current.mount;
+        /* Filesystems which manufacture nodes before they are mounted
+         * (devfs) cannot fill this during vfs_node_init(). Once reached
+         * through a mount the ownership is unambiguous; hard links cannot
+         * cross mounts. */
+        child->node->owner_mount = current.mount;
         if (child->node->type == VFS_NODE_SYMLINK
                 && (!final || follow_final || followed_by_slash)) {
             if (depth >= VFS_SYMLINK_MAX || !child->node->ops->readlink) {

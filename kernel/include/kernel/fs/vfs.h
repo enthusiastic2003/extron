@@ -7,10 +7,30 @@
 #include <kernel/sync/spinlock.h>
 
 #define VFS_NAME_MAX 255
-#define VFS_PATH_MAX 1024
+#define VFS_PATH_MAX 4096
 #define VFS_MAX_MOUNTS 8
 #define VFS_SYMLINK_MAX 40
 #define VFS_GROUP_MAX 16
+
+/* Filesystem-wide information, deliberately independent of any userspace
+ * statvfs ABI. Filesystem drivers fill this and the syscall layer translates
+ * it at the user/kernel boundary. */
+struct vfs_fs_info {
+    uint64_t block_size;
+    uint64_t fragment_size;
+    uint64_t blocks;
+    uint64_t blocks_free;
+    uint64_t blocks_available;
+    uint64_t files;
+    uint64_t files_free;
+    uint64_t files_available;
+    uint64_t filesystem_id;
+    uint64_t flags;
+    uint64_t name_max;
+};
+
+#define VFS_FS_RDONLY 1u
+#define VFS_FS_NOSUID 2u
 
 struct vfs_cred {
     uint32_t uid;
@@ -142,6 +162,7 @@ struct vfs_fs_ops {
                 const char *, struct vfs_dentry **);
     int (*symlink)(struct vfs_mount *, struct vfs_dentry *, const char *,
                    const char *, uint32_t, uint32_t, struct vfs_dentry **);
+    int (*statfs)(struct vfs_mount *, struct vfs_fs_info *);
     void (*destroy_dentry)(struct vfs_dentry *);
 };
 
@@ -225,5 +246,7 @@ long vfs_write(struct vfs_node *node, size_t offset,
 int vfs_readdir(struct vfs_node *node, size_t index, struct vfs_dirent *entry);
 int vfs_getattr(struct vfs_node *node, struct vfs_attr *attr);
 int vfs_setattr(struct vfs_node *node, const struct vfs_setattr *attr);
+int vfs_statfs_path(const struct vfs_path *path, struct vfs_fs_info *info);
+int vfs_statfs_node(struct vfs_node *node, struct vfs_fs_info *info);
 
 #endif
