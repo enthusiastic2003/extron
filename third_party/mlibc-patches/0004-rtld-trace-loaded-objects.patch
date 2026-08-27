@@ -1,0 +1,36 @@
+diff --git a/options/rtld/generic/main.cpp b/options/rtld/generic/main.cpp
+--- a/options/rtld/generic/main.cpp
++++ b/options/rtld/generic/main.cpp
+@@ -45,0 +46 @@ bool ldShowAuxv = false;
++bool ldTraceLoadedObjects = false;
+@@ -411,0 +413,2 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
++		}else if(name == "LD_TRACE_LOADED_OBJECTS" && *value && *value != '0') {
++			ldTraceLoadedObjects = true;
+@@ -558,0 +562,21 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
++
++	// ldd(1) asks the real runtime linker to resolve the object graph, but
++	// must not relocate it, run constructors, or enter the inspected program.
++	// Reporting here ensures that tracing follows exactly the same DT_NEEDED,
++	// RUNPATH/RPATH, LD_LIBRARY_PATH and default-path decisions as execution.
++	if(ldTraceLoadedObjects) {
++		for(auto object : initialRepository->loadedObjects) {
++			if(object->isMainObject)
++				continue;
++
++			if(object == ldso) {
++				mlibc::infoLogger() << "\t" << object->path << " (0x"
++						<< frg::hex_fmt(object->baseAddress) << ")" << frg::endlog;
++			}else{
++				mlibc::infoLogger() << "\t" << object->name << " => " << object->path
++						<< " (0x" << frg::hex_fmt(object->baseAddress) << ")" << frg::endlog;
++			}
++			mlibc::sys_libc_log("\n");
++		}
++		mlibc::sys_exit(0);
++	}
+diff --git a/options/rtld/include/mlibc/rtld-sysdeps.hpp b/options/rtld/include/mlibc/rtld-sysdeps.hpp
+--- a/options/rtld/include/mlibc/rtld-sysdeps.hpp
++++ b/options/rtld/include/mlibc/rtld-sysdeps.hpp
+@@ -5,0 +6,2 @@ namespace [[gnu::visibility("hidden")]] mlibc {
++[[noreturn]] void sys_exit(int status);
++

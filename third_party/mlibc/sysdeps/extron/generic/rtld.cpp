@@ -74,6 +74,12 @@ struct mmap_request {
 
 namespace mlibc {
 
+[[noreturn]] void sys_exit(int status) {
+    syscall1(SYS_EXIT, status);
+    for (;;)
+        __asm__ volatile ("");
+}
+
 void sys_libc_log(const char *message) {
     size_t length = 0;
     while (message[length])

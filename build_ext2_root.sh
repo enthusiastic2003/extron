@@ -72,6 +72,9 @@ done
 if [ -f "$INITRD_DIR/resize.elf" ]; then
     cp "$INITRD_DIR/resize.elf" "$ROOTFS_DIR/bin/resize"
 fi
+if [ -f "$INITRD_DIR/ldd.elf" ]; then
+    cp "$INITRD_DIR/ldd.elf" "$ROOTFS_DIR/bin/ldd"
+fi
 
 # Distribute terminfo and other usr/local files
 if [ -d "$INITRD_DIR/usr" ]; then
