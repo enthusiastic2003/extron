@@ -9,12 +9,11 @@
 #include<kernel/mm/uvm.h>
 #include<kernel/proc/elf_loader.h>
 
-/* `require_fixed_base`: true for a normal, non-PIE executable at its
- * own address (the first PT_LOAD's p_vaddr must equal
- * ELF_USER_EXPECTED_BASE, as always); false when the caller is about
- * to apply its own load bias (a PIE interpreter) — in that case
- * p_vaddr is a file-relative offset from 0, not a real address, and
- * any value is legal. */
+/* `require_fixed_base`: true for a normal, non-PIE executable at its own
+ * fixed address. Reject mappings near the null page, but do not require one
+ * magic link address: valid AArch64 linker scripts can put file headers one
+ * maximum-page below their nominal 0x400000 text address. False means the
+ * caller applies a load bias to an ET_DYN image, whose p_vaddr is relative. */
 Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size,
                                       bool require_fixed_base) {
     if (!buffer)
@@ -69,7 +68,7 @@ Elf64_ValidationResult elf64_validate(const void *buffer, uint64_t size,
     if (require_fixed_base) {
         for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
             if (phdr[i].p_type == PT_LOAD) {
-                if (phdr[i].p_vaddr != ELF_USER_EXPECTED_BASE)
+                if (phdr[i].p_vaddr < ELF_USER_MIN_LOAD_ADDR)
                     return ELF_ERR_BASE;
                 break;
             }
@@ -164,11 +163,9 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
                           struct vm_space *mm) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)binary_mem_loc;
 
-    /* Validate ELF. bias == 0 means a normal fixed-base executable —
-     * elf64_validate() enforces the first PT_LOAD sits at
-     * ELF_USER_EXPECTED_BASE in that case, so there is no separate
-     * re-check of that here; a nonzero bias skips the fixed-base
-     * check entirely, since p_vaddr is file-relative in that case. */
+    /* Validate ELF. bias == 0 is a fixed-address executable and therefore
+     * receives the minimum-user-address check. A nonzero bias is an ET_DYN
+     * image whose p_vaddr values are relative to that bias. */
     Elf64_ValidationResult result = elf64_validate(ehdr, buffer_size, bias == 0);
     if(result != ELF_OK) {
         kprintf("[LOADER] ELF validation failed: %d\n", result);
@@ -193,6 +190,7 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
     }
 
     memset(out_aux, 0, sizeof(*out_aux));
+    out_aux->image_start = UINT64_MAX;
     for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_INTERP)
             continue;
@@ -247,6 +245,11 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc,
 
         uint64_t total_pages =
             (total_mem + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        if (aligned_vaddr < out_aux->image_start)
+            out_aux->image_start = aligned_vaddr;
+        if (aligned_vaddr + total_pages * PAGE_SIZE > out_aux->image_end)
+            out_aux->image_end = aligned_vaddr + total_pages * PAGE_SIZE;
 
         /* Record the complete segment before mapping pages. If allocation or
          * page-table construction fails, vm_space_destroy() can now unwind

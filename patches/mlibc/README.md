@@ -9,10 +9,10 @@ The current checkout is based on mlibc commit `9fdb2774`. Apply the patches from
 the repository root with:
 
 ```sh
-git -C third_party/mlibc apply ../mlibc-patches/0001-rtld-tls-dlsym-and-relro.patch
-git -C third_party/mlibc apply ../mlibc-patches/0002-rtld-thread-safe-dlclose.patch
-git -C third_party/mlibc apply ../mlibc-patches/0003-pathconf-sysdeps.patch
-git -C third_party/mlibc apply --unidiff-zero ../mlibc-patches/0004-rtld-trace-loaded-objects.patch
+git -C third_party/mlibc apply ../../patches/mlibc/0001-rtld-tls-dlsym-and-relro.patch
+git -C third_party/mlibc apply ../../patches/mlibc/0002-rtld-thread-safe-dlclose.patch
+git -C third_party/mlibc apply ../../patches/mlibc/0003-pathconf-sysdeps.patch
+git -C third_party/mlibc apply --unidiff-zero ../../patches/mlibc/0004-rtld-trace-loaded-objects.patch
 ```
 
 The patch fixes generic loader behavior rather than weakening mlibc for Extron:

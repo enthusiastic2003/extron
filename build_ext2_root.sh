@@ -4,6 +4,14 @@ set -euo pipefail
 IMG="initrd.ext2"
 INITRD_DIR="build/initrd"
 ROOTFS_DIR="build/rootfs"
+TMP_IMG=""
+CMD_FILE=""
+
+cleanup() {
+    [ -z "$TMP_IMG" ] || rm -f "$TMP_IMG"
+    [ -z "$CMD_FILE" ] || rm -f "$CMD_FILE"
+}
+trap cleanup EXIT
 
 echo "=== Building Ext2 Root Filesystem ==="
 
@@ -19,6 +27,8 @@ mkdir -p "$ROOTFS_DIR/opt/doom"
 mkdir -p "$ROOTFS_DIR/opt/tests"
 mkdir -p "$ROOTFS_DIR/root"
 mkdir -p "$ROOTFS_DIR/usr/local"
+mkdir -p "$ROOTFS_DIR/usr/bin"
+mkdir -p "$ROOTFS_DIR/usr/include"
 
 # The real mlibc runtime linker and its first shared dependency. Keep these
 # sourced from the checked sysroot so the compiler and root filesystem always
@@ -88,6 +98,36 @@ if [ -d "$INITRD_DIR/local" ]; then
     cp -r "$INITRD_DIR/local"/* "$ROOTFS_DIR/usr/local/" 2>/dev/null || true
 fi
 
+# Native Binutils is intentionally built separately: its upstream tree is
+# large and a normal kernel rebuild must not silently rebuild a toolchain.
+# tools/build_binutils.sh populates this staging directory when requested.
+if [ -d "build/binutils-stage/usr/bin" ]; then
+    cp -a build/binutils-stage/usr/bin/. "$ROOTFS_DIR/usr/bin/"
+    mkdir -p "$ROOTFS_DIR/opt/tests"
+    cp usr/binutils_tests/native_binutils_smoke.sh \
+        "$ROOTFS_DIR/opt/tests/native_binutils_smoke.sh"
+    chmod 0755 "$ROOTFS_DIR/opt/tests/native_binutils_smoke.sh"
+fi
+
+# Native GCC is also an explicit, separately built payload.  The compact
+# staging tree contains the AArch64 driver/front ends, libgcc, libstdc++, and
+# C++ headers.  A compiler additionally needs the libc development surface;
+# keep those headers and static/startup objects out of ordinary runtime images
+# unless GCC has actually been staged.
+if [ -d "build/gcc-native-root/usr/bin" ]; then
+    cp -a build/gcc-native-root/usr/. "$ROOTFS_DIR/usr/"
+    cp -a usr/mlibc-sysroot/usr/include/. "$ROOTFS_DIR/usr/include/"
+    cp -a usr/mlibc-sysroot/lib/*.a "$ROOTFS_DIR/usr/lib/"
+    cp -a usr/mlibc-sysroot/lib/crt0.o usr/mlibc-sysroot/lib/crt1.o \
+        "$ROOTFS_DIR/usr/lib/"
+    cp -P usr/mlibc-sysroot/lib/libm.so "$ROOTFS_DIR/lib/libm.so"
+    ln -sf /lib/libc.so "$ROOTFS_DIR/usr/lib/libc.so"
+    ln -sf /lib/libc.so "$ROOTFS_DIR/usr/lib/libm.so"
+    cp usr/gcc_tests/native_gcc_smoke.sh \
+        "$ROOTFS_DIR/opt/tests/native_gcc_smoke.sh"
+    chmod 0755 "$ROOTFS_DIR/opt/tests/native_gcc_smoke.sh"
+fi
+
 # The new dynamic ncurses expects terminfo at /usr/share/terminfo
 # but the initrd data has it in /usr/local/share/terminfo
 mkdir -p "$ROOTFS_DIR/usr/share"
@@ -97,11 +137,20 @@ fi
 
 # Calculate required size in MB (with some buffer)
 DIR_SIZE_KB=$(du -sk "$ROOTFS_DIR" | cut -f1)
-IMG_SIZE_MB=$(( (DIR_SIZE_KB / 1024) + 16 )) # 16MB extra space
+# Large developer payloads need more than nominal file-data slack: ext2's
+# inode tables and block metadata also consume image space.  Leave enough room
+# for native compiler temporaries and linked test executables.
+EXTRA_MB=16
+if [ -d "build/gcc-native-root/usr/bin" ]; then EXTRA_MB=96; fi
+IMG_SIZE_MB=$(( (DIR_SIZE_KB / 1024) + EXTRA_MB ))
 if [ $IMG_SIZE_MB -lt 32 ]; then IMG_SIZE_MB=32; fi
 
-dd if=/dev/zero of="$IMG" bs=1M count=$IMG_SIZE_MB status=none
-mkfs.ext2 -q -E revision=0 -b 1024 "$IMG"
+# Build on a new inode, then publish atomically. This also makes rebuilding
+# safe while a QEMU validation guest still has the previous image open: that
+# guest retains the old inode and cannot write stale metadata into the new FS.
+TMP_IMG=$(mktemp "./${IMG}.tmp.XXXXXX")
+dd if=/dev/zero of="$TMP_IMG" bs=1M count=$IMG_SIZE_MB status=none
+mkfs.ext2 -q -E revision=0 -b 1024 "$TMP_IMG"
 
 # Generate debugfs commands
 CMD_FILE=$(mktemp)
@@ -131,7 +180,10 @@ done
 
 cd ../..
 
-debugfs -w "$IMG" -f $CMD_FILE > /dev/null 2>&1
-rm -f $CMD_FILE
+debugfs -w "$TMP_IMG" -f "$CMD_FILE" > /dev/null 2>&1
+rm -f "$CMD_FILE"
+CMD_FILE=""
+mv -f "$TMP_IMG" "$IMG"
+TMP_IMG=""
 
 echo "=== $IMG created successfully ($IMG_SIZE_MB MB) ==="

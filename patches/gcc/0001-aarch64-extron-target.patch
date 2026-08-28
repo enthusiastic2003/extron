@@ -1,0 +1,389 @@
+--- a/mpc/build-aux/config.sub
++++ b/mpc/build-aux/config.sub
+@@ -1748,7 +1748,7 @@
+ 	     | skyos* | haiku* | rdos* | toppers* | drops* | es* \
+ 	     | onefs* | tirtos* | phoenix* | fuchsia* | redox* | bme* \
+ 	     | midnightbsd* | amdhsa* | unleashed* | emscripten* | wasi* \
+-	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr*)
++	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* | extron*)
+ 		;;
+ 	# This one is extra strict with allowed versions
+ 	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
+--- a/gmp/configfsf.sub
++++ b/gmp/configfsf.sub
+@@ -1759,7 +1759,7 @@
+ 	     | onefs* | tirtos* | phoenix* | fuchsia* | redox* | bme* \
+ 	     | midnightbsd* | amdhsa* | unleashed* | emscripten* | wasi* \
+ 	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \
+-	     | fiwix* | mlibc* )
++	     | fiwix* | mlibc* | extron* )
+ 		;;
+ 	# This one is extra strict with allowed versions
+ 	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
+--- a/mpfr/config.sub
++++ b/mpfr/config.sub
+@@ -1754,7 +1754,7 @@
+ 	     | onefs* | tirtos* | phoenix* | fuchsia* | redox* | bme* \
+ 	     | midnightbsd* | amdhsa* | unleashed* | emscripten* | wasi* \
+ 	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \
+-	     | fiwix* )
++	     | fiwix* | extron* )
+ 		;;
+ 	# This one is extra strict with allowed versions
+ 	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
+--- a/config.sub
++++ b/config.sub
+@@ -1749,7 +1749,7 @@
+ 	     | onefs* | tirtos* | phoenix* | fuchsia* | redox* | bme* \
+ 	     | midnightbsd* | amdhsa* | unleashed* | emscripten* | wasi* \
+ 	     | nsk* | powerunix* | genode* | zvmoe* | qnx* | emx* | zephyr* \
+-	     | fiwix* )
++	     | fiwix* | extron* )
+ 		;;
+ 	# This one is extra strict with allowed versions
+ 	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
+--- a/gcc/config.gcc
++++ b/gcc/config.gcc
+@@ -938,7 +938,7 @@
+   rust_target_objs="${rust_target_objs} fuchsia-rust.o"
+   target_has_targetrustm=yes
+   ;;
+-*-*-linux* | frv-*-*linux* | *-*-kfreebsd*-gnu | *-*-gnu* | *-*-kopensolaris*-gnu | *-*-uclinuxfdpiceabi)
++*-*-linux* | frv-*-*linux* | *-*-kfreebsd*-gnu | *-*-gnu* | *-*-kopensolaris*-gnu | *-*-uclinuxfdpiceabi | *-*-extron*)
+   extra_options="$extra_options gnu-user.opt"
+   gas=yes
+   gnu_ld=yes
+@@ -1236,6 +1236,29 @@
+ esac
+ 
+ case ${target} in
++aarch64*-*-extron*)
++	# Same as the plain aarch64*-*-elf case just below, except for
++	# glibc-stdint.h in place of newlib-stdint.h.
++	#
++	# newlib-stdint.h picks register-width "fast" integer types
++	# (INT_FAST8_TYPE = int, 4 bytes) — the usual bare-metal/embedded
++	# convention. mlibc's own generic aarch64 sysdeps
++	# (bits/types.h's `#elif defined (__aarch64__)` branch) were
++	# written against glibc's convention instead (INT_FAST8_TYPE =
++	# signed char, 1 byte) — every real aarch64-linux-gnu target uses
++	# glibc-stdint.h, and that is what mlibc was tested against.
++	#
++	# Mismatched, this doesn't fail quietly: mlibc's bits/types.h has
++	# its own _Static_assert comparing sizeof(__mlibc_int_fast8) against
++	# sizeof(__INT_FAST8_TYPE__) specifically to catch exactly this —
++	# a compiler whose ABI notion of "fast" doesn't match what mlibc
++	# assumed. First seen building libgcc against freshly-installed
++	# mlibc headers: sizeof(int) (this target, newlib-stdint.h) doesn't
++	# equal sizeof(signed char) (mlibc's assumption).
++	tm_file="${tm_file} elfos.h gnu-user.h glibc-stdint.h"
++	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-errata.h extron.h"
++	tmake_file="${tmake_file} aarch64/t-aarch64"
++	;;
+ aarch64*-*-elf | aarch64*-*-fuchsia* | aarch64*-*-rtems*)
+ 	tm_file="${tm_file} elfos.h newlib-stdint.h"
+ 	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-errata.h aarch64/aarch64-elf-raw.h"
+--- a/libgcc/config.host
++++ b/libgcc/config.host
+@@ -297,6 +297,13 @@
+   tmake_file="$tmake_file t-crtstuff-pic t-libgcc-pic t-eh-dw2-dip t-slibgcc t-slibgcc-fuchsia"
+   extra_parts="crtbegin.o crtend.o"
+   ;;
++*-*-extron*)
++  # Extron is a dynamic ELF userspace, so build the PIC unwind runtime and
++  # libgcc_s just as other GNU-linker targets do.  Do not include t-linux:
++  # its compatibility symbol versions are specifically for glibc.
++  tmake_file="$tmake_file t-crtstuff-pic t-libgcc-pic t-eh-dw2-dip t-slibgcc t-slibgcc-gld t-slibgcc-elf-ver"
++  extra_parts="crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o"
++  ;;
+ *-*-linux* | frv-*-*linux* | *-*-kfreebsd*-gnu | *-*-gnu* | *-*-kopensolaris*-gnu | *-*-uclinuxfdpiceabi)
+   tmake_file="$tmake_file t-crtstuff-pic t-libgcc-pic t-eh-dw2-dip t-slibgcc t-slibgcc-gld t-slibgcc-elf-ver t-linux"
+   extra_parts="crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o"
+@@ -389,7 +396,7 @@
+ esac
+ 
+ case ${host} in
+-aarch64*-*-elf | aarch64*-*-rtems*)
++aarch64*-*-elf | aarch64*-*-rtems* | aarch64*-*-extron*)
+ 	extra_parts="$extra_parts crtbegin.o crtend.o crti.o crtn.o"
+ 	extra_parts="$extra_parts crtfastmath.o"
+ 	tmake_file="${tmake_file} ${cpu_type}/t-aarch64"
+--- a/libstdc++-v3/crossconfig.m4
++++ b/libstdc++-v3/crossconfig.m4
+@@ -174,7 +174,7 @@
+ 
+     GCC_CHECK_TLS
+     ;;
+-  *-linux* | *-uclinux* | *-gnu* | *-kfreebsd*-gnu | *-cygwin* | *-solaris*)
++  *-linux* | *-uclinux* | *-gnu* | *-kfreebsd*-gnu | *-cygwin* | *-solaris* | *-extron*)
+     GLIBCXX_CHECK_COMPILER_FEATURES
+     GLIBCXX_CHECK_LINKER_FEATURES
+     GLIBCXX_CHECK_MATH_SUPPORT
+--- a/libstdc++-v3/configure
++++ b/libstdc++-v3/configure
+@@ -6999,7 +6999,7 @@
+   ;;
+ 
+ # This must be Linux ELF.
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
+   lt_cv_deplibs_check_method=pass_all
+   ;;
+ 
+@@ -9776,7 +9776,7 @@
+       lt_prog_compiler_static='-non_shared'
+       ;;
+ 
+-    linux* | k*bsd*-gnu | kopensolaris*-gnu)
++    linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+       case $cc_basename in
+       # old Intel for x86_64 which still supported -KPIC.
+       ecc*)
+@@ -10371,7 +10371,7 @@
+       archive_expsym_cmds='sed "s,^,_," $export_symbols >$output_objdir/$soname.expsym~$CC -shared $pic_flag $libobjs $deplibs $compiler_flags ${wl}-h,$soname ${wl}--retain-symbols-file,$output_objdir/$soname.expsym ${wl}--image-base,`expr ${RANDOM-$$} % 4096 / 2 \* 262144 + 1342177280` -o $lib'
+       ;;
+ 
+-    gnu* | linux* | tpf* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
++    gnu* | linux* | extron* | tpf* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
+       tmp_diet=no
+       if test "$host_os" = linux-dietlibc; then
+ 	case $cc_basename in
+@@ -11953,7 +11953,7 @@
+ # project, but have not yet been accepted: they are GCC-local changes
+ # for the time being.  (See
+ # https://lists.gnu.org/archive/html/libtool-patches/2018-05/msg00000.html)
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
+   version_type=linux
+   need_lib_prefix=no
+   need_version=no
+@@ -13948,7 +13948,7 @@
+         inherit_rpath_CXX=yes
+         ;;
+ 
+-      linux* | k*bsd*-gnu | kopensolaris*-gnu)
++      linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+         case $cc_basename in
+           KCC*)
+ 	    # Kuck and Associates, Inc. (KAI) C++ Compiler
+@@ -14787,7 +14787,7 @@
+ 	    ;;
+ 	esac
+ 	;;
+-      linux* | k*bsd*-gnu | kopensolaris*-gnu)
++      linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+ 	case $cc_basename in
+ 	  KCC*)
+ 	    # KAI C++ Compiler
+@@ -15703,7 +15703,7 @@
+ # project, but have not yet been accepted: they are GCC-local changes
+ # for the time being.  (See
+ # https://lists.gnu.org/archive/html/libtool-patches/2018-05/msg00000.html)
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
+   version_type=linux
+   need_lib_prefix=no
+   need_version=no
+@@ -39204,7 +39204,7 @@
+ 
+   fi
+     ;;
+-  *-linux* | *-uclinux* | *-gnu* | *-kfreebsd*-gnu | *-cygwin* | *-solaris*)
++  *-linux* | *-uclinux* | *-gnu* | *-kfreebsd*-gnu | *-cygwin* | *-solaris* | *-extron*)
+ 
+   # All these tests are for C++; save the language and the compiler flags.
+   # The CXXFLAGS thing is suspicious, but based on similar bits previously
+@@ -59359,4 +59359,3 @@
+   { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: unrecognized options: $ac_unrecognized_opts" >&5
+ $as_echo "$as_me: WARNING: unrecognized options: $ac_unrecognized_opts" >&2;}
+ fi
+-
+--- a/libtool.m4
++++ b/libtool.m4
+@@ -2539,7 +2539,7 @@
+ # project, but have not yet been accepted: they are GCC-local changes
+ # for the time being.  (See
+ # https://lists.gnu.org/archive/html/libtool-patches/2018-05/msg00000.html)
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
+   version_type=linux
+   need_lib_prefix=no
+   need_version=no
+@@ -3198,7 +3198,7 @@
+   ;;
+ 
+ # This must be Linux ELF.
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
+   lt_cv_deplibs_check_method=pass_all
+   ;;
+ 
+@@ -3856,7 +3856,7 @@
+ 	    ;;
+ 	esac
+ 	;;
+-      linux* | k*bsd*-gnu | kopensolaris*-gnu)
++      linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+ 	case $cc_basename in
+ 	  KCC*)
+ 	    # KAI C++ Compiler
+@@ -4154,7 +4154,7 @@
+       _LT_TAGVAR(lt_prog_compiler_static, $1)='-non_shared'
+       ;;
+ 
+-    linux* | k*bsd*-gnu | kopensolaris*-gnu)
++    linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+       case $cc_basename in
+       # old Intel for x86_64 which still supported -KPIC.
+       ecc*)
+@@ -4571,7 +4571,7 @@
+       _LT_TAGVAR(archive_expsym_cmds, $1)='sed "s,^,_," $export_symbols >$output_objdir/$soname.expsym~$CC -shared $pic_flag $libobjs $deplibs $compiler_flags ${wl}-h,$soname ${wl}--retain-symbols-file,$output_objdir/$soname.expsym ${wl}--image-base,`expr ${RANDOM-$$} % 4096 / 2 \* 262144 + 1342177280` -o $lib'
+       ;;
+ 
+-    gnu* | linux* | tpf* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
++    gnu* | linux* | extron* | tpf* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
+       tmp_diet=no
+       if test "$host_os" = linux-dietlibc; then
+ 	case $cc_basename in
+@@ -6068,7 +6068,7 @@
+         _LT_TAGVAR(inherit_rpath, $1)=yes
+         ;;
+ 
+-      linux* | k*bsd*-gnu | kopensolaris*-gnu)
++      linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+         case $cc_basename in
+           KCC*)
+ 	    # Kuck and Associates, Inc. (KAI) C++ Compiler
+--- a/gcc/cp/module.cc
++++ b/gcc/cp/module.cc
+@@ -242,8 +242,8 @@
+ #define MAPPED_READING 0
+ #define MAPPED_WRITING 0
+ #else
+-#if HAVE_MMAP_FILE && HAVE_MUNMAP && HAVE_MSYNC
+-/* mmap, munmap, msync.  */
++#if HAVE_MMAP_FILE && HAVE_MUNMAP && HAVE_MSYNC && HAVE_MADVISE
++/* mmap, munmap, msync, madvise.  */
+ #define MAPPED_READING 1
+ #if HAVE_SYSCONF && defined (_SC_PAGE_SIZE)
+ /* sysconf (_SC_PAGE_SIZE), ftruncate  */
+--- a/gcc/config.host
++++ b/gcc/config.host
+@@ -99,7 +99,7 @@
+ esac
+ 
+ case ${host} in
+-  aarch64*-*-freebsd* | aarch64*-*-linux* | aarch64*-*-fuchsia* |\
++  aarch64*-*-freebsd* | aarch64*-*-linux* | aarch64*-*-extron* | aarch64*-*-fuchsia* |\
+   aarch64*-*-darwin*)
+     case ${target} in
+       aarch64*-*-*)
+--- a/lto-plugin/configure
++++ b/lto-plugin/configure
+@@ -7111,7 +7111,7 @@
+   ;;
+ 
+ # This must be Linux ELF.
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
+   lt_cv_deplibs_check_method=pass_all
+   ;;
+ 
+@@ -9754,7 +9754,7 @@
+       lt_prog_compiler_static='-non_shared'
+       ;;
+ 
+-    linux* | k*bsd*-gnu | kopensolaris*-gnu)
++    linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu)
+       case $cc_basename in
+       # old Intel for x86_64 which still supported -KPIC.
+       ecc*)
+@@ -10349,7 +10349,7 @@
+       archive_expsym_cmds='sed "s,^,_," $export_symbols >$output_objdir/$soname.expsym~$CC -shared $pic_flag $libobjs $deplibs $compiler_flags ${wl}-h,$soname ${wl}--retain-symbols-file,$output_objdir/$soname.expsym ${wl}--image-base,`expr ${RANDOM-$$} % 4096 / 2 \* 262144 + 1342177280` -o $lib'
+       ;;
+ 
+-    gnu* | linux* | tpf* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
++    gnu* | linux* | extron* | tpf* | k*bsd*-gnu | kopensolaris*-gnu | uclinuxfdpiceabi)
+       tmp_diet=no
+       if test "$host_os" = linux-dietlibc; then
+ 	case $cc_basename in
+@@ -11922,7 +11922,7 @@
+ # project, but have not yet been accepted: they are GCC-local changes
+ # for the time being.  (See
+ # https://lists.gnu.org/archive/html/libtool-patches/2018-05/msg00000.html)
+-linux* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
++linux* | extron* | k*bsd*-gnu | kopensolaris*-gnu | gnu* | uclinuxfdpiceabi)
+   version_type=linux
+   need_lib_prefix=no
+   need_version=no
+@@ -15451,4 +15451,3 @@
+   { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: unrecognized options: $ac_unrecognized_opts" >&5
+ $as_echo "$as_me: WARNING: unrecognized options: $ac_unrecognized_opts" >&2;}
+ fi
+-
+--- /dev/null
++++ b/gcc/config/extron.h
+@@ -0,0 +1,63 @@
++/* GCC driver defaults for the Extron mlibc userspace ABI.  */
++
++#ifndef GCC_EXTRON_H
++#define GCC_EXTRON_H
++
++#undef TARGET_OS_CPP_BUILTINS
++#define TARGET_OS_CPP_BUILTINS()             \
++  do                                         \
++    {                                        \
++      builtin_define_std ("extron");         \
++      builtin_define_std ("unix");           \
++      builtin_assert ("system=extron");      \
++      builtin_assert ("system=unix");        \
++      builtin_assert ("system=posix");       \
++    }                                        \
++  while (0)
++
++#undef CPP_SPEC
++#define CPP_SPEC "%{pthread:-D_REENTRANT}"
++
++#undef CC1_SPEC
++#define CC1_SPEC GNU_USER_TARGET_CC1_SPEC AARCH64_ERRATA_COMPILE_SPEC
++
++#undef CC1PLUS_SPEC
++#define CC1PLUS_SPEC AARCH64_ERRATA_COMPILE_SPEC
++
++#undef STARTFILE_SPEC
++#define STARTFILE_SPEC \
++  "crti%O%s crtbegin%O%s %{!shared:crt0%O%s}"
++
++#undef ENDFILE_SPEC
++#define ENDFILE_SPEC \
++  "crtend%O%s crtn%O%s " \
++  "%{Ofast|ffast-math|funsafe-math-optimizations:%{!shared:crtfastmath.o%s}}"
++
++#undef LIB_SPEC
++#define LIB_SPEC "%{pthread:-lpthread} -lc"
++
++/* Keep compiler builtins in libgcc.a, but use the shared unwind runtime for
++   normal dynamic links. Static links need libgcc_eh.a instead.  */
++#undef REAL_LIBGCC_SPEC
++#define REAL_LIBGCC_SPEC                                           \
++  "%{static|static-libgcc:-lgcc -lgcc_eh}"                         \
++  "%{!static:%{!static-libgcc:-lgcc -lgcc_s}"                     \
++  "%{static-libgcc:-lgcc -lgcc_eh}}"
++
++#undef LINK_SPEC
++#define LINK_SPEC "%{h*} "                                      \
++  "%{!shared:%{!static:-dynamic-linker /lib/ld.so}} "           \
++  "%{static:-Bstatic} %{shared:-shared} %{symbolic:-Bsymbolic} " \
++  "%{!static:%{rdynamic:-export-dynamic}} "                     \
++  "%{mbig-endian:-EB} %{mlittle-endian:-EL} -X "                \
++  "-maarch64elf%{mabi=ilp32*:32}%{mbig-endian:b} "              \
++  AARCH64_ERRATA_LINK_SPEC
++
++#define TARGET_POSIX_IO
++
++/* The native Binutils 2.42 port predates GAS's .base64 directive. The
++   Canadian-cross configure probe sees the build machine's assembler, so make
++   the target capability explicit and retain GCC's portable byte encoding. */
++#undef BASE64_ASM_OP
++
++#endif /* GCC_EXTRON_H */

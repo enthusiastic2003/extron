@@ -52,6 +52,9 @@ struct exec_image {
 struct proc *proc_create_from_binary(const char *binary_path);
 struct proc *proc_create_from_binary_argv(const char *binary_path,
                                           const char *const *args, int argc);
+struct proc *proc_create_from_binary_argv_env(const char *binary_path,
+                                              const char *const *args, int argc,
+                                              const char *const *envp, int envc);
 
 /*
  * execve()'s address-space half: build `binary_path` into a new image

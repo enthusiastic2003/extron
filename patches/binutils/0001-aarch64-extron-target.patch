@@ -1,0 +1,46 @@
+--- a/config.sub
++++ b/config.sub
+@@ -1777,6 +1777,11 @@
+ 	kernel* | msvc* )
+ 		# Restricted further below
+ 		;;
++	extron*)
++		# Sirjan's hobby OS (github.com/enthusiastic2003/extron) — not
++		# an upstream-recognized OS name, so config.sub rejects it by
++		# default. Accepted as-is, same as the 'none)' case just below.
++		;;
+ 	'')
+ 		if test x"$obj" = x
+ 		then
+--- a/bfd/config.bfd
++++ b/bfd/config.bfd
+@@ -243,7 +243,7 @@
+     targ_archs="$targ_archs bfd_i386_arch bfd_powerpc_arch bfd_rs6000_arch"
+     want64=true
+     ;;
+-  aarch64-*-elf | aarch64-*-rtems* | aarch64-*-genode*)
++  aarch64-*-elf | aarch64-*-rtems* | aarch64-*-genode* | aarch64-*-extron*)
+     targ_defvec=aarch64_elf64_le_vec
+     targ_selvecs="aarch64_elf64_be_vec aarch64_elf32_le_vec aarch64_elf32_be_vec arm_elf32_le_vec arm_elf32_be_vec aarch64_pei_le_vec aarch64_pe_le_vec"
+     want64=true
+--- a/gas/configure.tgt
++++ b/gas/configure.tgt
+@@ -127,6 +127,7 @@
+ # Note: This table is alpha-sorted, please try to keep it that way.
+ case ${generic_target} in
+   aarch64*-*-elf*)			fmt=elf;;
++  aarch64*-*-extron*)		fmt=elf;;
+   aarch64*-*-fuchsia*)			fmt=elf;;
+   aarch64*-*-haiku*)			fmt=elf em=haiku ;;
+   aarch64*-*-genode*)			fmt=elf;;
+--- a/ld/configure.tgt
++++ b/ld/configure.tgt
+@@ -85,7 +85,7 @@
+ aarch64_be-*-elf)	targ_emul=aarch64elfb
+ 			targ_extra_emuls="aarch64elf aarch64elf32 aarch64elf32b armelfb armelf"
+ 			;;
+-aarch64-*-elf | aarch64-*-rtems* | aarch64-*-genode*)
++aarch64-*-elf | aarch64-*-rtems* | aarch64-*-genode* | aarch64-*-extron*)
+ 			targ_emul=aarch64elf
+ 			targ_extra_emuls="aarch64elf32 aarch64elf32b aarch64elfb armelf armelfb"
+ 			;;

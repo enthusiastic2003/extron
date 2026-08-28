@@ -153,6 +153,7 @@ typedef enum {
 
 /*Extron Specific User Program Load Constants*/
 #define ELF_USER_EXPECTED_BASE 0x400000
+#define ELF_USER_MIN_LOAD_ADDR 0x10000
 
 /* Standard SysV auxiliary vector types (the ELF ABI's AT_* constants —
  * same numbering on every Linux-derived platform, not an Extron

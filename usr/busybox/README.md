@@ -18,7 +18,7 @@ tools/configure_busybox.sh
 CCACHE_DISABLE=1 make -j4
 ```
 
-The configuration script applies `busybox-1.38.0-extron.patch`, starts from
+The configuration script applies `patches/busybox/busybox-1.38.0-extron.patch`, starts from
 BusyBox's `allnoconfig`, and applies `extron.config`. The normal Extron build
 then cross-compiles BusyBox against `usr/mlibc-sysroot`, copies it to the
 initrd as `sh`, and builds the kernel image. Set `BUSYBOX_DIR` when the source

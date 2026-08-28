@@ -12,27 +12,11 @@
 #include <kernel/drivers/timer.h>
 #include <arch/irq_spinlock.h>
 
-/* Fixed per-proc user stack VA — same for every proc, safe since each
- * has its own independent TTBR0 (see kernel/arch/aarch64/proc.c's
- * proc_init(), which this calls).
- *
- * This used to start at 0x500000, only 1 MiB above the required ELF base.
- * That fit the small test programs but collided with mlibc DOOM: its second
- * PT_LOAD ends at 0x557018. Keep generous image-growth room while remaining
- * far below the userspace heap at 0x10000000. */
-#define USER_STACK_VA 0x1000000
-
-/* Fixed load address for a PT_INTERP interpreter (a dynamic linker),
- * loaded via parse_and_load_binary()'s bias parameter rather than at
- * its own p_vaddr the way the main ET_EXEC image is — an interpreter
- * is normally ET_DYN, so its p_vaddr values are file-relative, not
- * real addresses. Comfortably clear of the main image's own growth
- * room (DOOM's second PT_LOAD already reaches 0x557018; see
- * USER_STACK_VA's comment above) and far below the stack at
- * 0x1000000 — this project doesn't do dynamic/ASLR-style placement
- * anywhere yet, everything lives at a fixed, well-known address, and
- * the interpreter is no different. */
-#define INTERP_BASE 0x900000
+/* Put the fixed-size initial stack near the top of TTBR0's 48-bit user
+ * range, where normal ELF images and the mmap arena cannot grow into it.
+ * Each process has an independent TTBR0, so the VA can be identical in
+ * every process. Keep one 64 KiB gap below the architectural limit. */
+#define USER_STACK_TOP 0x0000FFFFFFFF0000ULL
 
 /* One page was enough while every payload was hand-written assembly with
  * no call depth and no locals. C code blows through that immediately —
@@ -41,7 +25,13 @@
  * rather than faulting. 128KB is cheap per process and leaves room for
  * the DOOM port's call depth. */
 #define USER_STACK_PAGES (EXEC_USER_STACK_BYTES / PAGE_SIZE)
-#define USER_STACK_TOP   (USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE)
+#define USER_STACK_VA    (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
+
+/* GNU's AArch64 linker aligns PT_LOAD segments to 64 KiB. Place an ET_DYN
+ * interpreter at the first such boundary after the main executable rather
+ * than at a magic address: native compiler front ends are tens of MiB and
+ * legitimately extend across the old fixed 0x900000 placement. */
+#define INTERP_ALIGN 0x10000ULL
 
 /* AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, AT_UID,
  * AT_EUID, AT_GID, AT_EGID, AT_RANDOM, AT_EXECFN, plus AT_NULL — see
@@ -203,9 +193,8 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
      * re-reading that file from disk. The interpreter finds its own
      * phdrs a different way (a self-relocation trick every real ld.so
      * already does at startup, using its own program counter — nothing
-     * this kernel needs to supply). `interp_base` is INTERP_BASE when
-     * exec_image_build() loaded a PT_INTERP interpreter for this
-     * program, 0 otherwise; that's what AT_BASE reports. */
+     * this kernel needs to supply). `interp_base` is the actual selected
+     * interpreter load bias, or 0 for a static image; AT_BASE reports it. */
     size_t auxv_base = 1 + argc + 1 + envc + 1;
     size_t a = 0;
     #define AUXV(t, v) do { \
@@ -360,8 +349,8 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     }
 
     /* PT_INTERP: don't jump into the main image directly — load the
-     * named interpreter too (at INTERP_BASE, since it's normally
-     * ET_DYN) and start there instead. AT_ENTRY (in `aux`, already
+     * named ET_DYN interpreter after the main image and start there.
+     * AT_ENTRY (in `aux`, already
      * populated above) keeps pointing at the real program's own entry
      * point regardless, exactly what the interpreter needs once it's
      * done bootstrapping itself to jump into the program it was
@@ -376,9 +365,15 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
                     aux.interp_path, binary_path);
             goto fail;
         }
+        if (aux.image_end > UINT64_MAX - (INTERP_ALIGN - 1)) {
+            kfree(interp_bin);
+            goto fail;
+        }
+        interp_base = (aux.image_end + INTERP_ALIGN - 1)
+                    & ~(INTERP_ALIGN - 1);
         struct elf_aux_info interp_aux;
         int interp_result = parse_and_load_binary((virt_addr_t)interp_bin, interp_size,
-                                                   ttbr0, INTERP_BASE, &interp_aux, mm);
+                                                   ttbr0, interp_base, &interp_aux, mm);
         kfree(interp_bin);
         if (interp_result != 0) {
             kprintf("[EXEC] interpreter '%s' failed to load for %s\n",
@@ -386,7 +381,6 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
             goto fail;
         }
         real_start  = interp_aux.entry;
-        interp_base = INTERP_BASE;
     }
 
     phys_addr_t top_phys = 0;
@@ -453,11 +447,12 @@ fail:
     return -1;
 }
 
-struct proc *proc_create_from_binary_argv(const char *binary_path,
-                                          const char *const *args, int argc) {
+struct proc *proc_create_from_binary_argv_env(const char *binary_path,
+                                              const char *const *args, int argc,
+                                              const char *const *envp, int envc) {
     struct exec_image img;
 
-    if (exec_image_build(NULL, binary_path, args, argc, NULL, 0, &img) != 0)
+    if (exec_image_build(NULL, binary_path, args, argc, envp, envc, &img) != 0)
         return NULL;
 
     struct proc *p = kmalloc(sizeof(struct proc));
@@ -477,6 +472,11 @@ struct proc *proc_create_from_binary_argv(const char *binary_path,
     p->user_argv = img.argv;
     proc_table_add(p);
     return p;
+}
+
+struct proc *proc_create_from_binary_argv(const char *binary_path,
+                                          const char *const *args, int argc) {
+    return proc_create_from_binary_argv_env(binary_path, args, argc, NULL, 0);
 }
 
 struct proc *proc_create_from_binary(const char *binary_path) {

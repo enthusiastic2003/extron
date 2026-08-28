@@ -32,6 +32,8 @@ struct vm_space; /* kernel/mm/uvm.h */
 struct elf_aux_info {
     virt_addr_t entry;
     virt_addr_t phdr_va;
+    virt_addr_t image_start;
+    virt_addr_t image_end;
     uint64_t    phnum;
     uint64_t    phentsize;
     bool        has_interp;
@@ -44,8 +46,8 @@ struct elf_aux_info {
  * `bias` is added to every p_vaddr before it's used as a mapping
  * target or reported in `out_aux`, and to e_entry too. Pass 0 for a
  * normal, non-PIE executable at its own fixed address — in that case
- * (and ONLY that case) the first PT_LOAD's p_vaddr must equal
- * ELF_USER_EXPECTED_BASE, exactly as before this parameter existed.
+ * (and ONLY that case) the first PT_LOAD must stay above the protected
+ * low-address/null-page region.
  * Pass a nonzero bias to load a position-independent image (an ET_DYN
  * interpreter, in practice) at a chosen base instead: the fixed-base
  * check is skipped entirely, since a PIE's own p_vaddr values are
@@ -62,5 +64,3 @@ int parse_and_load_binary(virt_addr_t binary_mem_loc, size_t buffer_size,
                           struct elf_aux_info *out_aux,
                           struct vm_space *mm);
 #endif // !ELF_LOADER_H
-
-

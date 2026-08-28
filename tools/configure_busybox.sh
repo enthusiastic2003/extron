@@ -4,7 +4,7 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 busybox=${BUSYBOX_DIR:-"$repo/third_party/busybox"}
 seed="$repo/usr/busybox/extron.config"
-port_patch="$repo/usr/busybox/busybox-1.38.0-extron.patch"
+port_patch="$repo/patches/busybox/busybox-1.38.0-extron.patch"
 
 if ! grep -q '__extron__' "$busybox/include/platform.h"; then
     patch -d "$busybox" -p1 < "$port_patch"

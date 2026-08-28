@@ -225,13 +225,18 @@ $(BUILD)/initrd/sh: tools/configure_busybox.sh usr/busybox/extron.config $(MLIBC
 $(INITRD): $(INITRD_ELF) $(INITRD_DATA) $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO) $(MLIBC_TEST_DEP_DSO)
 	./build_ext2_root.sh
 
+# Toolchains are expensive explicit builds. Their scripts populate staging
+# trees; the rootfs builder includes whichever payloads are present.
+package-binutils package-gcc: $(INITRD_ELF) $(INITRD_DATA) $(MLIBC_LDSO) $(MLIBC_LIBC_SO) $(MLIBC_TEST_DSO) $(MLIBC_TEST_DEP_DSO)
+	./build_ext2_root.sh
+
 run: $(KERNEL_IMG) $(INITRD)
 	qemu-system-aarch64 -M raspi4b -chardev stdio,id=serial0,signal=off -serial chardev:serial0 -display none -kernel $(KERNEL_IMG) -dtb boot/bcm2711-rpi-4-b.dtb -initrd $(INITRD)
 
 clean:
 	rm -rf $(BUILD) $(INITRD)
 
-.PHONY: all run clean
+.PHONY: all run clean package-binutils package-gcc
 
 # Header dependencies emitted by -MMD. Leading '-' so a clean tree (no .d
 # files yet) isn't an error.

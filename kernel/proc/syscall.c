@@ -1958,8 +1958,23 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
     char path[VFS_PATH_MAX + 1];
     if (copy_user_string(p, path_addr, path, sizeof(path)) < 0) {
         kprintf("[SYSCALL execve] unreadable or oversized path\n");
-        return (uint64_t)-1;
+        return (uint64_t)-EFAULT;
     }
+
+    /* Preserve pathname lookup errors instead of collapsing every failed
+     * image build to EPERM. PATH-searching libc routines rely on ENOENT to
+     * skip a missing candidate and continue with the next directory. */
+    struct vfs_path exec_cwd, exec_path;
+    struct vfs_cred exec_cred;
+    if (proc_cwd_snapshot(p, &exec_cwd) < 0)
+        return (uint64_t)-EIO;
+    proc_vfs_cred_snapshot(p, &exec_cred);
+    int lookup_result = vfs_lookup_path_as(&exec_cwd, path, 1,
+                                           &exec_cred, &exec_path);
+    vfs_path_release(&exec_cwd);
+    if (lookup_result < 0)
+        return (uint64_t)lookup_result;
+    vfs_path_release(&exec_path);
 
     /* argv, flattened into one kernel buffer. Both the pointer array and
      * the bytes it points at are bounded, and the bound is small enough

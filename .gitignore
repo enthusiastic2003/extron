@@ -19,11 +19,6 @@ captures/
 # our port is usr/doom/doomgeneric_extron.c, which IS tracked.
 third_party/*
 
-# Small, reviewable generic mlibc deltas are kept as patches; the full
-# upstream checkout itself remains unvendored below.
-!third_party/mlibc-patches/
-!third_party/mlibc-patches/*
-
 # The upstream mlibc checkout remains unvendored, but Extron's platform
 # boundary is part of this OS and must be present in a fresh clone.
 !third_party/mlibc/
@@ -44,3 +39,7 @@ third_party/mlibc/sysdeps/extron/include/sys/ioctl.h
 usr/*.wad
 initrd.ext2
 initrd/
+
+# A misconfigured DESTDIR can reproduce the absolute repository path beneath
+# the sysroot. It is generated install state, never a deployable sysroot input.
+usr/mlibc-sysroot/home/
