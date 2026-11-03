@@ -22,11 +22,11 @@ UL="${EXTRON_USERLAND:-$(pwd)/build-x86_64/userland}"
 if [ -f "$UL/sysroot/usr/lib/ld.so" ]; then
     cp "$UL/sysroot/usr/lib/ld.so" "$UL/sysroot/usr/lib/libc.so" "$ROOT/lib/"
     for f in "$UL"/out/*; do [ -f "$f" ] && install -m 755 "$f" "$ROOT/bin/$(basename "$f")"; done
-    # mlibc regression programs (usr/mlibc_tests) live in /opt/tests, as on aarch64.
+    # mlibc regression programs (usr/mlibc_tests) live on the data disk
+    # (tools/build_x86_disk.sh), mounted at /mnt; /opt/tests resolves there.
     if [ -d "$UL/out/tests" ]; then
-        mkdir -p "$ROOT/opt/tests"
-        cp "$UL"/out/tests/* "$ROOT/opt/tests/"
-        cp usr/hello.txt "$ROOT/hello.txt"; cp usr/hello.txt "$ROOT/opt/tests/hello.txt"
+        ln -s /mnt/opt "$ROOT/opt"
+        cp usr/hello.txt "$ROOT/hello.txt"
         cat > "$ROOT/bin/runtests" <<'RT'
 #!/bin/sh
 # Run every program in /opt/tests, report per-test status.

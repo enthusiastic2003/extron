@@ -23,7 +23,7 @@ open(vars_, "wb").write(open("/usr/share/OVMF/OVMF_VARS_4M.fd", "rb").read())
 disk_img = os.path.join(tmp, "disk.img")
 disk_args = []
 try:
-    subprocess.check_call(["mke2fs", "-q", "-t", "ext2", "-E", "revision=0", "-b", "1024", disk_img, "32M"])
+    subprocess.check_call(["tools/build_x86_disk.sh", disk_img, "64"])
     disk_args = ["-drive", f"if=none,id=data0,format=raw,file={disk_img}",
                  "-device", "virtio-blk-pci,drive=data0,disable-modern=on"]
 except (OSError, subprocess.CalledProcessError):

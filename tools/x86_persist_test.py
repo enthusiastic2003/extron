@@ -25,7 +25,7 @@ def check(what, ok):
     if not ok: failures.append(what)
 
 if os.path.exists(DISK): os.remove(DISK)
-subprocess.check_call(["mke2fs", "-q", "-t", "ext2", "-E", "revision=0", "-b", "1024", DISK, "16M"])
+subprocess.check_call(["tools/build_x86_disk.sh", DISK, "32"])
 
 out = guest("echo persist-marker-4242 > /mnt/marker.txt",
             "cp /bin/busybox /mnt/bb",

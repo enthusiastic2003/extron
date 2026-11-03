@@ -100,8 +100,7 @@ QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display $(QEMU_DISPLAY) \
             -serial stdio -no-reboot
 
 $(DISK):
-	@mkdir -p $(dir $@)
-	mke2fs -q -t ext2 -E revision=0 -b 1024 $@ $(DISK_MB)M
+	tools/build_x86_disk.sh $@ $(DISK_MB)
 
 disk: $(DISK)
 

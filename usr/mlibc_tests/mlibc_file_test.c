@@ -48,7 +48,7 @@ int main(void) {
         fclose(metadata_file);
 
     char test_directory[64];
-    snprintf(test_directory, sizeof(test_directory), "/opt/tests/file-test-%ld", (long)getpid());
+    snprintf(test_directory, sizeof(test_directory), "/mnt/opt/tests/file-test-%ld", (long)getpid());
     check("mkdir creates a ramfs directory", mkdir(test_directory, 0755) == 0);
     check("stat reports VFS directory type and mode",
           stat(test_directory, &path_info) == 0 && S_ISDIR(path_info.st_mode)
