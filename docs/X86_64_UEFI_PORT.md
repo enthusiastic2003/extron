@@ -256,13 +256,17 @@ open_file` locking reworked first.
 `tools/build_x86_libs.sh` (`make x86-libs`, run automatically by the Python build) builds
 zlib, bzip2, xz (liblzma), zstd, libffi, ncurses (wide, terminal descriptions
 compiled in with `--with-fallbacks`, so no terminfo database is needed), readline and
-sqlite as static PIC archives in `build-x86_64/extlibs/prefix`. They are linked
-into Python's extension modules, so the target needs nothing extra. With them Python
+sqlite as shared objects in `build-x86_64/extlibs/prefix`. The initrd ships the `.so`
+files in `/lib` (the default ld.so search path); Python's extension modules list them
+as DT_NEEDED and mlibc's rtld loads them when the module is imported. With them Python
 gains `zlib`, `gzip`, `bz2`, `lzma`, `compression.zstd`, `ctypes`, `curses`, `readline` and
 `sqlite3` (`tarfile`/`zipfile` compression included). Still absent: `_ssl`/`_hashlib`
 (OpenSSL), `_uuid` (libuuid; `uuid` falls back to pure Python), `_tkinter`, `dbm`.
 
 Gotchas found on the way:
+* The toolchain leaves `.gnu.version` index 0 on unversioned undefined symbols in
+  modules that also need a versioned library (zlib's `ZLIB_1.2.0`); mlibc's rtld
+  now treats that as "global" instead of failing with "Unresolved load-time symbol".
 * The compiler wrapper undefines `__linux__`, which libffi tests to choose its
   closure-memory strategy; without `-DFFI_MMAP_EXEC_WRIT=1` closures (ctypes callbacks)
   land in non-executable malloc memory and crash on first call.

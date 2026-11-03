@@ -21,6 +21,17 @@ printf 'root:x:0:\n' > "$ROOT/etc/group"
 UL="${EXTRON_USERLAND:-$(pwd)/build-x86_64/userland}"
 if [ -f "$UL/sysroot/usr/lib/ld.so" ]; then
     cp "$UL/sysroot/usr/lib/ld.so" "$UL/sysroot/usr/lib/libc.so" "$ROOT/lib/"
+    # Shared libraries for Python's modules (and anything else that links them):
+    # ordinary system libraries in /lib, found by ld.so's default search path.
+    EXTL="$(pwd)/build-x86_64/extlibs/prefix/lib"
+    if [ -d "$EXTL" ]; then
+        for f in "$EXTL"/*.so.*; do
+            case "$f" in *.old) continue;; esac
+            [ -e "$f" ] || continue
+            cp -a "$f" "$ROOT/lib/"
+            [ -L "$f" ] || strip --strip-unneeded "$ROOT/lib/$(basename "$f")" 2>/dev/null || true
+        done
+    fi
     for f in "$UL"/out/*; do [ -f "$f" ] && install -m 755 "$f" "$ROOT/bin/$(basename "$f")"; done
     # mlibc regression programs (usr/mlibc_tests) live on the data disk
     # (tools/build_x86_disk.sh), mounted at /mnt; /opt/tests resolves there.
