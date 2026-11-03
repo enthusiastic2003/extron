@@ -392,6 +392,42 @@ static uint64_t sys_pwrite(uint64_t fd, uint64_t buf_addr, uint64_t count,
                                  count, (int64_t)FRAME_ARG(f, 3));
 }
 
+static uint64_t sys_ftruncate(uint64_t fd, uint64_t size, uint64_t c,
+                              struct arch_frame *f) {
+    (void)c; (void)f;
+    return (uint64_t)file_truncate(my_proc(), (int)fd, (int64_t)size);
+}
+
+static uint64_t sys_fsync(uint64_t fd, uint64_t b, uint64_t c,
+                          struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    return (uint64_t)file_sync(my_proc(), (int)fd);
+}
+
+void kernel_random_fill(void *buf, size_t len);
+
+/* getrandom(buf, len, flags): fills the whole request. GRND_NONBLOCK and
+ * GRND_RANDOM are accepted and ignored — the generator never blocks. */
+static uint64_t sys_getrandom(uint64_t buf_addr, uint64_t len, uint64_t flags,
+                              struct arch_frame *f) {
+    (void)f;
+    if (flags & ~3ULL)
+        return (uint64_t)-EINVAL;
+    if (!user_buffer_ok(my_proc(), buf_addr, len))
+        return (uint64_t)-EFAULT;
+    kernel_random_fill((void *)buf_addr, len);
+    return len;
+}
+
+/* sched_yield: give the CPU to the next runnable thread. Same call the
+ * timer tick makes, from a context where the caller is still RUNNING. */
+static uint64_t sys_yield(uint64_t a, uint64_t b, uint64_t c,
+                          struct arch_frame *f) {
+    (void)a; (void)b; (void)c; (void)f;
+    schedule();
+    return 0;
+}
+
 #define TCGETS 0x5401
 #define TCSETS 0x5402
 #define TCSETSW 0x5403
@@ -2577,6 +2613,10 @@ static const syscall_fn syscall_table[] = {
     [SYS_PATHCONF] = sys_pathconf,
     [SYS_PREAD] = sys_pread,
     [SYS_PWRITE] = sys_pwrite,
+    [SYS_FTRUNCATE] = sys_ftruncate,
+    [SYS_FSYNC] = sys_fsync,
+    [SYS_GETRANDOM] = sys_getrandom,
+    [SYS_YIELD] = sys_yield,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

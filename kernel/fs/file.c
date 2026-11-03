@@ -642,6 +642,40 @@ long file_pwrite(struct proc *p, int fd, const void *buffer, size_t count,
     return file_write_at(p, fd, buffer, count, offset);
 }
 
+long file_truncate(struct proc *p, int fd, int64_t size) {
+    if (!descriptor_ok(p, fd))
+        return -EBADF;
+    struct open_file *f = p->files[fd];
+    if (f->kind != FILE_VNODE || size < 0)
+        return -EINVAL;
+    if ((f->flags & O_ACCMODE) == 0)
+        return -EINVAL;
+    struct vfs_node *node = f->object.node;
+    if (node->type != VFS_NODE_REGULAR)
+        return -EINVAL;
+    if (!node->ops || !node->ops->truncate)
+        return -EINVAL;
+    irq_spin_lock(&f->lock);
+    long r = node->ops->truncate(node, (size_t)size);
+    if (r == 0) {
+        struct vfs_cred cred;
+        proc_vfs_cred_snapshot(p, &cred);
+        if (cred.uid != 0)
+            vfs_clear_setid(node);
+    }
+    irq_spin_unlock(&f->lock);
+    return r;
+}
+
+/* fsync: validates the descriptor. The root filesystem is currently
+ * RAM-backed, so there is nothing to flush; a block-device-backed
+ * filesystem hooks its flush in here. */
+long file_sync(struct proc *p, int fd) {
+    if (!descriptor_ok(p, fd))
+        return -EBADF;
+    return 0;
+}
+
 long file_seek(struct proc *p, int fd, int64_t offset, int whence) {
     if (!descriptor_ok(p, fd))
         return -EBADF;

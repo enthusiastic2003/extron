@@ -1255,11 +1255,79 @@ static int ext2_remove_dirent(struct ext2_mount *m, struct ext2_inode_info *dir,
     return -ENOENT;
 }
 
+/* ftruncate to a non-zero size. Growing is sparse (just raises i_size; reads
+ * of the hole return zeros). Shrinking zeroes the tail of the last kept
+ * block — so a later grow cannot resurrect stale bytes — and frees whole
+ * blocks past it. Only direct and single-indirect blocks are handled: that
+ * is all this driver's allocator ever creates; a file that already has
+ * double/triple-indirect blocks (made elsewhere) is refused with -ENOSYS. */
+static int ext2_truncate_to(struct ext2_mount *m, struct ext2_inode_info *info,
+                            size_t size)
+{
+    struct ext2_disk_inode *di = &info->disk;
+    if (size >= di->i_size) {
+        if (size > 0xFFFFFFFFu) return -EFBIG;
+        di->i_size = (uint32_t)size;
+        int r = ext2_sync_inode(m, info);
+        ext2_sync_cache(m);
+        return r;
+    }
+    if (di->i_block[13] || di->i_block[14]) return -ENOSYS;
+
+    uint32_t bs = m->block_size, ptrs = bs / 4, sectors = bs / 512;
+    uint32_t keep = (uint32_t)((size + bs - 1) / bs);   /* blocks that stay */
+
+    m->ind_l1_block = 0; m->ind_l2_block = 0; m->ind_l3_block = 0;
+
+    if (size % bs) {
+        uint32_t phys = 0;
+        if (inode_bmap(m, di, (uint32_t)(size / bs), &phys) == 0 && phys
+                && read_block(m, phys, m->scratch) == 0) {
+            memset(m->scratch + size % bs, 0, bs - size % bs);
+            write_block(m, phys, m->scratch);
+        }
+    }
+
+    for (uint32_t i = keep; i < 12; i++) {
+        if (di->i_block[i]) {
+            ext2_free_block(m, di->i_block[i]);
+            di->i_block[i] = 0;
+            if (di->i_blocks >= sectors) di->i_blocks -= sectors;
+        }
+    }
+    if (di->i_block[12]) {
+        uint32_t *ind1 = kmalloc(bs);
+        if (!ind1) return -ENOMEM;
+        if (read_block(m, di->i_block[12], ind1) == 0) {
+            uint32_t first = keep > 12 ? keep - 12 : 0;
+            for (uint32_t i = first; i < ptrs; i++) {
+                if (ind1[i]) {
+                    ext2_free_block(m, ind1[i]);
+                    ind1[i] = 0;
+                    if (di->i_blocks >= sectors) di->i_blocks -= sectors;
+                }
+            }
+            if (keep <= 12) {
+                ext2_free_block(m, di->i_block[12]);
+                di->i_block[12] = 0;
+                if (di->i_blocks >= sectors) di->i_blocks -= sectors;
+            } else {
+                write_block(m, di->i_block[12], ind1);
+            }
+        }
+        kfree(ind1);
+    }
+    di->i_size = (uint32_t)size;
+    int r = ext2_sync_inode(m, info);
+    ext2_sync_cache(m);
+    return r;
+}
+
 static int ext2_node_truncate(struct vfs_node *node, size_t size)
 {
     struct ext2_inode_info *info = (struct ext2_inode_info *)node->private;
     struct ext2_mount *m = info->mount;
-    if (size != 0) return -ENOSYS;
+    if (size != 0) return ext2_truncate_to(m, info, size);
 
     struct ext2_disk_inode *di = &info->disk;
     uint32_t ptrs = m->block_size / 4;

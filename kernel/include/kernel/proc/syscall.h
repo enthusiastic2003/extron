@@ -100,6 +100,10 @@
 #define SYS_SYSCONF       82
 #define SYS_STATVFS       83
 #define SYS_PATHCONF      84
+#define SYS_FTRUNCATE     87
+#define SYS_FSYNC         88
+#define SYS_GETRANDOM     89
+#define SYS_YIELD         90
 #define SYS_PWRITE        86  /* pwrite(fd, buf, count, offset), like SYS_PREAD */
 #define SYS_PREAD         85  /* pread(fd, buf, count, offset): offset in arg 4 */
 
