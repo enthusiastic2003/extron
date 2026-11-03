@@ -1,4 +1,5 @@
 #include <kernel/proc/exec.h>
+#include <kernel/errno.h>
 #include <kernel/proc/elf_loader.h>
 #include <kernel/elf.h>
 #include <kernel/proc/sched.h>
@@ -293,6 +294,33 @@ static void *load_binary_bytes(struct proc *requester, const char *binary_path,
  * property is what makes execve() safe to attempt — the old image is
  * only discarded once there is definitely a new one to replace it with.
  */
+long exec_read_head(struct proc *requester, const char *path, void *buf, size_t n) {
+    struct vfs_cred cred = {0};
+    struct vfs_path cwd = {0};
+    if (requester) {
+        proc_vfs_cred_snapshot(requester, &cred);
+        proc_cwd_snapshot(requester, &cwd);
+    } else if (vfs_root_path(&cwd) < 0) {
+        return -EIO;
+    }
+    struct vfs_node *node;
+    struct vfs_path opened;
+    int r = vfs_open(&cwd, path, 0, 0, &cred, &node, &opened);
+    vfs_path_release(&cwd);
+    if (r < 0)
+        return r;
+    long result;
+    if (node->type == VFS_NODE_DIRECTORY)
+        result = -EACCES;
+    else if (node->type != VFS_NODE_REGULAR || vfs_check_access(node, &cred, VFS_ACCESS_EXEC) < 0)
+        result = -EACCES;
+    else
+        result = vfs_read(node, 0, buf, n);
+    vfs_node_release(node);
+    vfs_path_release(&opened);
+    return result;
+}
+
 static int exec_image_build(struct proc *requester, const char *binary_path,
                             const char *const *args, int argc,
                                    const char *const *envp, int envc,

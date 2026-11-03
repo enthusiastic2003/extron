@@ -16,6 +16,7 @@
 #include <kernel/fs/file.h>
 #include <kernel/fs/lock.h>
 #include <kernel/fs/socket.h>
+#include <kernel/mm/kheap.h>
 #include <kernel/fs/evfd.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/errno.h>
@@ -2888,9 +2889,92 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
         }
     }
 
+    /* "#!interpreter [arg]" scripts: run the interpreter with the script path
+     * (as given to execve) as its first argument, as Linux does. */
+    char *shbuf = NULL;
+    char run_path[VFS_PATH_MAX + 1];
+    memcpy(run_path, path, strlen(path) + 1);
+    for (int depth = 0;; depth++) {
+        char head[256];
+        long got = exec_read_head(p, run_path, head, sizeof(head) - 1);
+        if (got < 0) {
+            kfree(shbuf);
+            return (uint64_t)got;                   /* ENOENT, EACCES, ... */
+        }
+        if (got >= 4 && !memcmp(head, "\x7f" "ELF", 4))
+            break;
+        if (got < 2 || head[0] != '#' || head[1] != '!') {
+            kfree(shbuf);
+            return (uint64_t)-ENOEXEC;
+        }
+        if (depth >= 4) {
+            kfree(shbuf);
+            return (uint64_t)-ELOOP;
+        }
+        head[got] = '\0';
+        char *line = head + 2, *eol = line;
+        while (*eol && *eol != '\n') eol++;
+        *eol = '\0';
+        while (*line == ' ' || *line == '\t') line++;
+        char *interp = line, *opt = NULL;
+        while (*line && *line != ' ' && *line != '\t') line++;
+        if (*line) {
+            *line++ = '\0';
+            while (*line == ' ' || *line == '\t') line++;
+            if (*line) {
+                opt = line;
+                char *e = line + strlen(line);       /* trim trailing blanks */
+                while (e > opt && (e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
+            }
+        }
+        if (!*interp) {
+            kfree(shbuf);
+            return (uint64_t)-ENOEXEC;
+        }
+        char *nb = kmalloc(EXEC_ARG_BYTES);
+        if (!nb) {
+            kfree(shbuf);
+            return (uint64_t)-ENOMEM;
+        }
+        size_t off = 0;
+        const char *nargs[EXEC_MAX_ARGS];
+        int nc = 0;
+        const char *first[3] = { interp, opt, depth == 0 ? path : run_path };
+        bool overflow = false;
+        for (int i = 0; i < 3 && !overflow; i++) {
+            if (!first[i]) continue;
+            size_t l = strlen(first[i]) + 1;
+            if (off + l > EXEC_ARG_BYTES || nc >= EXEC_MAX_ARGS) { overflow = true; break; }
+            memcpy(nb + off, first[i], l);
+            nargs[nc++] = nb + off;
+            off += l;
+        }
+        for (int i = 1; i < argc && !overflow; i++) {      /* drop old argv[0] */
+            size_t l = strlen(args[i]) + 1;
+            if (off + l > EXEC_ARG_BYTES || nc >= EXEC_MAX_ARGS) { overflow = true; break; }
+            memcpy(nb + off, args[i], l);
+            nargs[nc++] = nb + off;
+            off += l;
+        }
+        if (overflow) {
+            kfree(nb);
+            kfree(shbuf);
+            return (uint64_t)-E2BIG;
+        }
+        kfree(shbuf);
+        shbuf = nb;
+        for (int i = 0; i < nc; i++)
+            args[i] = nargs[i];
+        argc = nc;
+        memcpy(run_path, interp, strlen(interp) + 1);
+    }
+
     struct exec_image img;
-    if (proc_exec_replace(p, path, args, argc, envs, envc, &img) != 0)
-        return (uint64_t)-1;
+    if (proc_exec_replace(p, run_path, args, argc, envs, envc, &img) != 0) {
+        kfree(shbuf);
+        return (uint64_t)-ENOEXEC;
+    }
+    kfree(shbuf);
 
     /* POSIX exec keeps only its calling thread. No sibling can run while
      * this DAIF-masked syscall replaces the address space, so removing and

@@ -81,6 +81,9 @@ sed -i 's|^CONFIG_EXTRA_LDFLAGS=.*|CONFIG_EXTRA_LDFLAGS=""|' "$BB/.config"   # s
 make -C "$BB" -j"$JOBS" CC="$CC" HOSTCC=gcc CCACHE_DISABLE=1 >"$UL/busybox-build.log" 2>&1 \
     || { tail -30 "$UL/busybox-build.log"; exit 1; }
 install -m 755 "$BB/busybox" "$OUT/busybox"
+# Applet list (/bin/ls, /sbin/init, ...): the initrd symlinks each one to busybox.
+make -C "$BB" busybox.links HOSTCC=gcc CCACHE_DISABLE=1 >/dev/null
+cp "$BB/busybox.links" "$UL/busybox.links"
 
 # ---- test programs ------------------------------------------------------------
 say "test programs"

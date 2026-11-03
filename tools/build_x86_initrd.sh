@@ -45,11 +45,16 @@ RT
     fi
     if [ -x "$ROOT/bin/busybox" ] && [ "${AUTOEXIT:-0}" != 1 ] && [ "${SMOKE_SHELL:-0}" != 1 ]; then
         rm -f "$ROOT/bin/sh"; ln -s busybox "$ROOT/bin/sh"
-        # Applets that other applets or init exec by path.
-        for a in gzip gunzip zcat login su passwd adduser deluser addgroup delgroup \
-                 chpasswd whoami; do ln -sf busybox "$ROOT/bin/$a"; done
+        # One symlink per applet (init, getty, login, sync, gzip, ... are all
+        # exec'd by path, e.g. inittab's /bin/sync and tar's `gzip`).
+        if [ -f "$UL/busybox.links" ]; then
+            while IFS= read -r link; do
+                [ -n "$link" ] || continue
+                mkdir -p "$ROOT$(dirname "$link")"
+                ln -sf /bin/busybox "$ROOT$link"
+            done < "$UL/busybox.links"
+        fi
         mkdir -p "$ROOT/sbin" "$ROOT/root" "$ROOT/home/user" "$ROOT/etc/init.d" "$ROOT/run" "$ROOT/var/log"
-        for a in init getty reboot poweroff halt; do ln -sf ../bin/busybox "$ROOT/sbin/$a"; done
         chmod 700 "$ROOT/root"; chmod 1777 "$ROOT/tmp"
 
         # The system the kernel boots into: init -> getty -> login -> sh.

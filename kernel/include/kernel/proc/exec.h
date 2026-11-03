@@ -27,6 +27,10 @@
  * whole argument block is laid out inside the single top page of the
  * new stack, so it cannot spill into the stack the process is about to
  * start using. */
+/* Read the first `n` bytes of an executable for execve() (script / ELF sniffing).
+ * Returns the byte count, or a negative errno (ENOENT, EACCES, ...). */
+long exec_read_head(struct proc *requester, const char *path, void *buf, size_t n);
+
 #define EXEC_MAX_ARGS  32
 #define EXEC_ARG_BYTES 1024
 #define EXEC_MAX_ENVS  32

@@ -17,7 +17,9 @@
 #define EBUSY          16
 #define EEXIST         17
 #define EXDEV          18
+#define E2BIG           7
 #define ENXIO           6
+#define ENOEXEC         8
 #define ENODEV         19
 #define ENOTDIR        20
 #define EISDIR         21
