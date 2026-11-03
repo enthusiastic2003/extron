@@ -49,6 +49,10 @@ int     file_set_fd_flags(struct proc *p, int fd, int flags);
 int     file_get_status_flags(struct proc *p, int fd);
 int     file_set_status_flags(struct proc *p, int fd, int flags);
 long    file_read(struct proc *p, int fd, void *buffer, size_t count);
+long    file_pread(struct proc *p, int fd, void *buffer, size_t count,
+                   int64_t offset);
+long    file_pwrite(struct proc *p, int fd, const void *buffer, size_t count,
+                    int64_t offset);
 long    file_write(struct proc *p, int fd, const void *buffer, size_t count);
 long    file_seek(struct proc *p, int fd, int64_t offset, int whence);
 int     file_close(struct proc *p, int fd);

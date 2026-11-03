@@ -519,12 +519,20 @@ static long pipe_write(struct open_file *f, const void *buffer, size_t count) {
     return (long)written;
 }
 
-long file_read(struct proc *p, int fd, void *buffer, size_t count) {
+/* Sentinel meaning "read at, and advance, the descriptor's own position".
+ * Any non-negative value is an explicit offset (pread) that leaves the
+ * position untouched. User-supplied offsets are rejected if negative, so
+ * the sentinel can never come from user space. */
+#define FILE_POS_CURRENT ((int64_t)-1)
+
+static long file_read_at(struct proc *p, int fd, void *buffer, size_t count,
+                         int64_t off) {
+    bool positional = (off != FILE_POS_CURRENT);
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_PIPE_READER)
-        return pipe_read(f, buffer, count);
+        return positional ? -ESPIPE : pipe_read(f, buffer, count);
     if (f->kind != FILE_VNODE)
         return -EBADF;
     irq_spin_lock(&f->lock);
@@ -533,28 +541,47 @@ long file_read(struct proc *p, int fd, void *buffer, size_t count) {
         return -EBADF;
     }
     struct tty *tty = devfs_get_tty(f->object.node);
+    bool is_pty = pty_get_index(f->object.node) >= 0;
     long result;
-    if (tty) {
+    if (positional && (tty || is_pty)) {
+        /* Terminals are streams: they have no position to read at. */
+        result = -ESPIPE;
+    } else if (tty) {
         result = tty_read_flags(tty, buffer, count,
                                 !!(f->flags & O_NONBLOCK));
-    } else if ((f->flags & O_NONBLOCK)
-            && pty_get_index(f->object.node) >= 0
+    } else if ((f->flags & O_NONBLOCK) && is_pty
             && !pty_master_read_ready(f->object.node)) {
         result = -EAGAIN;
     } else {
-        result = vfs_read(f->object.node, f->offset, buffer, count);
+        result = vfs_read(f->object.node,
+                          positional ? (size_t)off : f->offset,
+                          buffer, count);
     }
-    if (result > 0) f->offset += (size_t)result;
+    if (result > 0 && !positional)
+        f->offset += (size_t)result;
     irq_spin_unlock(&f->lock);
     return result;
 }
 
-long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
+long file_read(struct proc *p, int fd, void *buffer, size_t count) {
+    return file_read_at(p, fd, buffer, count, FILE_POS_CURRENT);
+}
+
+long file_pread(struct proc *p, int fd, void *buffer, size_t count,
+                int64_t offset) {
+    if (offset < 0)
+        return -EINVAL;
+    return file_read_at(p, fd, buffer, count, offset);
+}
+
+static long file_write_at(struct proc *p, int fd, const void *buffer,
+                          size_t count, int64_t off) {
+    bool positional = (off != FILE_POS_CURRENT);
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_PIPE_WRITER)
-        return pipe_write(f, buffer, count);
+        return positional ? -ESPIPE : pipe_write(f, buffer, count);
     if (f->kind != FILE_VNODE)
         return -EBADF;
     irq_spin_lock(&f->lock);
@@ -562,27 +589,39 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
         irq_spin_unlock(&f->lock);
         return -EBADF;
     }
+    struct tty *tty = devfs_get_tty(f->object.node);
+    bool is_pty = pty_get_index(f->object.node) >= 0;
+    if (positional && (tty || is_pty)) {
+        irq_spin_unlock(&f->lock);
+        return -ESPIPE;   /* terminals are streams */
+    }
+    /* Where this write lands. O_APPEND always writes at EOF; for a plain
+     * write() that also becomes the new position, while pwrite() under
+     * O_APPEND appends but leaves the position alone (Linux semantics). */
+    size_t pos = positional ? (size_t)off : f->offset;
     if (f->flags & O_APPEND) {
         struct vfs_attr attr;
         if (vfs_getattr(f->object.node, &attr) != 0) {
             irq_spin_unlock(&f->lock);
             return -EIO;
         }
-        f->offset = attr.size;
+        pos = attr.size;
+        if (!positional)
+            f->offset = pos;
     }
-    struct tty *tty = devfs_get_tty(f->object.node);
     long result;
     if (tty) {
         result = tty_write_flags(tty, buffer, count,
                                  !!(f->flags & O_NONBLOCK));
-    } else if (pty_get_index(f->object.node) >= 0) {
+    } else if (is_pty) {
         result = pty_master_write_flags(f->object.node, buffer, count,
                                         !!(f->flags & O_NONBLOCK));
     } else {
-        result = vfs_write(f->object.node, f->offset, buffer, count);
+        result = vfs_write(f->object.node, pos, buffer, count);
     }
     if (result > 0) {
-        f->offset += (size_t)result;
+        if (!positional)
+            f->offset += (size_t)result;
         struct vfs_cred cred;
         proc_vfs_cred_snapshot(p, &cred);
         if (cred.uid != 0)
@@ -590,6 +629,17 @@ long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
     }
     irq_spin_unlock(&f->lock);
     return result;
+}
+
+long file_write(struct proc *p, int fd, const void *buffer, size_t count) {
+    return file_write_at(p, fd, buffer, count, FILE_POS_CURRENT);
+}
+
+long file_pwrite(struct proc *p, int fd, const void *buffer, size_t count,
+                 int64_t offset) {
+    if (offset < 0)
+        return -EINVAL;
+    return file_write_at(p, fd, buffer, count, offset);
 }
 
 long file_seek(struct proc *p, int fd, int64_t offset, int whence) {

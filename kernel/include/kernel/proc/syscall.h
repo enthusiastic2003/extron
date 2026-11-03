@@ -100,6 +100,8 @@
 #define SYS_SYSCONF       82
 #define SYS_STATVFS       83
 #define SYS_PATHCONF      84
+#define SYS_PWRITE        86  /* pwrite(fd, buf, count, offset), like SYS_PREAD */
+#define SYS_PREAD         85  /* pread(fd, buf, count, offset): offset in arg 4 */
 
 /* Called from exceptions.c's SVC path (ESR_EL1.EC == 0x15). Returns the
  * syscall's result; the caller writes it into f->x[0] and falls through

@@ -25,9 +25,9 @@ struct arch_frame {
 #define X86_USER_CS 0x23
 #define X86_USER_SS 0x1B
 
-/* Syscall ABI (Linux-like): rax = number, rdi/rsi/rdx = args 1-3, result in rax. */
+/* Syscall ABI (Linux-like): rax = number, rdi/rsi/rdx/r10 = args 1-4, result in rax. */
 #define FRAME_SYSNR(f)       ((f)->rax)
-#define FRAME_ARG(f, n)      (*((n) == 0 ? &(f)->rdi : (n) == 1 ? &(f)->rsi : &(f)->rdx))
+#define FRAME_ARG(f, n)      (*((n) == 0 ? &(f)->rdi : (n) == 1 ? &(f)->rsi : (n) == 2 ? &(f)->rdx : &(f)->r10))
 #define FRAME_RET(f)         ((f)->rax)
 #define FRAME_FROM_USER(f)   (((f)->cs & 3) == 3)
 #define FRAME_USER_SP(f)     ((f)->rsp)

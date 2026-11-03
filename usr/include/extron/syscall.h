@@ -86,6 +86,8 @@
 #define SYS_SYSCONF     82
 #define SYS_STATVFS     83
 #define SYS_PATHCONF    84
+#define SYS_PREAD       85
+#define SYS_PWRITE      86
 
 struct extron_thread_create_args {
     uintptr_t entry;

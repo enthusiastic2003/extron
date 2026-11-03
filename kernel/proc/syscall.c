@@ -373,6 +373,25 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
     return (uint64_t)file_read(my_proc(), (int)fd, (void *)buf_addr, count);
 }
 
+/* pread(fd, buf, count, offset): offset arrives in the fourth argument
+ * register (r10 on x86-64, x3 on aarch64). Does not move the file
+ * position. */
+static uint64_t sys_pread(uint64_t fd, uint64_t buf_addr, uint64_t count,
+                          struct arch_frame *f) {
+    if (!user_buffer_ok(my_proc(), buf_addr, count))
+        return (uint64_t)-EFAULT;
+    return (uint64_t)file_pread(my_proc(), (int)fd, (void *)buf_addr, count,
+                                (int64_t)FRAME_ARG(f, 3));
+}
+
+static uint64_t sys_pwrite(uint64_t fd, uint64_t buf_addr, uint64_t count,
+                           struct arch_frame *f) {
+    if (!user_buffer_ok(my_proc(), buf_addr, count))
+        return (uint64_t)-EFAULT;
+    return (uint64_t)file_pwrite(my_proc(), (int)fd, (const void *)buf_addr,
+                                 count, (int64_t)FRAME_ARG(f, 3));
+}
+
 #define TCGETS 0x5401
 #define TCSETS 0x5402
 #define TCSETSW 0x5403
@@ -2556,6 +2575,8 @@ static const syscall_fn syscall_table[] = {
     [SYS_SYSCONF] = sys_sysconf,
     [SYS_STATVFS] = sys_statvfs,
     [SYS_PATHCONF] = sys_pathconf,
+    [SYS_PREAD] = sys_pread,
+    [SYS_PWRITE] = sys_pwrite,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
