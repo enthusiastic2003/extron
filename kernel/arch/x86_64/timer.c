@@ -72,7 +72,8 @@ static void timer_irq_handler(struct arch_frame *f) {
     (void)f;
     tick_count++;
     thread_wakeup_expired(timer_ticks());
-    schedule();
+    if (!sched_preempt_disabled())          /* not while a syscall waits for the disk */
+        schedule();
 }
 
 /* Measure the TSC against a PIT channel 2 one-shot of ~20 ms. */

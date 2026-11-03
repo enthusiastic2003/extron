@@ -11,12 +11,12 @@
  * contiguous, so a page-aligned static array is a contiguous DMA region and
  * needs no physical allocator support.
  *
- * Completion: the requester sleeps (or, before the scheduler exists, sleeps
- * the CPU with sti;hlt) until the device's INTx interrupt fires. The IRQ
- * handler reads the ISR register (which also deasserts the level-triggered
- * line), retires the used-ring entry and wakes the requester. A mutex around
- * each whole read/write/flush keeps the shared bounce buffer single-owner
- * while the requester is asleep.
+ * Completion: the CPU halts (sti;hlt) until the device's INTx interrupt fires, with
+ * preemption held off: no polling, but also no thread switch while the request is
+ * in flight, because the filesystem above is not written to be re-entered by
+ * another thread mid-operation. The IRQ handler reads the ISR register (which also
+ * deasserts the level-triggered line) and retires the used-ring entry. A 5 s
+ * timeout resets the device.
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -89,7 +89,7 @@ static bool dev_dead;                /* a reset failed: fail every request fast 
 static spinlock_t vblk_lock = SPINLOCK_INIT;
 static volatile bool req_done;       /* set by the IRQ handler */
 static bool dev_busy;                /* whole-operation mutex, guarded by vblk_lock */
-static char busy_chan, done_chan;
+static char busy_chan;
 static struct ext2_block_dev vblk_dev;
 
 static uint64_t phys_of(const void *p) {
@@ -120,7 +120,6 @@ static void vblk_irq(struct arch_frame *f) {
         barrier();
         last_used++;
         req_done = true;
-        wakeup(&done_chan);
     }
 }
 
@@ -172,31 +171,27 @@ static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len
     barrier();
     outw(io_base + VIO_QUEUE_NOTIFY, 0);
 
-    /* The check runs with interrupts masked, so the completion cannot slip
-     * in between "not done" and going to sleep. A device that never answers
-     * is given REQ_TIMEOUT_MS: the 1 kHz tick wakes a sleeper at its deadline
-     * (and an early-boot waiter notices after each halt). */
+    /* Wait for the interrupt WITHOUT yielding the CPU. The filesystem layers above
+     * (ext2's shared scratch buffer and sector cache, spinlocks held across
+     * vfs_read) assume a syscall is never switched out half way, so a sleeping wait
+     * would corrupt data as soon as two processes touch the disk. Instead the CPU
+     * halts until the device interrupts; preemption stays off so the timer tick
+     * (which keeps counting, for the timeout) cannot reschedule. */
     uint64_t hz = timer_ticks_per_second();
     uint64_t deadline = timer_ticks() + (REQ_TIMEOUT_MS * hz + 999) / 1000;
     bool timed_out = false;
+    sched_preempt_disable();
     while (!req_done) {
         if (timer_ticks() >= deadline) {
             timed_out = true;
             break;
         }
-        struct thread *self = my_thread();
-        if (self) {
-            self->sleep_until = deadline;
-            sleep(&done_chan, &vblk_lock);
-            self->sleep_until = 0;
-        } else {
-            /* Early boot: no scheduler. sti;hlt is atomic, so the IRQ
-             * either already fired or wakes the halted CPU. */
-            irq_spin_unlock(&vblk_lock);
-            __asm__ volatile ("sti; hlt; cli" ::: "memory");
-            irq_spin_lock(&vblk_lock);
-        }
+        /* sti;hlt is atomic: the IRQ either already fired or wakes the halted CPU. */
+        irq_spin_unlock(&vblk_lock);
+        __asm__ volatile ("sti; hlt; cli" ::: "memory");
+        irq_spin_lock(&vblk_lock);
     }
+    sched_preempt_enable();
     if (timed_out) {
         kprintf("virtio-blk: request timed out after %d ms (type %u, sector %lu); "
                 "resetting the device\n", REQ_TIMEOUT_MS, type, (unsigned long)sector);

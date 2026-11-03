@@ -216,3 +216,37 @@ limits further means growing the fixed, eagerly mapped stack (`EXEC_USER_STACK_B
   `clock_settime`/`settimeofday`/`date -s` write the new time back to the RTC
   (`timer_sync_rtc`), so it survives a reboot. There is no timezone support: the
   RTC is assumed to hold UTC.
+
+## Python
+
+`make x86-python` (tools/build_x86_python.sh) cross-builds CPython 3.14.4 against the
+mlibc sysroot and stages a pruned tree in `build-x86_64/python/rootfs/python`
+(about 34 MB with bytecode). `build_x86_disk.sh` copies it to `/python` on the
+data disk (bumping the image to 128 MB) and `make disk-tests` installs it on an
+existing disk the first time; the interpreter is `/mnt/python/bin/python3`, with
+`/bin/python3` and `/usr/bin/python3` symlinks in the initrd. The disk must be
+mounted for `python3` to work.
+
+* Built: every standard module except those needing outside libraries (zlib, bz2,
+  lzma, ssl/hashlib's OpenSSL parts, ctypes/libffi, sqlite3, readline, curses, tkinter,
+  uuid, dbm). `_socket` is built, but only AF_UNIX works; `multiprocessing`,
+  `asyncio`, `subprocess`, `threading`, `select`/`epoll`, `mmap`, `fcntl` locks and
+  `shared_memory` are exercised by `usr/x86_64/tests/python_test.py` (run by
+  `runtests` when the disk carries Python; about 96 checks).
+* AVX is compiled out (`ax_cv_check_cflags__Werror__mavx2=no`): CPython selects its
+  256-bit BLAKE2 path from the CPUID bit alone, but this kernel does not enable AVX.
+* Kernel/libc work this needed: futexes keyed by physical address in shared mappings
+  (process-shared semaphores), `FIONBIO`/`FIONREAD` on any descriptor, `/proc/<pid>/maps`,
+  `clock_nanosleep` with `TIMER_ABSTIME`, timed/shared/named semaphores
+  (`/tmp/.sem.*`), `shm_open` under `/tmp` (no `/dev/shm`), `wcsftime`, `sendfile`
+  (userspace loop), xattr stubs (`ENOTSUP`), `C.UTF-8` locale names, `pthread_setname_np`.
+
+## Disk I/O must not yield
+
+virtio-blk waits for its interrupt with the CPU halted and preemption held off
+(`sched_preempt_disable`); it must not sleep and reschedule. ext2 (shared scratch
+buffer and sector cache) and the VFS (spinlocks held across `vfs_read`) assume a
+syscall is never switched out half way, and an earlier version that slept in the
+driver corrupted data as soon as two processes read the disk at once (found by
+`multiprocessing`). Making the kernel preemptible would need ext2 and `struct
+open_file` locking reworked first.

@@ -12,7 +12,8 @@ for a in "$@"; do case "$a" in
 esac; done
 if [ $reloc = 1 ]; then exec gcc -nostdlib "$@"; fi
 if [ $mode = compile ]; then exec gcc "${compile[@]}" -fPIE "$@"; fi
-if [ $shared = 1 ]; then exec gcc "${compile[@]}" -fPIC -nostdlib -L"$SR/usr/lib" "$@"; fi
+# libgcc: compiler helpers (128-bit division, ...) a shared object would otherwise leave unresolved.
+if [ $shared = 1 ]; then exec gcc "${compile[@]}" -fPIC -nostdlib -L"$SR/usr/lib" "$@" -lgcc; fi
 if [ $static = 1 ]; then
   exec gcc "${compile[@]}" -static -nostdlib -L"$SR/usr/lib" "$SR/usr/lib/crt1.o" "$@" -lc -lgcc
 fi

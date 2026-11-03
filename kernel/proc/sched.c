@@ -163,6 +163,11 @@ static struct thread *sched_idle_wait(void) {
  * round robin, one tick = one timeslice — and from procs voluntarily
  * giving up the CPU (sys_sleep, sleep(), sys_exit).
  */
+static int preempt_off_count;
+void sched_preempt_disable(void) { preempt_off_count++; }
+void sched_preempt_enable(void)  { if (preempt_off_count) preempt_off_count--; }
+int  sched_preempt_disabled(void) { return preempt_off_count; }
+
 void schedule(void) {
     struct thread *old = current_thread;
     if (!old)

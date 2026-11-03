@@ -580,22 +580,26 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     if (!p || fd >= PROC_MAX_FDS || !p->files[fd])
         return (uint64_t)-EBADF;
     struct open_file *f_ioctl = p->files[fd];
-    if (f_ioctl->kind == FILE_SOCKET) {
-        if (request == 0x541B) {               /* FIONREAD */
+    if (request == 0x5421) {                   /* FIONBIO: any descriptor */
+        if (!user_buffer_ok(p, arg, sizeof(int)))
+            return (uint64_t)-EFAULT;
+        int on = *(int *)arg;
+        return (uint64_t)file_set_status_flags(p, (int)fd,
+            (file_get_status_flags(p, (int)fd) & ~04000) | (on ? 04000 : 0));
+    }
+    if (request == 0x541B) {                   /* FIONREAD: pipes, sockets, files */
+        long n = file_bytes_available(p, (int)fd);
+        if (n >= 0) {
             if (!user_buffer_ok(p, arg, sizeof(int)))
                 return (uint64_t)-EFAULT;
-            *(int *)arg = (int)sock_bytes_available(f_ioctl->object.sock);
+            *(int *)arg = (int)n;
             return 0;
         }
-        if (request == 0x5421) {               /* FIONBIO */
-            if (!user_buffer_ok(p, arg, sizeof(int)))
-                return (uint64_t)-EFAULT;
-            int on = *(int *)arg;
-            return (uint64_t)file_set_status_flags(p, (int)fd,
-                (file_get_status_flags(p, (int)fd) & ~04000) | (on ? 04000 : 0));
-        }
-        return (uint64_t)-ENOTTY;
+        if (f_ioctl->kind != FILE_VNODE)       /* a tty can still answer FIONREAD below */
+            return (uint64_t)n;
     }
+    if (f_ioctl->kind == FILE_SOCKET)
+        return (uint64_t)-ENOTTY;
     if (f_ioctl && f_ioctl->kind == FILE_VNODE && pty_get_index(f_ioctl->object.node) >= 0) {
         if (request == 0x80045430) { /* TIOCGPTN */
             if (!user_buffer_ok(p, arg, sizeof(int))) return (uint64_t)-EFAULT;

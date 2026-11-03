@@ -39,6 +39,13 @@ for t in /opt/tests/*.sh; do
     echo "=== $t"
     sh "$t" || echo "[exit status $?]"
 done
+# Python programs run only when the data disk carries CPython.
+if [ -x /mnt/python/bin/python3 ]; then
+    for t in /opt/tests/*.py; do
+        echo "=== $t"
+        /mnt/python/bin/python3 "$t" || echo "[exit status $?]"
+    done
+fi
 echo "RUNTESTS DONE"
 RT
         chmod 755 "$ROOT/bin/runtests"
@@ -53,6 +60,12 @@ RT
                 mkdir -p "$ROOT$(dirname "$link")"
                 ln -sf /bin/busybox "$ROOT$link"
             done < "$UL/busybox.links"
+        fi
+        # python3 lives on the data disk (/mnt/python, see build_x86_python.sh).
+        if [ -d build-x86_64/python/rootfs/python ]; then
+            mkdir -p "$ROOT/usr/bin"
+            ln -sf /mnt/python/bin/python3 "$ROOT/usr/bin/python3"
+            ln -sf /mnt/python/bin/python3 "$ROOT/bin/python3"
         fi
         mkdir -p "$ROOT/sbin" "$ROOT/root" "$ROOT/home/user" "$ROOT/etc/init.d" "$ROOT/run" "$ROOT/var/log"
         chmod 700 "$ROOT/root"; chmod 1777 "$ROOT/tmp"

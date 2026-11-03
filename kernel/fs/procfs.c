@@ -21,18 +21,21 @@
 #include <kernel/mm/kheap.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/uvm.h>
+#include <kernel/mm/paging.h>
+#include <kernel/proc/exec.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/signal.h>
 
 #define GEN_MAX 8192
+#define MAPS_MAX 32768
 
 enum pk {
     PK_ROOT, PK_SELF,
     PK_VERSION, PK_UPTIME, PK_MEMINFO, PK_LOADAVG, PK_STAT, PK_CPUINFO,
     PK_MOUNTS, PK_FILESYSTEMS, PK_CMDLINE,
     PK_PIDDIR,
-    PK_P_STAT, PK_P_STATUS, PK_P_CMDLINE, PK_P_COMM, PK_P_STATM, PK_P_ENVIRON,
+    PK_P_STAT, PK_P_STATUS, PK_P_CMDLINE, PK_P_COMM, PK_P_STATM, PK_P_ENVIRON, PK_P_MAPS,
     PK_P_EXE, PK_P_CWD, PK_P_ROOT, PK_P_FDDIR, PK_P_FD,
 };
 
@@ -66,6 +69,7 @@ static const struct entry pid_entries[] = {
     { "comm",    PK_P_COMM,    VFS_NODE_REGULAR },
     { "statm",   PK_P_STATM,   VFS_NODE_REGULAR },
     { "environ", PK_P_ENVIRON, VFS_NODE_REGULAR },
+    { "maps",    PK_P_MAPS,    VFS_NODE_REGULAR },
     { "exe",     PK_P_EXE,     VFS_NODE_SYMLINK },
     { "cwd",     PK_P_CWD,     VFS_NODE_SYMLINK },
     { "root",    PK_P_ROOT,    VFS_NODE_SYMLINK },
@@ -204,6 +208,32 @@ static void gen_pid_status(struct out *o, struct proc *p) {
     (void)nfd;
 }
 
+/* /proc/<pid>/maps in the Linux format: "start-end perms offset dev inode  name".
+ * mlibc's pthread_getattr_np() finds the stack by looking for the line that
+ * contains the stack pointer. */
+static void o_hex(struct out *o, uint64_t v) {
+    char t[17]; int n = 0;
+    do { int d = (int)(v & 0xF); t[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); v >>= 4; } while (v);
+    while (n < 8) t[n++] = '0';
+    while (n) o_chr(o, t[--n]);
+}
+
+static void gen_pid_maps(struct out *o, struct proc *p) {
+    if (!p->mm)
+        return;
+    for (struct vma *v = p->mm->vmas; v; v = v->next) {
+        o_hex(o, v->base); o_chr(o, '-'); o_hex(o, v->base + v->size); o_sp(o);
+        o_chr(o, (v->flags & VM_READ) ? 'r' : '-');
+        o_chr(o, (v->flags & VM_WRITE) ? 'w' : '-');
+        o_chr(o, (v->flags & VM_EXEC) ? 'x' : '-');
+        o_chr(o, v->backing ? 's' : 'p');
+        o_str(o, " 00000000 00:00 0");
+        if (v->base + v->size == ARCH_USER_STACK_TOP)
+            o_str(o, "                          [stack]");
+        o_nl(o);
+    }
+}
+
 static void gen_uptime(struct out *o) {
     uint64_t up = timer_uptime_ns() / 10000000ULL;           /* centiseconds */
     size_t total = 0;
@@ -309,7 +339,7 @@ static struct proc *pn_proc(const struct pnode *pn) {
 static long gen_file(struct pnode *pn, char *buf, size_t cap) {
     struct out o = { buf, cap, 0 };
     struct proc *p = NULL;
-    if (pn->kind >= PK_P_STAT && pn->kind <= PK_P_ENVIRON) {
+    if (pn->kind >= PK_P_STAT && pn->kind <= PK_P_MAPS) {
         p = pn_proc(pn);
         if (!p)
             return -ESRCH;
@@ -337,6 +367,7 @@ static long gen_file(struct pnode *pn, char *buf, size_t cap) {
                 o.buf[o.len++] = p->cmdline[i];
             break;
         case PK_P_ENVIRON:   break;                   /* not retained */
+        case PK_P_MAPS:      gen_pid_maps(&o, p); break;
         default:             return -EINVAL;
     }
     return (long)o.len;
@@ -344,10 +375,11 @@ static long gen_file(struct pnode *pn, char *buf, size_t cap) {
 
 static long pn_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
     struct pnode *pn = (struct pnode *)n;
-    char *tmp = kmalloc(GEN_MAX);
+    size_t cap = pn->kind == PK_P_MAPS ? MAPS_MAX : GEN_MAX;
+    char *tmp = kmalloc(cap);
     if (!tmp)
         return -ENOMEM;
-    long len = gen_file(pn, tmp, GEN_MAX);
+    long len = gen_file(pn, tmp, cap);
     long result;
     if (len < 0) {
         result = len;

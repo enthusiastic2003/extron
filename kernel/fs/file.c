@@ -614,6 +614,25 @@ uint64_t file_poll_next_event_ns(struct open_file *f) {
     return evfd_next_event_ns(f);
 }
 
+/* FIONREAD: bytes that a read could return right now without blocking. */
+long file_bytes_available(struct proc *p, int fd) {
+    if (!descriptor_ok(p, fd))
+        return -EBADF;
+    struct open_file *f = p->files[fd];
+    switch (f->kind) {
+        case FILE_PIPE_READER: case FILE_PIPE_RDWR: return (long)f->object.pipe->used;
+        case FILE_PIPE_WRITER: return -ENOTTY;
+        case FILE_SOCKET:      return sock_bytes_available(f->object.sock);
+        case FILE_VNODE: {
+            struct vfs_attr a;
+            if (f->object.node->type != VFS_NODE_REGULAR || vfs_getattr(f->object.node, &a) != 0)
+                return -ENOTTY;
+            return a.size > f->offset ? (long)(a.size - f->offset) : 0;
+        }
+        default:               return -ENOTTY;
+    }
+}
+
 int file_fd_is_open(struct proc *p, int fd) {
     return descriptor_ok(p, fd) && p->files[fd] != &reserved_slot;
 }

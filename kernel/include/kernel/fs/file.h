@@ -80,6 +80,7 @@ int     file_poll_wait_until(uint64_t deadline_tick);
 int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
 int     file_get_node(struct proc *p, int fd, struct vfs_node **out);
 int     file_fd_is_open(struct proc *p, int fd);
+long    file_bytes_available(struct proc *p, int fd);
 int     file_fd_describe(struct proc *p, int fd, char *out, size_t n);   /* for /proc/<pid>/fd */
 /* Sockets: wrap a new socket in a descriptor, or fetch the socket behind one. */
 int     file_install_socket(struct proc *p, struct usock *s, int open_flags, int cloexec);

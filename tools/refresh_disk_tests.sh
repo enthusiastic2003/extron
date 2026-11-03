@@ -21,8 +21,28 @@ isdir() { debugfs -R "stat $1" "$DISK" 2>/dev/null | grep -q "Type: directory"; 
         echo "sif $2 mode 0100$3"
     }
     for f in "$UL"/out/tests/*; do [ -f "$f" ] && put "$f" "opt/tests/$(basename "$f")" 755; done
-    for s in usr/x86_64/tests/*.sh; do [ -f "$s" ] && put "$s" "opt/tests/$(basename "$s")" 755; done
+    for s in usr/x86_64/tests/*.sh usr/x86_64/tests/*.py; do [ -f "$s" ] && put "$s" "opt/tests/$(basename "$s")" 755; done
     put usr/hello.txt opt/tests/hello.txt 644
     put usr/hello.txt hello.txt 644
 } > "$CMDS"
 debugfs -w -f "$CMDS" "$DISK" >/dev/null 2>&1 || true
+
+# CPython: copy it in on first use only (an existing /python is left alone; use
+# `make disk-clean disk` to replace it). Needs enough free space on the disk.
+PYROOT="$(pwd)/build-x86_64/python/rootfs"
+if [ -d "$PYROOT/python" ] && ! isdir python; then
+    PYCMDS="$(mktemp)"
+    trap 'rm -f "$CMDS" "$PYCMDS"' EXIT
+    (
+        cd "$PYROOT"
+        find python -type d | sort | sed 's/^/mkdir /'
+        find python -type f | sort | while read -r f; do
+            echo "write $PYROOT/$f $f"
+            echo "sif $f mode 0100$(stat -c %a "$f")"
+        done
+        find python -type l | sort | while read -r l; do
+            echo "symlink $l $(readlink "$l")"
+        done
+    ) > "$PYCMDS"
+    debugfs -w -f "$PYCMDS" "$DISK" >/dev/null 2>&1 || true
+fi

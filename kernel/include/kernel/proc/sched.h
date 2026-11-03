@@ -21,6 +21,13 @@ struct thread *sched_policy_pick_next(void);          /* pop next to run, or NUL
  * --------------------------------------------------------------- */
 void          sched_init(void);
 void          schedule(void);       /* pick next + context switch; called from timer IRQ */
+/* While non-zero the timer tick does not reschedule. Used around waits that must
+ * not give the CPU to another thread: filesystem code assumes a syscall is never
+ * switched out half way (shared scratch buffers, sector cache, spinlocks held
+ * across vfs_read), so a disk wait halts the CPU for the interrupt instead. */
+void          sched_preempt_disable(void);
+void          sched_preempt_enable(void);
+int           sched_preempt_disabled(void);
 void          sched_start(void);    /* launch the first process; never returns */
 
 struct thread *my_thread(void);

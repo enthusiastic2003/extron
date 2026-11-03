@@ -120,6 +120,10 @@ check-persist: esp
 check-boot: esp
 	python3 tools/x86_boot_test.py
 
+# CPython 3.14 for the data disk (needs the userland first; ~1 minute).
+python:
+	tools/build_x86_python.sh
+
 # Hung-disk timeout/recovery and RTC write-back (one boot, ~20 s).
 check-disk: esp
 	python3 tools/x86_disk_timeout_test.py
@@ -165,5 +169,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist python check-boot check-disk check-all
 -include $(DEPS)
