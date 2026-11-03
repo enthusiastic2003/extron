@@ -80,6 +80,9 @@ void proc_init(struct proc *p, uint64_t pid, virt_addr_t entry,
     p->parent = NULL;
     p->pgid = pid;
     p->sid = pid;
+    p->comm[0] = p->exe[0] = p->cmdline[0] = '\0';
+    p->cmdline_len = 0;
+    p->start_ns = timer_uptime_ns();
     p->cred_lock = (spinlock_t)SPINLOCK_INIT;
     p->ruid = p->euid = p->suid = 0;
     p->rgid = p->egid = p->sgid = 0;
@@ -248,6 +251,64 @@ uint64_t proc_alloc_pid(void) {
     uint64_t pid = next_id++;
     irq_spin_unlock(&proc_table_lock);
     return pid;
+}
+
+uint64_t proc_last_pid(void) {
+    return next_id ? next_id - 1 : 0;
+}
+
+void proc_set_exec_info(struct proc *p, const char *path, const char *const *args, int argc) {
+    size_t n = 0;
+    for (int i = 0; i < argc && args; i++) {
+        size_t l = strlen(args[i]) + 1;
+        if (n + l > sizeof(p->cmdline))
+            l = sizeof(p->cmdline) - n;                 /* truncate the tail */
+        if (!l)
+            break;
+        memcpy(p->cmdline + n, args[i], l);
+        p->cmdline[n + l - 1] = '\0';
+        n += l;
+    }
+    p->cmdline_len = (uint16_t)n;
+    size_t pl = strlen(path);
+    if (pl >= sizeof(p->exe)) pl = sizeof(p->exe) - 1;
+    memcpy(p->exe, path, pl);
+    p->exe[pl] = '\0';
+    const char *base = path;
+    for (const char *c = path; *c; c++)
+        if (*c == '/' && c[1]) base = c + 1;
+    size_t bl = 0;
+    while (base[bl] && base[bl] != '/' && bl < sizeof(p->comm) - 1) { p->comm[bl] = base[bl]; bl++; }
+    p->comm[bl] = '\0';
+}
+
+size_t proc_list_pids(uint64_t *out, size_t max) {
+    size_t n = 0;
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < PROC_MAX_PROCS && n < max; i++)
+        if (proc_table[i])
+            out[n++] = proc_table[i]->pid;
+    irq_spin_unlock(&proc_table_lock);
+    return n;
+}
+
+void proc_count_states(size_t *total, size_t *running, size_t *blocked) {
+    size_t t = 0, r = 0;
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
+        struct proc *p = proc_table[i];
+        if (!p) continue;
+        t++;
+        if (p->exited) continue;
+        bool run = false;
+        for (struct thread *th = p->threads ? p->threads : &p->main_thread; th; th = th->next_in_process)
+            if (th->state == THREAD_RUNNING || th->state == THREAD_RUNNABLE) run = true;
+        if (run) r++;
+    }
+    irq_spin_unlock(&proc_table_lock);
+    if (total) *total = t;
+    if (running) *running = r;
+    if (blocked) *blocked = 0;
 }
 
 uint64_t proc_alloc_tid(void) {

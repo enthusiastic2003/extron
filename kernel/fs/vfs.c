@@ -411,6 +411,11 @@ static int walk_depth(const struct vfs_path *cwd, const char *path,
         memcpy(component, start, length);
         component[length] = '\0';
         struct vfs_dentry *child = vfs_cache_lookup_dentry(current.dentry, component);
+        if (child && current.mount->ops->revalidate
+                && !current.mount->ops->revalidate(child)) {
+            vfs_dentry_release(child);          /* stale: ask the filesystem afresh */
+            child = NULL;
+        }
         if (!child) {
             result = current.mount->ops->lookup_child(
                 current.mount, current.dentry, component, &child);
@@ -544,6 +549,24 @@ int vfs_mount_at(const struct vfs_path *cwd, const char *path,
     }
     mount->root->owner_mount = mount;
     mount_count++;
+    return 0;
+}
+
+int vfs_mount_info(size_t index, struct vfs_mount_info *out) {
+    if (index >= mount_count)
+        return -ENOENT;
+    struct vfs_mount *m = &mounts[index];
+    memset(out, 0, sizeof(*out));
+    out->fstype = m->ops && m->ops->fstype ? m->ops->fstype : "unknown";
+    out->source = index == 0 ? "rootfs" : "none";
+    if (index == 0 || !m->has_covered) {
+        out->path[0] = '/';
+    } else if (vfs_get_path(&m->covered, out->path, sizeof(out->path)) < 0) {
+        out->path[0] = '?';
+    }
+    struct vfs_fs_info info;
+    if (m->ops && m->ops->statfs && m->ops->statfs(m, &info) == 0)
+        out->readonly = !!(info.flags & VFS_FS_RDONLY);
     return 0;
 }
 

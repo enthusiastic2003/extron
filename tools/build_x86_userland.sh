@@ -78,6 +78,10 @@ rm -rf "$BB"; mkdir -p "$BB"
 tar -xjf "$TARBALL" --strip-components=1 -C "$BB"
 BUSYBOX_DIR="$BB" sh "$REPO/tools/configure_busybox.sh" >/dev/null
 sed -i 's|^CONFIG_EXTRA_LDFLAGS=.*|CONFIG_EXTRA_LDFLAGS=""|' "$BB/.config"   # seed names the aarch64 sysroot
+# free/uptime include <sys/sysinfo.h> only under __linux__; extron has it too.
+for f in procps/free.c procps/uptime.c; do
+    perl -0pi -e 's/#ifdef __linux__\n(# include <sys\/sysinfo\.h>)/#if 1\n$1/' "$BB/$f"
+done
 make -C "$BB" -j"$JOBS" CC="$CC" HOSTCC=gcc CCACHE_DISABLE=1 >"$UL/busybox-build.log" 2>&1 \
     || { tail -30 "$UL/busybox-build.log"; exit 1; }
 install -m 755 "$BB/busybox" "$OUT/busybox"

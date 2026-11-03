@@ -5,7 +5,7 @@ set -euo pipefail
 OUT="${1:-initrd.ext2}"
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
-mkdir -p "$ROOT"/{bin,dev,tmp,etc,root,lib}
+mkdir -p "$ROOT"/{bin,dev,tmp,etc,root,lib,proc}
 gcc -static -nostdlib -ffreestanding -fno-pic -no-pie -fno-stack-protector \
     -fno-asynchronous-unwind-tables -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
     -O1 -Wall -o "$ROOT/bin/smoke" usr/x86_64/init.c

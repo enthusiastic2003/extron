@@ -280,6 +280,7 @@ static int devfs_statfs(struct vfs_mount *mount, struct vfs_fs_info *info) {
 }
 
 static const struct vfs_fs_ops devfs_fs_ops = {
+    .fstype = "devtmpfs",
     .root = devfs_root,
     .lookup_child = devfs_lookup_child,
     .create = devfs_create,

@@ -498,6 +498,7 @@ struct proc *proc_create_from_binary_argv_env(const char *binary_path,
     p->mm        = img.mm;
     p->user_argc = img.argc;
     p->user_argv = img.argv;
+    proc_set_exec_info(p, binary_path, args, argc);
     proc_table_add(p);
     return p;
 }
@@ -535,6 +536,7 @@ int proc_exec_replace(struct proc *p, const char *binary_path,
     t->user_sp = out->user_sp;
     p->user_argc = out->argc;
     p->user_argv = out->argv;
+    proc_set_exec_info(p, binary_path, args, argc);
 
     arch_set_user_pagetable(p->ttbr0);
 

@@ -614,6 +614,38 @@ uint64_t file_poll_next_event_ns(struct open_file *f) {
     return evfd_next_event_ns(f);
 }
 
+int file_fd_is_open(struct proc *p, int fd) {
+    return descriptor_ok(p, fd) && p->files[fd] != &reserved_slot;
+}
+
+/* What /proc/<pid>/fd/<n> links to: the path for files, or a "kind:[id]"
+ * pseudo-name for pipes, sockets and the event descriptors. */
+int file_fd_describe(struct proc *p, int fd, char *out, size_t n) {
+    if (!file_fd_is_open(p, fd))
+        return -EBADF;
+    struct open_file *f = p->files[fd];
+    const char *fixed = NULL;
+    switch (f->kind) {
+        case FILE_VNODE:
+            if (f->path.dentry && vfs_get_path(&f->path, out, n) == 0)
+                return 0;
+            fixed = "anon_inode:[file]";
+            break;
+        case FILE_PIPE_READER: case FILE_PIPE_WRITER: case FILE_PIPE_RDWR: fixed = "pipe:[0]"; break;
+        case FILE_SOCKET:  fixed = "socket:[0]"; break;
+        case FILE_EPOLL:   fixed = "anon_inode:[eventpoll]"; break;
+        case FILE_EVENTFD: fixed = "anon_inode:[eventfd]"; break;
+        case FILE_TIMERFD: fixed = "anon_inode:[timerfd]"; break;
+        case FILE_SIGNALFD: fixed = "anon_inode:[signalfd]"; break;
+        default: fixed = "anon_inode:[unknown]"; break;
+    }
+    size_t l = strlen(fixed);
+    if (l >= n) l = n - 1;
+    memcpy(out, fixed, l);
+    out[l] = '\0';
+    return 0;
+}
+
 const struct open_file *file_description(struct proc *p, int fd) {
     return descriptor_ok(p, fd) ? p->files[fd] : NULL;
 }

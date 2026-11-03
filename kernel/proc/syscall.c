@@ -1018,6 +1018,34 @@ static uint64_t sys_getsid(uint64_t pid, uint64_t b, uint64_t c, struct arch_fra
     return target->sid;
 }
 
+/* sysinfo(2): same layout as mlibc's struct sysinfo (Linux ABI). */
+struct ksysinfo {
+    long uptime;
+    unsigned long loads[3];
+    unsigned long totalram, freeram, sharedram, bufferram, totalswap, freeswap;
+    unsigned short procs;
+    unsigned long totalhigh, freehigh;
+    unsigned int mem_unit;
+};
+
+static uint64_t sys_sysinfo(uint64_t addr, uint64_t b, uint64_t c, struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, addr, sizeof(struct ksysinfo) + 8))
+        return (uint64_t)-EFAULT;
+    struct ksysinfo si;
+    memset(&si, 0, sizeof(si));
+    size_t total;
+    proc_count_states(&total, NULL, NULL);
+    si.uptime = (long)(timer_uptime_ns() / 1000000000ULL);
+    si.totalram = (unsigned long)pmm_total_usable_pages();
+    si.freeram = (unsigned long)pmm_free_pages();
+    si.procs = (unsigned short)total;
+    si.mem_unit = PAGE_SIZE;                 /* counts above are in pages */
+    memcpy((void *)addr, &si, sizeof(si));
+    return 0;
+}
+
 /* sigpending(set): signals raised while blocked, for this thread. */
 static uint64_t sys_sigpending(uint64_t set_addr, uint64_t b, uint64_t c,
                                struct arch_frame *f) {
@@ -3486,6 +3514,7 @@ static const syscall_fn syscall_table[] = {
     [SYS_SIGPENDING] = sys_sigpending,
     [SYS_SIGTIMEDWAIT] = sys_sigtimedwait,
     [SYS_GETSID] = sys_getsid,
+    [SYS_SYSINFO] = sys_sysinfo,
     [SYS_MREMAP] = sys_mremap,
     [SYS_FLOCK] = sys_flock,
     [SYS_SOCKET] = sys_socket,

@@ -93,6 +93,13 @@ struct proc {
      * parent = created by the kernel at boot, so nothing will ever reap
      * it — see sys_wait() on why that is a leak and not a crash. */
     struct proc         *parent;
+    /* What /proc shows: set at exec (copied by fork). cmdline is the argv
+     * strings, NUL-separated, truncated to fit. */
+    char                comm[16];          /* basename of the executable */
+    char                exe[128];          /* path that was exec'd */
+    char                cmdline[256];
+    uint16_t            cmdline_len;
+    uint64_t            start_ns;          /* timer_uptime_ns() at creation */
     uint64_t            pgid;              /* process group for job control */
     uint64_t            sid;               /* session containing that group */
     spinlock_t          cred_lock;
@@ -180,6 +187,13 @@ uint64_t      proc_alloc_pid(void);
 uint64_t      proc_alloc_tid(void);
 void          proc_table_add(struct proc *p);    /* publishes a fully initialized process */
 void          proc_table_remove(struct proc *p);
+/* Record argv/path for /proc (exec and boot-time creation). */
+void proc_set_exec_info(struct proc *p, const char *path, const char *const *args, int argc);
+/* Fill `out` with the pids of live processes (table order); returns the count. */
+size_t proc_list_pids(uint64_t *out, size_t max);
+/* Counts for /proc/stat and /proc/loadavg. */
+void proc_count_states(size_t *total, size_t *running, size_t *blocked);
+uint64_t proc_last_pid(void);
 struct proc  *proc_lookup(uint64_t pid);
 /* Called by sys_setitimer so the tick handler knows to scan for expiries. */
 void          proc_itimer_armed(void);

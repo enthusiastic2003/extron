@@ -15,6 +15,7 @@ __attribute__((weak)) void arch_mount_data_disk(void) {}
 #include <kernel/drivers/timer.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/devfs.h>
+#include <kernel/fs/procfs.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/exec.h>
@@ -151,6 +152,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * now resolves through the VFS, so anything placed under /bin at
      * runtime is immediately runnable. */
     devfs_init();
+    procfs_init();
     arch_mount_data_disk();
     
 

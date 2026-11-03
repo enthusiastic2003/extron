@@ -173,3 +173,25 @@ unlinked symlinks are now reclaimed (a missing reference drop leaked them) and
 fast-symlink text is never freed as block numbers; inodes get
 creation/modification/deletion times; `ftruncate` frees blocks at all
 indirection levels.
+
+
+## /proc
+
+`kernel/fs/procfs.c` mounts a synthetic read-only filesystem at `/proc` at boot
+(the mount point is created if the root lacks it). Nodes are created on lookup
+and freed with their last reference; a `revalidate` hook on `struct vfs_fs_ops`
+stops the dentry cache from handing out entries for processes or descriptors
+that no longer exist.
+
+* `/proc/self` (symlink), `/proc/<pid>/{stat,status,cmdline,comm,statm,environ,
+  exe,cwd,root,fd/}` (`environ` is empty: the environment is not retained).
+* `/proc/{uptime,meminfo,loadavg,stat,cpuinfo,mounts,filesystems,version,cmdline}`.
+* `struct proc` now records `comm`, `exe`, `cmdline` and `start_ns` (set at exec,
+  copied by fork).
+* `sysinfo(2)` is `SYS_SYSINFO` (121); `free` and `uptime` use it.
+* BusyBox `ps`, `top`, `free`, `uptime`, `pidof`, `pgrep`/`pkill`, `killall` and
+  `watch` work. `df`, `mount` and `umount` are still off (no mount syscall, and
+  BusyBox's `find_mount_point` does not build against mlibc's `<mntent.h>` yet).
+
+Limits: load averages are always 0.00, CPU time in `/proc/stat` only covers live
+processes, `tty_nr` is always 0, and `/proc/<pid>/task` and `maps` do not exist.

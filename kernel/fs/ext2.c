@@ -2320,6 +2320,7 @@ static int ext2_node_rename(struct vfs_mount *vfs_m, struct vfs_dentry *old_pare
 }
 
 const struct vfs_fs_ops ext2_fs_ops = {
+    .fstype         = "ext2",
     .root           = ext2_root,
     .lookup_child   = ext2_lookup_child_vfs,
     .create         = ext2_node_create,

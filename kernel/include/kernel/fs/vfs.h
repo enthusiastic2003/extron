@@ -155,6 +155,7 @@ struct vfs_path {
 };
 
 struct vfs_fs_ops {
+    const char *fstype;                 /* name shown in /proc/mounts ("ext2", "devfs", "proc") */
     int (*root)(struct vfs_mount *, struct vfs_dentry **);
     int (*lookup_child)(struct vfs_mount *, struct vfs_dentry *,
                         const char *, struct vfs_dentry **);
@@ -170,6 +171,9 @@ struct vfs_fs_ops {
                    const char *, uint32_t, uint32_t, struct vfs_dentry **);
     int (*statfs)(struct vfs_mount *, struct vfs_fs_info *);
     void (*destroy_dentry)(struct vfs_dentry *);
+    /* Optional: a cached dentry is only reused when this returns non-zero
+     * (procfs: the process or descriptor behind it must still exist). */
+    int (*revalidate)(struct vfs_dentry *);
 };
 
 struct vfs_mount {
@@ -200,6 +204,16 @@ int vfs_mount_root(const struct vfs_fs_ops *ops, void *private);
 int vfs_mount_at(const struct vfs_path *cwd, const char *path,
                  const struct vfs_fs_ops *ops, void *private);
 int vfs_root_path(struct vfs_path *out);
+
+/* Mount table, for /proc/mounts. Index 0 is the root. Returns 0, or -ENOENT
+ * past the end. `source` names the backing device when known. */
+struct vfs_mount_info {
+    char path[128];
+    const char *fstype;
+    const char *source;
+    int readonly;
+};
+int vfs_mount_info(size_t index, struct vfs_mount_info *out);
 int vfs_mknod(const struct vfs_path *cwd, const char *path, enum vfs_node_type type,
               uint32_t mode, const struct vfs_cred *cred);
 int vfs_lookup_path(const struct vfs_path *cwd, const char *path,

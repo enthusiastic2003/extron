@@ -82,6 +82,10 @@ struct proc *proc_fork(struct proc *parent, struct arch_frame *f) {
            parent->supplementary_group_count
                * sizeof(parent->supplementary_groups[0]));
     child->file_umask = parent->file_umask;
+    memcpy(child->comm, parent->comm, sizeof(child->comm));
+    memcpy(child->exe, parent->exe, sizeof(child->exe));
+    memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
+    child->cmdline_len = parent->cmdline_len;
     irq_spin_unlock(&parent->cred_lock);
     resource_process_fork(child, parent);
     child->user_argc = parent->user_argc;
