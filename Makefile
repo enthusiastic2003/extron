@@ -236,6 +236,11 @@ run: $(KERNEL_IMG) $(INITRD)
 clean:
 	rm -rf $(BUILD) $(INITRD)
 
+# x86-64 shortcuts: `make x86-run`, `make x86-check-all`, ... run the same target
+# of Makefile.x86_64 (plain `make run` is the aarch64 build).
+x86-%:
+	$(MAKE) -f Makefile.x86_64 $*
+
 .PHONY: all run clean package-binutils package-gcc
 
 # Header dependencies emitted by -MMD. Leading '-' so a clean tree (no .d
