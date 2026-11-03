@@ -36,6 +36,7 @@
  *     had to start describing the ELF image and the stack rather than
  *     just the heap.
  */
+#include "arch_compat.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -53,10 +54,7 @@ static void check(const char *what, int ok) {
 #define SYS_PROC_DUMP 3
 
 static long raw_syscall0(long n) {
-    register long x8 __asm__("x8") = n;
-    register long x0 __asm__("x0");
-    __asm__ volatile ("svc #0" : "=r"(x0) : "r"(x8) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(n, 0, 0, 0);
 }
 
 /*
@@ -78,6 +76,7 @@ static long raw_syscall0(long n) {
 #define SYS_FORK   8
 
 static long fork_parking_fp(uint64_t *out_d8, uint64_t *out_d20) {
+#if defined(__aarch64__)
     register long x0 __asm__("x0") = 0;
     register long x8 __asm__("x8") = SYS_FORK;
     uint64_t in8 = PARKED_D8, in20 = PARKED_D20;
@@ -97,6 +96,26 @@ static long fork_parking_fp(uint64_t *out_d8, uint64_t *out_d20) {
     *out_d8  = back8;
     *out_d20 = back20;
     return x0;
+#else
+    /* xmm8/xmm12 are caller-saved: they stay live across the fork syscall
+     * only because the kernel preserves user SSE state for the child. */
+    long ret;
+    uint64_t in8 = PARKED_D8, in20 = PARKED_D20;
+    uint64_t back8, back20;
+    __asm__ volatile (
+        "movq   %[i8],  %%xmm8\n\t"
+        "movq   %[i20], %%xmm12\n\t"
+        "syscall\n\t"
+        "movq   %%xmm8,  %[o8]\n\t"
+        "movq   %%xmm12, %[o20]\n\t"
+        : "=a"(ret), [o8] "=r"(back8), [o20] "=r"(back20)
+        : "a"((long)SYS_FORK), [i8] "r"(in8), [i20] "r"(in20)
+        : "rcx", "r11", "memory", "cc", "xmm8", "xmm12"
+    );
+    *out_d8  = back8;
+    *out_d20 = back20;
+    return ret;
+#endif
 }
 
 #define CHILD_MARKER "--fork-stress-child"

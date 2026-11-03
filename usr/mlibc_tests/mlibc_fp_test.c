@@ -51,6 +51,7 @@
  * syscall itself is what makes the question being asked the kernel's.
  */
 static int run_pattern(uint64_t pattern) {
+#if defined(__aarch64__)
     long result = 0;
 
     __asm__ volatile (
@@ -117,6 +118,62 @@ static int run_pattern(uint64_t pattern) {
     );
 
     return (int)result;
+}
+#else
+    /* x86-64: xmm0/xmm1/xmm8/xmm9/xmm15 hold the pattern in BOTH 64-bit
+     * halves across 20 x 50 ms sleeps (forced context switches against the
+     * other process, which holds a different pattern). All are caller-
+     * saved or high registers, so only a full FXSAVE/FXRSTOR keeps them. */
+    long result = 0;
+    __asm__ volatile (
+        "movq       %[pat], %%xmm0        \n\t"
+        "punpcklqdq %%xmm0, %%xmm0        \n\t"
+        "movdqa     %%xmm0, %%xmm1        \n\t"
+        "movdqa     %%xmm0, %%xmm8        \n\t"
+        "movdqa     %%xmm0, %%xmm9        \n\t"
+        "movdqa     %%xmm0, %%xmm15       \n\t"
+        "mov        %[iters], %%r9d       \n"
+        "1:                               \n\t"
+        "mov        $2, %%eax             \n\t"     /* SYS_SLEEP */
+        "xor        %%edi, %%edi          \n\t"
+        "mov        $50000000, %%esi      \n\t"
+        "syscall                          \n\t"
+        /* compare low and high half of each register */
+        "movq       %%xmm0, %%r10         \n\t"
+        "cmp        %[pat], %%r10         \n\t"
+        "jne        9f                    \n\t"
+        "movdqa     %%xmm1, %%xmm2        \n\t"
+        "psrldq     $8, %%xmm2            \n\t"
+        "movq       %%xmm2, %%r10         \n\t"
+        "cmp        %[pat], %%r10         \n\t"
+        "jne        9f                    \n\t"
+        "movq       %%xmm8, %%r10         \n\t"
+        "cmp        %[pat], %%r10         \n\t"
+        "jne        9f                    \n\t"
+        "movdqa     %%xmm9, %%xmm2        \n\t"
+        "psrldq     $8, %%xmm2            \n\t"
+        "movq       %%xmm2, %%r10         \n\t"
+        "cmp        %[pat], %%r10         \n\t"
+        "jne        9f                    \n\t"
+        "movdqa     %%xmm15, %%xmm2       \n\t"
+        "psrldq     $8, %%xmm2            \n\t"
+        "movq       %%xmm2, %%r10         \n\t"
+        "cmp        %[pat], %%r10         \n\t"
+        "jne        9f                    \n\t"
+        "dec        %%r9d                 \n\t"
+        "jnz        1b                    \n\t"
+        "xor        %[result], %[result]  \n\t"
+        "jmp        2f                    \n"
+        "9:                               \n\t"
+        "mov        $1, %[result]         \n"
+        "2:                               \n\t"
+        : [result] "=&r"(result)
+        : [pat] "r"(pattern), [iters] "i"(ITERATIONS)
+        : "rax", "rcx", "rdx", "rdi", "rsi", "r9", "r10", "r11", "cc", "memory",
+          "xmm0", "xmm1", "xmm2", "xmm8", "xmm9", "xmm15"
+    );
+    return (int)result;
+#endif
 }
 
 int main(void) {

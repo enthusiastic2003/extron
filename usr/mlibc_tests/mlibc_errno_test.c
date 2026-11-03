@@ -9,6 +9,7 @@
  * triggers one specific failure and asserts the SPECIFIC errno POSIX
  * expects for it, not just "the call failed".
  */
+#include "arch_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -28,12 +29,7 @@
 #define SYS_FUTEX_WAKE 34
 
 static long raw_syscall(long n, long a1, long a2, long a3) {
-    register long x8 __asm__("x8") = n;
-    register long x0 __asm__("x0") = a1;
-    register long x1 __asm__("x1") = a2;
-    register long x2 __asm__("x2") = a3;
-    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(n, a1, a2, a3);
 }
 
 static int failures = 0;

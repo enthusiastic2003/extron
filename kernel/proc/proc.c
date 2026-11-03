@@ -476,7 +476,10 @@ bool proc_group_exists(uint64_t pgid, uint64_t sid) {
     bool found = false;
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < PROC_MAX_PROCS; i++)
-        if (proc_table[i] && !proc_table[i]->exited
+        /* A group exists while any member does, zombies included (POSIX/
+         * Linux): ash starts `echo x | cmd`, the leader exits at once, and
+         * the second member must still be able to tcsetpgrp() to it. */
+        if (proc_table[i]
                 && proc_table[i]->pgid == pgid
                 && proc_table[i]->sid == sid) {
             found = true;

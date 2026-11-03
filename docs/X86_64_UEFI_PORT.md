@@ -83,11 +83,23 @@ is never clobbered by syscalls/IRQs. AArch64 keeps the original loops (the
 early boot code runs with Device-memory semantics where wide/unaligned
 accesses can fault).
 
-## Userland status
+## Userland (mlibc + BusyBox)
 
-The checked-in mlibc sysroot, BusyBox, DOOM etc. are AArch64 binaries. For
-x86-64 the initrd carries `usr/x86_64/init.c` as `/bin/sh`: a libc-free
-payload that exercises fork/wait/execve/pipe/mmap/signals/SIGSEGV/sleep/clock
-and FP/SSE isolation under timer preemption (`make -f Makefile.x86_64 check`).
-Porting mlibc (`third_party/mlibc/sysdeps/extron`), BusyBox and the rest to
-x86-64 is the remaining step before the full userland runs.
+mlibc runs on x86-64 Extron. The sysdeps were made arch-generic
+(`sysdeps/extron/{aarch64,x86_64}/` for crt1/signal-restore/cancel-syscall/
+thread entry, `generic/syscall_arch.hpp` for the syscall wrappers and the
+TLS thread-pointer placement) in a fork branch of the mlibc repository
+(`x86` branch of https://github.com/enthusiastic2003/mlibc, base `mlibc-port`
+plus this repo's `patches/mlibc/`). It is built with the **host GCC** using a
+meson cross file (`system = 'extron'`, `cpu_family = 'x86_64'`) and a thin
+driver script that supplies the sysroot headers and crt1 and undefines
+`__linux__`; no custom `x86_64-extron` compiler is needed. BusyBox 1.38.0 is
+built the same way with `patches/busybox/` and `usr/busybox/extron.config`.
+
+`tools/build_x86_initrd.sh` assembles the ext2 root: with a built userland in
+`$EXTRON_USERLAND` (default `~/extron-userland`: `sysroot/` and `out/`) it ships
+`/lib/ld.so`, `/lib/libc.so`, `/bin/busybox` (and `/bin/sh` -> busybox), and the
+mlibc regression programs in `/opt/tests` (`sh /bin/runtests` runs them).
+`make -f Makefile.x86_64 check` keeps using the libc-free smoke payload so it
+needs no userland build.
+

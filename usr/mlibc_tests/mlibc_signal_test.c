@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
+#include "arch_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -26,7 +27,7 @@ static void info_handler(int signo, siginfo_t *info, void *context) {
             && info->si_signo == SIGUSR2
             && info->si_code == SI_USER
             && info->si_pid == getpid()
-            && ucontext->uc_mcontext.pc != 0)
+            && EXTRON_MC_PC(ucontext) != 0)
         info_seen = 1;
 }
 
@@ -37,7 +38,7 @@ static void segv_handler(int signo) {
 __attribute__((noinline, noreturn))
 static void cause_data_abort(void) {
     uintptr_t address = 0;
-    __asm__ volatile ("ldr x9, [%0]" :: "r"(address) : "x9", "memory");
+    EXTRON_FAULT_LOAD(address);
     __builtin_unreachable();
 }
 
@@ -51,6 +52,7 @@ static int signal_preserves_simd(void) {
         0x1122334455667788ULL, 0x99aabbccddeeff00ULL
     };
     uint64_t output[2] __attribute__((aligned(16))) = {0, 0};
+#if defined(__aarch64__)
     register long x0 __asm__("x0") = getpid();
     __asm__ volatile (
         "mov x8, #36\n" /* SYS_KILL */
@@ -61,6 +63,17 @@ static int signal_preserves_simd(void) {
         : "+r"(x0)
         : "r"(input), "r"(output)
         : "x1", "x8", "q0", "memory", "cc");
+#else
+    long kill_ret;
+    __asm__ volatile (
+        "movdqu (%[in]), %%xmm0\n\t"
+        "syscall\n\t"                       /* kill(getpid(), SIGUSR1) */
+        "movdqu %%xmm0, (%[out])\n\t"
+        : "=a"(kill_ret)
+        : "a"(36L), "D"((long)getpid()), "S"(10L), [in] "r"(input), [out] "r"(output)
+        : "rcx", "r11", "xmm0", "memory", "cc");
+    (void)kill_ret;
+#endif
     return output[0] == input[0] && output[1] == input[1];
 }
 

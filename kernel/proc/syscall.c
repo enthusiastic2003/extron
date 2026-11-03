@@ -2228,7 +2228,11 @@ static uint64_t sys_uname(uint64_t address, uint64_t b, uint64_t c,
     memcpy(value.sysname, "Extron", sizeof("Extron"));
     memcpy(value.release, "0.1", sizeof("0.1"));
     memcpy(value.version, "Extron POSIX", sizeof("Extron POSIX"));
+#if defined(__x86_64__)
+    memcpy(value.machine, "x86_64", sizeof("x86_64"));
+#else
     memcpy(value.machine, "aarch64", sizeof("aarch64"));
+#endif
     irq_spin_lock(&hostname_lock);
     memcpy(value.nodename, system_hostname, sizeof(value.nodename));
     irq_spin_unlock(&hostname_lock);

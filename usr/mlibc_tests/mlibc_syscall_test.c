@@ -26,6 +26,7 @@
  * Built by the normal Makefile with the aarch64-extron cross toolchain
  * (~/extron-toolkit/toolchain/bin), not aarch64-linux-gnu-gcc.
  */
+#include "arch_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,12 +56,7 @@ static void check(const char *what, int ok) {
 #define SYS_MAP_INITRD 11
 
 static long raw_syscall(long n, long a1, long a2, long a3) {
-    register long x8 __asm__("x8") = n;
-    register long x0 __asm__("x0") = a1;
-    register long x1 __asm__("x1") = a2;
-    register long x2 __asm__("x2") = a3;
-    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(n, a1, a2, a3);
 }
 
 /* ---------------------------------------------------------------
@@ -191,13 +187,13 @@ static void test_tcb_set(void) {
      * already built — setting it to anything else would immediately
      * break errno on the very next line. */
     uint64_t before;
-    __asm__ volatile ("mrs %0, tpidr_el0" : "=r"(before));
+    EXTRON_READ_TP(before);
 
     long ret = raw_syscall(SYS_TCB_SET, (long)before, 0, 0);
     check("SYS_TCB_SET returns success", ret == 0);
 
     uint64_t after;
-    __asm__ volatile ("mrs %0, tpidr_el0" : "=r"(after));
+    EXTRON_READ_TP(after);
     check("TPIDR_EL0 round-trips through SYS_TCB_SET unchanged", before == after);
 
     /* And errno (a real __thread variable) still works after that

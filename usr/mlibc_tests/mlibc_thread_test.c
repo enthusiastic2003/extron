@@ -3,6 +3,7 @@
  * verify that workers are distinct scheduler entities inside one process. */
 #include <pthread.h>
 #include <stdint.h>
+#include "arch_compat.h"
 #include <stdio.h>
 #include <unistd.h>
 
@@ -21,27 +22,15 @@ static long tids[WORKERS];
 static _Thread_local int tls_value;
 
 static long gettid_raw(void) {
-    register long x8 __asm__("x8") = SYS_GETTID;
-    register long x0 __asm__("x0");
-    __asm__ volatile ("svc #0" : "=r"(x0) : "r"(x8) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(SYS_GETTID, 0, 0, 0);
 }
 
 static long join_tid_raw(long tid) {
-    register long x8 __asm__("x8") = SYS_THREAD_JOIN;
-    register long x0 __asm__("x0") = tid;
-    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(SYS_THREAD_JOIN, tid, 0, 0);
 }
 
 static long futex_wait_raw(int *word, int expected, long timeout_ms) {
-    register long x8 __asm__("x8") = SYS_FUTEX_WAIT;
-    register long x0 __asm__("x0") = (long)word;
-    register long x1 __asm__("x1") = expected;
-    register long x2 __asm__("x2") = timeout_ms;
-    __asm__ volatile ("svc #0" : "+r"(x0)
-                      : "r"(x8), "r"(x1), "r"(x2) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(SYS_FUTEX_WAIT, (long)word, expected, timeout_ms);
 }
 
 static void *worker(void *argument) {

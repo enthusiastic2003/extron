@@ -118,7 +118,28 @@ static void mini_shell(void) {
         } else if (line[0] == 'e' && line[1] == 'c' && line[2] == 'h' && line[3] == 'o') { out(line + (n > 4 ? 5 : 4)); out("\n"); }
         else if (streq(line, "uname")) out("Extron x86_64 (UEFI)\n");
         else if (streq(line, "reboot") || streq(line, "exit")) { sc(SYS_REBOOT, 0, 0, 0); }
-        else if (line[0]) { out("unknown command: "); out(line); out("\n"); }
+        else if (line[0]) {
+            /* Not built in: run /bin/<word> with the remaining words as args. */
+            char path[64] = "/bin/"; int pl = 5, i = 0;
+            while (line[i] && line[i] != ' ' && pl < 62) path[pl++] = line[i++];
+            path[pl] = 0;
+            char *argv[16]; int ac = 0; argv[ac++] = path;
+            while (line[i] && ac < 15) {
+                while (line[i] == ' ') line[i++] = 0;
+                if (line[i]) { argv[ac++] = &line[i]; while (line[i] && line[i] != ' ') i++; }
+            }
+            argv[ac] = 0;
+            const char *envp[] = { "PATH=/bin", "HOME=/root", "TERM=vt100", 0 };
+            long cpid = sc(SYS_FORK, 0, 0, 0);
+            if (cpid == 0) {
+                sc(SYS_EXECVE, (long)path, (long)argv, (long)envp);
+                out("sh: cannot execute "); out(path); out("\n");
+                do_exit(127);
+            }
+            int st = 0;
+            sc(SYS_WAIT, (long)&st, -1, 0);
+            if (st) { out("[exit status "); outnum(st); out("]\n"); }
+        }
     }
 }
 

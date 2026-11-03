@@ -2,6 +2,11 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
+#if defined(__x86_64__)
+#define EXTRON_TEST_MACHINE "x86_64"
+#else
+#define EXTRON_TEST_MACHINE "aarch64"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -32,9 +37,9 @@ static void test_identity(const char *self) {
     struct utsname uts;
     char original[65];
     check("uname() succeeds", uname(&uts) == 0);
-    check("uname reports Extron on aarch64",
+    check("uname reports Extron and the build architecture",
           strcmp(uts.sysname, "Extron") == 0
-          && strcmp(uts.machine, "aarch64") == 0);
+          && strcmp(uts.machine, EXTRON_TEST_MACHINE) == 0);
     check("gethostname() returns uname's nodename",
           gethostname(original, sizeof(original)) == 0
           && strcmp(original, uts.nodename) == 0);

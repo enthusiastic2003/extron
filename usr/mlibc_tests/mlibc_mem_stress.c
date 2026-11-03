@@ -20,6 +20,7 @@
  * allocates successfully would not have noticed either way, so this
  * deliberately asks for something that cannot be satisfied.
  */
+#include "arch_compat.h"
 #include <stdio.h>
 #include <stdint.h>
 
@@ -34,12 +35,7 @@ static void check(const char *what, int ok) {
 #define SYS_ANON_FREE  5
 
 static long raw_syscall(long n, long a1, long a2, long a3) {
-    register long x8 __asm__("x8") = n;
-    register long x0 __asm__("x0") = a1;
-    register long x1 __asm__("x1") = a2;
-    register long x2 __asm__("x2") = a3;
-    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory", "cc");
-    return x0;
+    return extron_raw_syscall(n, a1, a2, a3);
 }
 
 /* Same convention as sys_anon_allocate()/sys_anon_free() in

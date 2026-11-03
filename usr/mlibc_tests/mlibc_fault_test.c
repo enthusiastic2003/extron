@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
+#include "arch_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,7 @@
 __attribute__((noinline, noreturn))
 static void cause_data_abort(void) {
     uintptr_t address = 0;
-    __asm__ volatile ("ldr x9, [%0]" :: "r"(address) : "x9", "memory");
+    EXTRON_FAULT_LOAD(address);
     __builtin_unreachable();
 }
 
