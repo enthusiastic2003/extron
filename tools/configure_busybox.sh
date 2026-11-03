@@ -30,4 +30,4 @@ while IFS= read -r setting; do
     esac
 done < "$seed"
 
-CCACHE_DISABLE=1 make -C "$busybox" oldconfig </dev/null >/dev/null
+yes "" | CCACHE_DISABLE=1 make -C "$busybox" oldconfig >/dev/null

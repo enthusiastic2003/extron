@@ -35,12 +35,18 @@ for t in /opt/tests/*.elf; do
     echo "=== $t"
     "$t" || echo "[exit status $?]"
 done
+for t in /opt/tests/*.sh; do
+    echo "=== $t"
+    sh "$t" || echo "[exit status $?]"
+done
 echo "RUNTESTS DONE"
 RT
         chmod 755 "$ROOT/bin/runtests"
     fi
     if [ -x "$ROOT/bin/busybox" ] && [ "${AUTOEXIT:-0}" != 1 ] && [ "${SMOKE_SHELL:-0}" != 1 ]; then
         rm -f "$ROOT/bin/sh"; ln -s busybox "$ROOT/bin/sh"
+        # Applets that other applets exec by name (tar -z runs `gzip`).
+        for a in gzip gunzip zcat; do ln -sf busybox "$ROOT/bin/$a"; done
         mkdir -p "$ROOT/root"
     fi
 fi

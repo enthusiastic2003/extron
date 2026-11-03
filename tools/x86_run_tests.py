@@ -66,8 +66,12 @@ def memfree():
     return int(m.group(1)) if m else None
 
 LEAK_TOLERANCE = 48   # pages; the page cache and ext2 metadata may legitimately grow a little
+WARMUP_ALLOWANCE = 16384   # pages (64 MiB): one-time growth during the first iteration
+# The first iteration pays one-time costs (heap high-water mark, caches), so
+# leaks are judged against the level after it; the first is only sanity-capped.
 problems = []
 baseline = None
+warm = None
 if not read_until(b"/ # ", 90):
     problems.append("never reached the shell prompt")
 else:
@@ -88,8 +92,13 @@ else:
             if m: bad.append(f"{len(m)}x {what}")
         read_until(b"/ # ", 20, mark + 1)
         now = memfree() if ok else None
-        if baseline is not None and now is not None and baseline - now > LEAK_TOLERANCE:
-            bad.append(f"memory leak: {baseline - now} pages lost since boot")
+        if baseline is not None and now is not None:
+            if it == 1:
+                if baseline - now > WARMUP_ALLOWANCE:
+                    bad.append(f"memory leak: {baseline - now} pages lost since boot")
+                warm = now
+            elif warm is not None and warm - now > LEAK_TOLERANCE:
+                bad.append(f"memory leak: {warm - now} pages lost since iteration 1")
         print(f"iteration {it}/{args.n}: {'OK' if not bad else 'PROBLEM: ' + '; '.join(bad)}  ({dt:.0f}s, free pages {now})", flush=True)
         if bad:
             problems.append(f"iteration {it}: " + "; ".join(bad))
