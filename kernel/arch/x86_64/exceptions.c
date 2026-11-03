@@ -230,6 +230,19 @@ void exception_dispatch(struct arch_frame *f) {
                 (unsigned long)cur->pid, (unsigned long)thread->tid,
                 signal, exc_name(f->vector), (void *)f->rip, (void *)f->cr2,
                 (unsigned long)f->error_code, (void *)f->rsp);
+        kprintf("RAX=%lx RBX=%lx RCX=%lx RDX=%lx RSI=%lx RDI=%lx RBP=%lx\n"
+                "R8=%lx R9=%lx R10=%lx R11=%lx R12=%lx R13=%lx R14=%lx R15=%lx\n",
+                (unsigned long)f->rax, (unsigned long)f->rbx, (unsigned long)f->rcx,
+                (unsigned long)f->rdx, (unsigned long)f->rsi, (unsigned long)f->rdi,
+                (unsigned long)f->rbp, (unsigned long)f->r8, (unsigned long)f->r9,
+                (unsigned long)f->r10, (unsigned long)f->r11, (unsigned long)f->r12,
+                (unsigned long)f->r13, (unsigned long)f->r14, (unsigned long)f->r15);
+        if (f->rip < 0x00007FFFFFFFF000ULL) {   /* RIP page was mapped to execute */ 
+            kprintf("code @RIP:");
+            for (int i = 0; i < 16; i++)
+                kprintf(" %02x", ((const uint8_t *)f->rip)[i]);
+            kprintf("\n");
+        }
         proc_exit_current(-signal);
     }
 
