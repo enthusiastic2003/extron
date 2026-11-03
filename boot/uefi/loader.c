@@ -24,9 +24,12 @@
 #define MB2_TAG_END    0
 #define MB2_TAG_MODULE 3
 #define MB2_TAG_MMAP   6
+#define MB2_TAG_FB     8
 
 static const EFI_GUID LoadedImageGuid = {0x5B1B31A1, 0x9562, 0x11d2, {0x8E,0x3F,0x00,0xA0,0xC9,0x69,0x72,0x3B}};
 static const EFI_GUID SimpleFsGuid    = {0x964E5B22, 0x6459, 0x11D2, {0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B}};
+
+static const EFI_GUID GopGuid = {0x9042A9DE, 0x23DC, 0x4A38, {0x96,0xFB,0x7A,0xDE,0xD0,0x80,0x51,0x6A}};
 
 static EFI_SYSTEM_TABLE *ST;
 static EFI_BOOT_SERVICES *BS;
@@ -168,6 +171,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     print(L"  initrd "); print_hex(initrd_off); print(L" +"); print_hex(isize);
     print(L"\r\nexiting boot services\r\n");
 
+    /* ---- graphics: keep the firmware's current GOP mode (no mode switch) ---- */
+    struct { uint64_t addr; uint32_t pitch, width, height; uint8_t bpp, rpos, gpos, bpos; int ok; } gfx = {0};
+    {
+        EFI_GRAPHICS_OUTPUT *gop;
+        if (!EFI_ERROR(BS->LocateProtocol(&GopGuid, 0, (void **)&gop)) && gop->Mode && gop->Mode->Info) {
+            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = gop->Mode->Info;
+            if (mi->PixelFormat == PixelRedGreenBlueReserved8BitPerColor ||
+                mi->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) {
+                gfx.addr = gop->Mode->FrameBufferBase;
+                gfx.pitch = mi->PixelsPerScanLine * 4;
+                gfx.width = mi->HorizontalResolution;
+                gfx.height = mi->VerticalResolution;
+                gfx.bpp = 32;
+                int rgb = mi->PixelFormat == PixelRedGreenBlueReserved8BitPerColor;
+                gfx.rpos = rgb ? 0 : 16; gfx.gpos = 8; gfx.bpos = rgb ? 16 : 0;
+                gfx.ok = 1;
+                print(L"GOP framebuffer "); print_hex(gfx.addr); print(L" "); print_hex(gfx.width);
+                print(L"x"); print_hex(gfx.height); print(L"\r\n");
+            }
+        }
+    }
+
     /* ---- leave boot services ---- */
     UINTN map_size, map_key, desc_size; uint32_t desc_ver;
     for (int attempt = 0; attempt < 8; attempt++) {
@@ -197,7 +222,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
             uint64_t pa, pl; memcpy(&pa, prev, 8); memcpy(&pl, prev + 8, 8);
             if (pa + pl == start) { put64(prev + 8, pl + len); continue; }
         }
-        if ((16 + (n + 1) * 24 + 8 + 32 + 16) > INFO_SIZE) break;
+        if ((16 + (n + 1) * 24 + 8 + 32 + 16 + 48) > INFO_SIZE) break;
         uint8_t *e = entries + n * 24;
         put64(e, start); put64(e + 8, len); put32(e + 16, 1); put32(e + 20, 0);
         n++;
@@ -213,7 +238,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     memcpy(mod + 16, "initrd", 7);
     uint32_t mod_aligned = (16 + 7 + 7) & ~7u;
 
-    uint8_t *end = mod + mod_aligned;
+    uint8_t *tagp = mod + mod_aligned;
+    if (gfx.ok) {
+        /* multiboot2 framebuffer tag (type 8), RGB direct-colour layout */
+        put32(tagp, MB2_TAG_FB);
+        put32(tagp + 4, 38);
+        put64(tagp + 8, gfx.addr);
+        put32(tagp + 16, gfx.pitch);
+        put32(tagp + 20, gfx.width);
+        put32(tagp + 24, gfx.height);
+        tagp[28] = gfx.bpp; tagp[29] = 1; tagp[30] = 0; tagp[31] = 0;
+        tagp[32] = gfx.rpos; tagp[33] = 8; tagp[34] = gfx.gpos; tagp[35] = 8;
+        tagp[36] = gfx.bpos; tagp[37] = 8;
+        tagp += 40;
+    }
+    uint8_t *end = tagp;
     put32(end, MB2_TAG_END); put32(end + 4, 8);
 
     put32(mmap_tag, MB2_TAG_MMAP);

@@ -34,6 +34,7 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 LOADER     := $(BUILD)/BOOTX64.EFI
 ESP        := $(BUILD)/esp
 INITRD     ?= initrd.ext2
+AUTOEXIT   ?= 0
 
 LOADER_CFLAGS := -ffreestanding -fno-stack-protector -fshort-wchar -mno-red-zone \
                  -fpie -O2 -Wall -Wextra -mgeneral-regs-only -fno-builtin \
@@ -43,6 +44,7 @@ OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 QEMU      ?= qemu-system-x86_64
 QEMU_MEM  ?= 512M
+QEMU_DISPLAY ?= none
 
 all: $(KERNEL_ELF) $(LOADER) esp
 
@@ -75,17 +77,19 @@ $(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
 	@mkdir -p $(BUILD)
 	cp $< $@
 
-QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display none \
+QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display $(QEMU_DISPLAY) \
             -drive if=pflash,format=raw,unit=0,readonly=on,file=$(OVMF_CODE) \
             -drive if=pflash,format=raw,unit=1,file=$(BUILD)/OVMF_VARS.fd \
             -drive format=raw,file=fat:rw:$(ESP) \
             -serial stdio -no-reboot
 
+run: QEMU_DISPLAY = gtk
 run: esp $(BUILD)/OVMF_VARS.fd
 	$(QEMU) $(QEMU_ARGS)
 
 # Headless boot under OVMF; passes iff the smoke test reports success.
-check: esp $(BUILD)/OVMF_VARS.fd
+check: $(BUILD)/OVMF_VARS.fd
+	@$(MAKE) -f Makefile.x86_64 --no-print-directory INITRD=initrd-check.ext2 AUTOEXIT=1 esp >/dev/null
 	@rm -f $(BUILD)/serial.log
 	@timeout 60 $(QEMU) $(subst -serial stdio,-serial file:$(BUILD)/serial.log,$(QEMU_ARGS)) || true
 	@grep -q 'SMOKE TEST PASSED' $(BUILD)/serial.log \
@@ -94,7 +98,7 @@ check: esp $(BUILD)/OVMF_VARS.fd
 
 # Build the bring-up initrd (freestanding smoke-test payload as /bin/sh).
 $(INITRD): tools/build_x86_initrd.sh usr/x86_64/init.c
-	tools/build_x86_initrd.sh $@
+	AUTOEXIT=$(AUTOEXIT) tools/build_x86_initrd.sh $@
 
 clean:
 	rm -rf $(BUILD)

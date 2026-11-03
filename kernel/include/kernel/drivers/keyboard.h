@@ -1,6 +1,8 @@
 #ifndef KERNEL_DRIVERS_KEYBOARD_H
 #define KERNEL_DRIVERS_KEYBOARD_H
 
+#include <stdint.h>
+
 /*
  * There's no physical keyboard on this setup — a headless RPi4 talked
  * to over the same USB-TTL serial cable already used for console
@@ -17,6 +19,7 @@ int kbd_try_getc(char *out); /* returns 1 when a byte was available, else 0 */
 int kbd_input_ready(void);
 int kbd_wait_for_input(int timeout_ms);
 void kbd_flush_input(void);
+void kbd_inject_byte(uint8_t c); /* feed one byte as if typed on the console */
 
 
 /*

@@ -71,14 +71,19 @@ static void ring_push(uint8_t c) {
     ring->head = next;
 }
 
+/* One input byte from any source (serial RX, PS/2 keyboard) into the
+ * console tty and the shared polling ring. */
+void kbd_inject_byte(uint8_t c) {
+    if (!tty_handle_input_byte(&tty_table[0], c)) {
+        tty_push_input(&tty_table[0], (char)c);
+    }
+    ring_push(c);
+}
+
 static void drain_uart(void) {
     int c;
-    while ((c = serial_try_getc()) != -1) {
-        if (!tty_handle_input_byte(&tty_table[0], (uint8_t)c)) {
-            tty_push_input(&tty_table[0], (char)c);
-        }
-        ring_push((uint8_t)c);
-    }
+    while ((c = serial_try_getc()) != -1)
+        kbd_inject_byte((uint8_t)c);
 }
 static void kbd_irq_handler(struct arch_frame *f) {
     (void)f;

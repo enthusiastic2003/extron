@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/arch.h>
+#include <kernel/fbcon.h>
 
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
@@ -77,8 +78,10 @@ static void scroll(void) {
 static void putc(char c, char color) {
     if (c == '\n') {
         serial_putc('\r'); // raw-mode serial terminals need CR before LF
+        fbcon_putc('\r');
     }
     serial_putc(c);
+    fbcon_putc(c);
 
     if (c == '\n') {
         cursor_x = 0;
@@ -259,6 +262,7 @@ void kvprintf(const char* fmt, char color, va_list args) {
                 break;
         }
     }
+    fbcon_flush();
 }
 
 /* --- public API --- */

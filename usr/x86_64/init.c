@@ -29,6 +29,7 @@
 #define SYS_MUNMAP 70
 #define SYS_REBOOT 71
 #define SYS_TCB_SET 6
+#define SYS_OPEN 13
 
 static inline long sc(long n, long a, long b, long c) {
     long r;
@@ -90,6 +91,35 @@ static int run_child_exec(void) {
     int status = -1;
     long w = sc(SYS_WAIT, (long)&status, -1, 0);
     return (w == pid && status == 42) ? 1 : (outnum(status), 0);
+}
+
+static int streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+
+static void mini_shell(void) {
+    char line[128];
+    out("\nExtron mini shell on the console (type 'help').\n");
+    for (;;) {
+        out("\x1b[1;32mextron\x1b[0m:\x1b[1;34m/\x1b[0m# ");
+        long n = sc(SYS_READ, 0, (long)line, sizeof(line) - 1);
+        if (n <= 0) continue;
+        if (line[n - 1] == '\n') n--;
+        line[n] = 0;
+        if (streq(line, "help")) out("commands: help colors fill echo <text> uname reboot\n");
+        else if (streq(line, "colors")) {
+            for (int bg = 40; bg < 48; bg++) {
+                for (int fg = 30; fg < 38; fg++) {
+                    out("\x1b["); outnum(bg); out(";"); outnum(fg); out("m Aa ");
+                }
+                out("\x1b[0m\n");
+            }
+            out("\x1b[1mbold\x1b[0m \x1b[7mreverse\x1b[0m \x1b[91mbright red\x1b[0m\n");
+        } else if (streq(line, "fill")) {
+            for (int i = 1; i <= 150; i++) { out("line "); outnum(i); out(": the quick brown fox jumps over the lazy dog\n"); }
+        } else if (line[0] == 'e' && line[1] == 'c' && line[2] == 'h' && line[3] == 'o') { out(line + (n > 4 ? 5 : 4)); out("\n"); }
+        else if (streq(line, "uname")) out("Extron x86_64 (UEFI)\n");
+        else if (streq(line, "reboot") || streq(line, "exit")) { sc(SYS_REBOOT, 0, 0, 0); }
+        else if (line[0]) { out("unknown command: "); out(line); out("\n"); }
+    }
 }
 
 static void run_tests(void) {
@@ -210,8 +240,15 @@ int main(int argc, char **argv, char **envp) {
         do_exit(42);
     }
     run_tests();
-    out("rebooting (QEMU -no-reboot turns this into an exit)\n");
-    sc(SYS_REBOOT, 0, 0, 0);
+    /* CI images carry /etc/autoexit: reset the machine (QEMU -no-reboot turns
+     * that into an exit). Otherwise fall into the tiny interactive shell. */
+    long fd = sc(SYS_OPEN, (long)"/etc/autoexit", 0, 0);
+    if (fd >= 0) {
+        out("rebooting (QEMU -no-reboot turns this into an exit)\n");
+        sc(SYS_REBOOT, 0, 0, 0);
+        do_exit(0);
+    }
+    mini_shell();
     do_exit(0);
 }
 

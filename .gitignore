@@ -45,3 +45,4 @@ initrd/
 usr/mlibc-sysroot/home/
 build-x86_64/
 initrd.ext2
+initrd-check.ext2

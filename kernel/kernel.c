@@ -18,6 +18,7 @@
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/mailbox.h>
 #include <kernel/drivers/fb.h>
+#include <kernel/fbcon.h>
 #include <kernel/drivers/power.h>
 
 /**
@@ -176,6 +177,10 @@ void kernel_stage2(uint64_t mb2_addr) {
     }
     */
     init_kbd();
+#ifdef __x86_64__
+    extern void ps2kbd_init(void);
+    ps2kbd_init();
+#endif
     tty_init();
     pty_init();
 
@@ -200,7 +205,13 @@ void kernel_stage2(uint64_t mb2_addr) {
      * pitch, misplaced corners mean geometry, permuted colours mean
      * byte order. */
     if (fb_init(640, 480)) {
+#ifdef __x86_64__
+        /* UEFI GOP framebuffer: use it as a text console mirroring serial. */
+        if (fbcon_init() == 0)
+            kprintf("fbcon: framebuffer console active\n");
+#else
         fb_test_pattern();
+#endif
     }
 
     /* The raw-syscall/hand-rolled-asm test payloads that used to be
@@ -243,7 +254,7 @@ void kernel_stage2(uint64_t mb2_addr) {
         panic("kernel_stage2: failed to create BusyBox ash");
     sched_policy_add(&shell->main_thread);
 
-    kprintf("Starting scheduler — BusyBox ash.\n");
+    kprintf("Starting scheduler - first process.\n");
     sched_start();
 
     panic("kernel_stage2: sched_start() returned");

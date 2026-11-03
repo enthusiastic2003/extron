@@ -100,4 +100,27 @@ typedef struct EFI_SIMPLE_FILE_SYSTEM {
 
 #define EFI_FILE_MODE_READ 1ULL
 
+typedef enum { PixelRedGreenBlueReserved8BitPerColor, PixelBlueGreenRedReserved8BitPerColor,
+               PixelBitMask, PixelBltOnly } EFI_GRAPHICS_PIXEL_FORMAT;
+typedef struct { uint32_t RedMask, GreenMask, BlueMask, ReservedMask; } EFI_PIXEL_BITMASK;
+typedef struct {
+    uint32_t Version, HorizontalResolution, VerticalResolution;
+    EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
+    EFI_PIXEL_BITMASK PixelInformation;
+    uint32_t PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+typedef struct {
+    uint32_t MaxMode, Mode;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+    UINTN SizeOfInfo;
+    EFI_PHYSICAL_ADDRESS FrameBufferBase;
+    UINTN FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_MODE;
+typedef struct EFI_GRAPHICS_OUTPUT {
+    void *QueryMode;
+    EFI_STATUS (EFIAPI *SetMode)(struct EFI_GRAPHICS_OUTPUT *, uint32_t);
+    void *Blt;
+    EFI_GRAPHICS_OUTPUT_MODE *Mode;
+} EFI_GRAPHICS_OUTPUT;
+
 #endif

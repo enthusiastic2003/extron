@@ -57,6 +57,32 @@ moved behind small per-arch headers (`arch/cpu.h`, `arch/context.h`,
 `arch/signal_arch.h`); `struct aarch64_frame` became `struct arch_frame`.
 The AArch64 kernel image is byte-for-byte the same size as before the refactor.
 
+## Framebuffer console
+
+The loader keeps the firmware's current GOP mode and passes a multiboot2
+framebuffer tag; `arch/x86_64/fb.c` maps it (implementing the same `fb.h` API
+as the Pi mailbox driver, so `/dev/fb0` works too) and `kernel/console/fbcon.c`
+renders a text console with an 8x16 font (`font8x16.h`, converted from the
+public-domain Lat15-VGA16 PSF), 16 colours, scrolling and the VT100 subset
+shells need (cursor movement, erase, SGR, insert/delete line/char). It mirrors
+`kprintf` and console-tty output (boot messages printed before the
+framebuffer exists are replayed), drawing is deferred until `fbcon_flush()`.
+`arch/x86_64/ps2kbd.c` adds a PS/2 keyboard (US layout, Shift/Caps/Ctrl, arrows,
+Home/End/Del/PgUp/PgDn) feeding the same tty path as serial, so the window is
+interactive. `make -f Makefile.x86_64 run` opens a QEMU window;
+`tools/x86_screenshot.py out.png [secs] [qemu sendkey names...]` boots headless
+and saves a screendump.
+
+## Fast mem*
+
+`klibc/string.c` uses `rep movsq/stosq` (+ byte tail), word-wise memcmp/strlen
+and an 8-byte backward memmove on x86-64, ~7-20x the old byte loops
+(printed at boot: `mem: memcpy ... MB/s`). Explicit SSE/AVX is intentionally
+not used in the kernel: it is built `-mgeneral-regs-only` so user FP/SSE state
+is never clobbered by syscalls/IRQs. AArch64 keeps the original loops (the
+early boot code runs with Device-memory semantics where wide/unaligned
+accesses can fault).
+
 ## Userland status
 
 The checked-in mlibc sysroot, BusyBox, DOOM etc. are AArch64 binaries. For

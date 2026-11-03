@@ -6,7 +6,6 @@
  * serial port.
  */
 #include <kernel/drivers/mailbox.h>
-#include <kernel/drivers/fb.h>
 #include <kernel/drivers/power.h>
 #include <kernel/drivers/emmc.h>
 #include <kernel/console.h>
@@ -15,13 +14,6 @@
 void mailbox_init(void) {}
 void mailbox_report(void) {}
 int mailbox_property_call(volatile uint32_t *msg) { (void)msg; return -1; }
-
-const struct framebuffer *fb_init(uint32_t w, uint32_t h) { (void)w; (void)h; return 0; }
-const struct framebuffer *fb_get(void) { return 0; }
-uint32_t fb_rgb(uint8_t r, uint8_t g, uint8_t b) { return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b; }
-void fb_fill(uint32_t c) { (void)c; }
-void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c) { (void)x; (void)y; (void)w; (void)h; (void)c; }
-void fb_test_pattern(void) {}
 
 void power_init(void) {}
 

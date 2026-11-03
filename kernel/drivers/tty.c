@@ -1,5 +1,6 @@
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/serial.h>
+#include <kernel/fbcon.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/signal.h>
@@ -76,6 +77,13 @@ static long serial_write_out(struct tty *t, const char *buf, size_t count,
             serial_putc('\r');
         serial_putc(byte);
     }
+    /* Mirror to the framebuffer console: same bytes, ONLCR already applied. */
+    for (size_t i = 0; i < count; i++) {
+        if ((t->termios.oflag & (OPOST | ONLCR)) == (OPOST | ONLCR) && buf[i] == '\n')
+            fbcon_putc('\r');
+        fbcon_putc(buf[i]);
+    }
+    fbcon_flush();
     return (long)count;
 }
 
