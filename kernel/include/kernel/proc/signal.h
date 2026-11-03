@@ -57,6 +57,8 @@ void signal_notify_parent(struct proc *child, int code, int status);
 int signal_mask_update(struct thread *t, int how, const uint64_t *set,
                        uint64_t *old);
 bool signal_pending_unblocked(struct thread *t);
+uint64_t signal_pending_set(struct thread *t);
+bool signal_take(struct thread *t, uint64_t mask, struct signal_info *out);
 
 bool signal_deliver_pending(struct arch_frame *f);
 bool signal_deliver_sync(struct arch_frame *f, int signo);

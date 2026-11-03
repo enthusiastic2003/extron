@@ -1,4 +1,5 @@
 #include <kernel/proc/signal.h>
+#include <kernel/fs/file.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <kernel/errno.h>
@@ -190,8 +191,16 @@ static int queue_process_signal(struct proc *target, int signo,
                                 struct signal_info info) {
     irq_spin_lock(&target->signal_lock);
     struct signal_action action = target->signal_actions[signo];
-    if (action.handler == SIGNAL_IGN
-            || (action.handler == SIGNAL_DFL && default_ignored(signo))) {
+    /* An ignored signal is discarded at generation, unless every thread
+     * currently blocks it (as on Linux): the disposition may change before it
+     * is unblocked, and signalfd(SIGCHLD) depends on this. */
+    bool any_unblocked = false;
+    for (struct thread *t = target->threads; t; t = t->next_in_process)
+        if (t->state != THREAD_EXITED && !(t->signal_mask & signal_bit(signo)))
+            any_unblocked = true;
+    if ((action.handler == SIGNAL_IGN
+            || (action.handler == SIGNAL_DFL && default_ignored(signo)))
+            && any_unblocked) {
         irq_spin_unlock(&target->signal_lock);
         return 0;
     }
@@ -205,6 +214,7 @@ static int queue_process_signal(struct proc *target, int signo,
         }
     irq_spin_unlock(&target->signal_lock);
     wake_recipient(wake, signo);
+    file_poll_notify();                    /* signalfd/epoll waiters */
     return 0;
 }
 
@@ -274,6 +284,7 @@ int signal_send_thread(struct proc *target, struct thread *thread, int signo) {
     }
     thread->signal_pending |= signal_bit(signo);
     thread->signal_info[signo] = info;
+    file_poll_notify();
     irq_spin_unlock(&target->signal_lock);
     wake_recipient(thread, signo);
     return 0;
@@ -350,6 +361,41 @@ int signal_mask_update(struct thread *t, int how, const uint64_t *set,
         default: return -1;
     }
     return 0;
+}
+
+/* Signals pending for `t` (its own plus its process's), blocked or not. */
+uint64_t signal_pending_set(struct thread *t) {
+    if (!t || !t->process)
+        return 0;
+    struct proc *p = t->process;
+    irq_spin_lock(&p->signal_lock);
+    uint64_t bits = p->signal_pending | t->signal_pending;
+    irq_spin_unlock(&p->signal_lock);
+    return bits;
+}
+
+/* Dequeue the lowest-numbered pending signal in `mask` without delivering it
+ * (signalfd). Thread-directed signals win over process-directed ones. */
+bool signal_take(struct thread *t, uint64_t mask, struct signal_info *out) {
+    if (!t || !t->process)
+        return false;
+    struct proc *p = t->process;
+    irq_spin_lock(&p->signal_lock);
+    uint64_t own = t->signal_pending & mask, shared = p->signal_pending & mask;
+    bool got = false;
+    if (own) {
+        int signo = __builtin_ctzll(own) + 1;
+        t->signal_pending &= ~signal_bit(signo);
+        *out = t->signal_info[signo];
+        got = true;
+    } else if (shared) {
+        int signo = __builtin_ctzll(shared) + 1;
+        p->signal_pending &= ~signal_bit(signo);
+        *out = p->signal_info[signo];
+        got = true;
+    }
+    irq_spin_unlock(&p->signal_lock);
+    return got;
 }
 
 bool signal_pending_unblocked(struct thread *t) {

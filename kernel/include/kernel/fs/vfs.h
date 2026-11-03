@@ -49,6 +49,7 @@ enum vfs_node_type {
     VFS_NODE_SYMLINK,
     VFS_NODE_DEVICE,
     VFS_NODE_FIFO,
+    VFS_NODE_SOCKET,    /* AF_UNIX socket name (bound by bind(2)) */
 };
 
 struct vfs_timestamp {

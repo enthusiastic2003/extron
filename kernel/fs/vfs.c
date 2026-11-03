@@ -753,7 +753,7 @@ int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode,
 /* mknod(2) for the node types we can represent: FIFOs and regular files. */
 int vfs_mknod(const struct vfs_path *cwd, const char *path, enum vfs_node_type type,
               uint32_t mode, const struct vfs_cred *cred) {
-    if (type != VFS_NODE_FIFO && type != VFS_NODE_REGULAR)
+    if (type != VFS_NODE_FIFO && type != VFS_NODE_REGULAR && type != VFS_NODE_SOCKET)
         return -EPERM;
     return vfs_make_node(cwd, path, type, mode, cred);
 }

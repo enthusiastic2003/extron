@@ -38,5 +38,15 @@
 #define ENOTEMPTY      39
 #define ELOOP          40
 #define EOPNOTSUPP     95
+#define ENOTSOCK       88
+#define EMSGSIZE       90
+#define ENOPROTOOPT    92
+#define EPROTONOSUPPORT 93
+#define ESOCKTNOSUPPORT 94
+#define EAFNOSUPPORT   97
+#define EADDRINUSE     98
+#define EISCONN        106
+#define ENOTCONN       107
+#define ECONNREFUSED   111
 
 #endif

@@ -105,6 +105,26 @@
 #define SYS_SIGPENDING    95
 #define SYS_MREMAP        97  /* mremap(old, old_size, new_size, flags) */
 #define SYS_FLOCK         98
+#define SYS_SOCKET        99
+#define SYS_SOCKETPAIR    100  /* 4th arg (sv) in r10 */
+#define SYS_BIND          101
+#define SYS_LISTEN        102
+#define SYS_ACCEPT        103  /* 4th arg: flags */
+#define SYS_CONNECT       104
+#define SYS_GETSOCKNAME   105
+#define SYS_GETPEERNAME   106
+#define SYS_SHUTDOWN      107
+#define SYS_SENDMSG       108
+#define SYS_RECVMSG       109
+#define SYS_SOCKOPT       110  /* (fd, struct {level,name,val,lenp,set}*) */
+#define SYS_EPOLL_CREATE  111
+#define SYS_EPOLL_CTL     112  /* 4th arg (event*) in r10 */
+#define SYS_EPOLL_WAIT    113  /* (epfd, struct {events,max,timeout_ms,mask,has_mask}*) */
+#define SYS_EVENTFD       114
+#define SYS_TIMERFD_CREATE 115
+#define SYS_TIMERFD_SETTIME 116 /* 4th arg (old*) in r10 */
+#define SYS_TIMERFD_GETTIME 117
+#define SYS_SIGNALFD      118
 #define SYS_SETITIMER     92
 #define SYS_GETITIMER     93
 #define SYS_FTRUNCATE     87
@@ -119,5 +139,12 @@
  * to the normal RESTORE_CONTEXT+eret every other exception already
  * uses — no separate return path needed. */
 uint64_t syscall_dispatch(struct arch_frame *f);
+
+/* True when [addr, addr+len) is mapped user memory of `p`. For code that has
+ * to re-check after sleeping (sockets). */
+struct proc;
+#include <stdbool.h>
+#include <stdint.h>
+bool syscall_user_range_ok(struct proc *p, uint64_t addr, uint64_t len);
 
 #endif

@@ -15,6 +15,8 @@
 #include <kernel/proc/resource.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/lock.h>
+#include <kernel/fs/socket.h>
+#include <kernel/fs/evfd.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/errno.h>
 #include <kernel/klibc/string.h>
@@ -77,6 +79,10 @@ static bool user_buffer_ok(struct proc *p, uint64_t addr, uint64_t len) {
             return false;
     }
     return true;
+}
+
+bool syscall_user_range_ok(struct proc *p, uint64_t addr, uint64_t len) {
+    return user_buffer_ok(p, addr, len);
 }
 
 /* Runs start-to-finish with DAIF masked — the SVC handler masks on
@@ -569,6 +575,22 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     if (!p || fd >= PROC_MAX_FDS || !p->files[fd])
         return (uint64_t)-EBADF;
     struct open_file *f_ioctl = p->files[fd];
+    if (f_ioctl->kind == FILE_SOCKET) {
+        if (request == 0x541B) {               /* FIONREAD */
+            if (!user_buffer_ok(p, arg, sizeof(int)))
+                return (uint64_t)-EFAULT;
+            *(int *)arg = (int)sock_bytes_available(f_ioctl->object.sock);
+            return 0;
+        }
+        if (request == 0x5421) {               /* FIONBIO */
+            if (!user_buffer_ok(p, arg, sizeof(int)))
+                return (uint64_t)-EFAULT;
+            int on = *(int *)arg;
+            return (uint64_t)file_set_status_flags(p, (int)fd,
+                (file_get_status_flags(p, (int)fd) & ~04000) | (on ? 04000 : 0));
+        }
+        return (uint64_t)-ENOTTY;
+    }
     if (f_ioctl && f_ioctl->kind == FILE_VNODE && pty_get_index(f_ioctl->object.node) >= 0) {
         if (request == 0x80045430) { /* TIOCGPTN */
             if (!user_buffer_ok(p, arg, sizeof(int))) return (uint64_t)-EFAULT;
@@ -701,7 +723,24 @@ static long poll_wait(struct extron_pollfd *fds, size_t count,
             return -EINTR;
         if (deadline && timer_ticks() >= deadline)
             return 0;
-        int result = file_poll_wait_until(deadline);
+        /* A timerfd in the set expires without any wakeup of its own: fold the
+         * earliest expiry into this sleep's deadline. */
+        uint64_t wake = deadline, next_ns = 0;
+        for (size_t i = 0; i < count; i++) {
+            struct open_file *of = fds[i].fd >= 0
+                ? file_description_rw(my_proc(), fds[i].fd) : NULL;
+            uint64_t ns = of ? file_poll_next_event_ns(of) : 0;
+            if (ns && (!next_ns || ns < next_ns))
+                next_ns = ns;
+        }
+        if (next_ns) {
+            uint64_t hz = timer_ticks_per_second(), now = timer_uptime_ns();
+            uint64_t ns = next_ns > now ? next_ns - now : 0;
+            uint64_t t = timer_ticks() + (ns * hz + 999999999ULL) / 1000000000ULL + 1;
+            if (!wake || t < wake)
+                wake = t;
+        }
+        int result = file_poll_wait_until(wake);
         if (result < 0)
             return result;
     }
@@ -921,6 +960,352 @@ static uint64_t sys_sigpending(uint64_t set_addr, uint64_t b, uint64_t c,
     memset((void *)set_addr, 0, 16 * sizeof(uint64_t));
     *(uint64_t *)set_addr = pending;
     return 0;
+}
+
+/* ---- AF_UNIX sockets (kernel/fs/socket.c) ---- */
+struct user_msghdr {
+    uint64_t name;
+    uint32_t namelen;
+    uint32_t _pad;
+    uint64_t iov;
+    uint64_t iovlen;
+    uint64_t control;
+    uint64_t controllen;
+    int32_t  flags;
+    int32_t  _pad2;
+};
+
+#define SOCK_IOV_MAX 32
+
+static uint64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
+                           struct arch_frame *f) {
+    (void)f;
+    return (uint64_t)sock_create(my_proc(), (int)domain, (int)type, (int)protocol);
+}
+
+static uint64_t sys_socketpair(uint64_t domain, uint64_t type, uint64_t protocol,
+                               struct arch_frame *f) {
+    uint64_t sv_addr = FRAME_ARG(f, 3);
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, sv_addr, 2 * sizeof(int)))
+        return (uint64_t)-EFAULT;
+    int sv[2];
+    long r = sock_pair(p, (int)domain, (int)type, (int)protocol, sv);
+    if (r < 0)
+        return (uint64_t)r;
+    ((int *)sv_addr)[0] = sv[0];
+    ((int *)sv_addr)[1] = sv[1];
+    return 0;
+}
+
+static uint64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len,
+                         struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (len > 256 || !user_buffer_ok(p, addr, len))
+        return (uint64_t)-EFAULT;
+    uint8_t copy[256];
+    memcpy(copy, (const void *)addr, len);
+    return (uint64_t)sock_bind(p, (int)fd, copy, len);
+}
+
+static uint64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t c,
+                           struct arch_frame *f) {
+    (void)c; (void)f;
+    return (uint64_t)sock_listen(my_proc(), (int)fd, (int)backlog);
+}
+
+static uint64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t len,
+                            struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (len > 256 || !user_buffer_ok(p, addr, len))
+        return (uint64_t)-EFAULT;
+    uint8_t copy[256];
+    memcpy(copy, (const void *)addr, len);
+    return (uint64_t)sock_connect(p, (int)fd, copy, len);
+}
+
+static uint64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t lenp,
+                           struct arch_frame *f) {
+    int flags = (int)FRAME_ARG(f, 3);
+    struct proc *p = my_proc();
+    uint32_t len = 0;
+    uint8_t tmp[2 + 108 + 1];
+    bool want_addr = addr && lenp;
+    if (want_addr) {
+        if (!user_buffer_ok(p, lenp, sizeof(uint32_t)))
+            return (uint64_t)-EFAULT;
+        len = *(uint32_t *)lenp;
+        if (len > sizeof(tmp)) len = sizeof(tmp);
+    }
+    long r = sock_accept(p, (int)fd, want_addr ? tmp : NULL, want_addr ? &len : NULL, flags);
+    if (r >= 0 && want_addr) {
+        uint32_t cap = *(uint32_t *)lenp;
+        uint32_t n = len < cap ? len : cap;
+        if (user_buffer_ok(p, addr, n))
+            memcpy((void *)addr, tmp, n);
+        if (user_buffer_ok(p, lenp, sizeof(uint32_t)))
+            *(uint32_t *)lenp = len;
+    }
+    return (uint64_t)r;
+}
+
+static uint64_t sock_name_common(uint64_t fd, uint64_t addr, uint64_t lenp, int peer) {
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, lenp, sizeof(uint32_t)))
+        return (uint64_t)-EFAULT;
+    uint32_t cap = *(uint32_t *)lenp;
+    uint8_t tmp[2 + 108 + 1];
+    uint32_t len = cap < sizeof(tmp) ? cap : sizeof(tmp);
+    long r = sock_getname(p, (int)fd, tmp, &len, peer);
+    if (r < 0)
+        return (uint64_t)r;
+    uint32_t n = len < cap ? len : cap;
+    if (n > sizeof(tmp)) n = sizeof(tmp);
+    if (!user_buffer_ok(p, addr, n))
+        return (uint64_t)-EFAULT;
+    memcpy((void *)addr, tmp, n);
+    *(uint32_t *)lenp = len;
+    return 0;
+}
+
+static uint64_t sys_getsockname(uint64_t fd, uint64_t addr, uint64_t lenp,
+                                struct arch_frame *f) {
+    (void)f;
+    return sock_name_common(fd, addr, lenp, 0);
+}
+
+static uint64_t sys_getpeername(uint64_t fd, uint64_t addr, uint64_t lenp,
+                                struct arch_frame *f) {
+    (void)f;
+    return sock_name_common(fd, addr, lenp, 1);
+}
+
+static uint64_t sys_shutdown(uint64_t fd, uint64_t how, uint64_t c,
+                             struct arch_frame *f) {
+    (void)c; (void)f;
+    return (uint64_t)sock_shutdown(my_proc(), (int)fd, (int)how);
+}
+
+static long load_iov(struct proc *p, const struct user_msghdr *h, struct sock_iov *out) {
+    if (h->iovlen > SOCK_IOV_MAX)
+        return -EINVAL;
+    if (!user_buffer_ok(p, h->iov, h->iovlen * sizeof(struct sock_iov)))
+        return -EFAULT;
+    memcpy(out, (const void *)h->iov, h->iovlen * sizeof(struct sock_iov));
+    return (long)h->iovlen;
+}
+
+static uint64_t sys_sendmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
+                            struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, hdr_addr, sizeof(struct user_msghdr)))
+        return (uint64_t)-EFAULT;
+    struct user_msghdr h = *(const struct user_msghdr *)hdr_addr;
+    if (h.controllen)
+        return (uint64_t)-EOPNOTSUPP;      /* SCM_RIGHTS/CREDENTIALS: not yet */
+    struct sock_iov iov[SOCK_IOV_MAX];
+    long cnt = load_iov(p, &h, iov);
+    if (cnt < 0)
+        return (uint64_t)cnt;
+    uint8_t name[256];
+    if (h.name && h.namelen) {
+        if (h.namelen > sizeof(name) || !user_buffer_ok(p, h.name, h.namelen))
+            return (uint64_t)-EFAULT;
+        memcpy(name, (const void *)h.name, h.namelen);
+    }
+    return (uint64_t)sock_sendmsg(p, (int)fd, h.name ? name : NULL,
+                                  h.name ? h.namelen : 0, iov, (int)cnt, (int)flags);
+}
+
+static uint64_t sys_recvmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
+                            struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, hdr_addr, sizeof(struct user_msghdr)))
+        return (uint64_t)-EFAULT;
+    struct user_msghdr h = *(const struct user_msghdr *)hdr_addr;
+    struct sock_iov iov[SOCK_IOV_MAX];
+    long cnt = load_iov(p, &h, iov);
+    if (cnt < 0)
+        return (uint64_t)cnt;
+    uint8_t name[2 + 108 + 1];
+    uint32_t namelen = h.name ? h.namelen : 0;
+    if (namelen > sizeof(name)) namelen = sizeof(name);
+    int msg_flags = 0;
+    long r = sock_recvmsg(p, (int)fd, h.name ? name : NULL, h.name ? &namelen : NULL,
+                          iov, (int)cnt, (int)flags, &msg_flags);
+    if (r < 0)
+        return (uint64_t)r;
+    /* Re-validate: we may have slept. */
+    if (!user_buffer_ok(p, hdr_addr, sizeof(struct user_msghdr)))
+        return (uint64_t)-EFAULT;
+    struct user_msghdr *out = (struct user_msghdr *)hdr_addr;
+    if (h.name) {
+        uint32_t n = namelen < h.namelen ? namelen : h.namelen;
+        if (n > sizeof(name)) n = sizeof(name);
+        if (user_buffer_ok(p, h.name, n))
+            memcpy((void *)h.name, name, n);
+        out->namelen = namelen;
+    }
+    out->controllen = 0;
+    out->flags = msg_flags;
+    return (uint64_t)r;
+}
+
+/* getsockopt/setsockopt: arg3 points at {level, name, val, len*, set}. */
+struct user_sockopt {
+    int32_t  level, name;
+    uint64_t val;
+    uint64_t lenp;
+    int64_t  set;
+};
+
+static uint64_t sys_sockopt(uint64_t fd, uint64_t req_addr, uint64_t c,
+                            struct arch_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, req_addr, sizeof(struct user_sockopt)))
+        return (uint64_t)-EFAULT;
+    struct user_sockopt r = *(const struct user_sockopt *)req_addr;
+    if (!user_buffer_ok(p, r.lenp, sizeof(uint32_t)))
+        return (uint64_t)-EFAULT;
+    uint32_t len = *(uint32_t *)r.lenp;
+    uint8_t tmp[64];
+    if (len > sizeof(tmp))
+        len = sizeof(tmp);
+    if (r.set) {
+        if (!user_buffer_ok(p, r.val, len))
+            return (uint64_t)-EFAULT;
+        memcpy(tmp, (const void *)r.val, len);
+    }
+    long rc = sock_opt(p, (int)fd, (int)r.set, r.level, r.name, tmp, &len);
+    if (rc < 0)
+        return (uint64_t)rc;
+    if (!r.set) {
+        uint32_t cap = *(uint32_t *)r.lenp;
+        uint32_t n = len < cap ? len : cap;
+        if (!user_buffer_ok(p, r.val, n))
+            return (uint64_t)-EFAULT;
+        memcpy((void *)r.val, tmp, n);
+        *(uint32_t *)r.lenp = len;
+    }
+    return 0;
+}
+
+/* ---- epoll / eventfd / timerfd / signalfd (kernel/fs/evfd.c) ---- */
+static uint64_t sys_epoll_create(uint64_t flags, uint64_t b, uint64_t c,
+                                 struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    return (uint64_t)epoll_create_fd(my_proc(), (int)flags);
+}
+
+static uint64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
+                              struct arch_frame *f) {
+    uint64_t ev_addr = FRAME_ARG(f, 3);
+    struct proc *p = my_proc();
+    struct kepoll_event ev;
+    if (op != 2 /* DEL */) {
+        if (!user_buffer_ok(p, ev_addr, sizeof(ev)))
+            return (uint64_t)-EFAULT;
+        memcpy(&ev, (const void *)ev_addr, sizeof(ev));
+    }
+    return (uint64_t)epoll_ctl_fd(p, (int)epfd, (int)op, (int)fd,
+                                  op != 2 ? &ev : NULL);
+}
+
+struct epoll_wait_request {
+    uint64_t events;
+    int64_t  maxevents;
+    int64_t  timeout_ms;      /* -1 forever */
+    uint64_t sigmask;         /* first word of the mask, valid if has_mask */
+    uint64_t has_mask;
+};
+
+static uint64_t sys_epoll_wait(uint64_t epfd, uint64_t req_addr, uint64_t c,
+                               struct arch_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, req_addr, sizeof(struct epoll_wait_request)))
+        return (uint64_t)-EFAULT;
+    struct epoll_wait_request r = *(const struct epoll_wait_request *)req_addr;
+    if (r.maxevents <= 0 || r.maxevents > 1024 || r.timeout_ms < -1)
+        return (uint64_t)-EINVAL;
+    int max = r.maxevents > EPOLL_MAX_EVENTS_PER_CALL ? EPOLL_MAX_EVENTS_PER_CALL
+                                                      : (int)r.maxevents;
+    if (!user_buffer_ok(p, r.events, (uint64_t)max * sizeof(struct kepoll_event)))
+        return (uint64_t)-EFAULT;
+
+    struct thread *t = my_thread();
+    uint64_t old_mask = t->signal_mask;
+    if (r.has_mask && signal_mask_update(t, 2, &r.sigmask, &old_mask) != 0)
+        return (uint64_t)-EINVAL;
+    struct kepoll_event out[EPOLL_MAX_EVENTS_PER_CALL];
+    long n = epoll_wait_fd(p, (int)epfd, out, max, r.timeout_ms);
+    if (r.has_mask && n == -4 /* EINTR */) {
+        t->wait_original_mask = old_mask;     /* restored by sigreturn */
+        t->wait_mask_restore = true;
+    } else if (r.has_mask) {
+        t->signal_mask = old_mask;
+    }
+    if (n > 0) {
+        if (!user_buffer_ok(p, r.events, (uint64_t)n * sizeof(struct kepoll_event)))
+            return (uint64_t)-EFAULT;          /* unmapped while we slept */
+        memcpy((void *)r.events, out, (size_t)n * sizeof(struct kepoll_event));
+    }
+    return (uint64_t)n;
+}
+
+static uint64_t sys_eventfd(uint64_t initval, uint64_t flags, uint64_t c,
+                            struct arch_frame *f) {
+    (void)c; (void)f;
+    return (uint64_t)eventfd_create_fd(my_proc(), (unsigned)initval, (int)flags);
+}
+
+static uint64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t c,
+                                   struct arch_frame *f) {
+    (void)c; (void)f;
+    return (uint64_t)timerfd_create_fd(my_proc(), (int)clockid, (int)flags);
+}
+
+static uint64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_addr,
+                                    struct arch_frame *f) {
+    uint64_t old_addr = FRAME_ARG(f, 3);
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, new_addr, 32))
+        return (uint64_t)-EFAULT;
+    uint64_t spec[4], old[4];
+    memcpy(spec, (const void *)new_addr, 32);
+    if (old_addr && !user_buffer_ok(p, old_addr, 32))
+        return (uint64_t)-EFAULT;
+    long r = timerfd_settime_fd(p, (int)fd, (int)flags, spec, old_addr ? old : NULL);
+    if (r == 0 && old_addr)
+        memcpy((void *)old_addr, old, 32);
+    return (uint64_t)r;
+}
+
+static uint64_t sys_timerfd_gettime(uint64_t fd, uint64_t cur_addr, uint64_t c,
+                                    struct arch_frame *f) {
+    (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, cur_addr, 32))
+        return (uint64_t)-EFAULT;
+    uint64_t cur[4];
+    long r = timerfd_gettime_fd(p, (int)fd, cur);
+    if (r == 0)
+        memcpy((void *)cur_addr, cur, 32);
+    return (uint64_t)r;
+}
+
+static uint64_t sys_signalfd(uint64_t fd, uint64_t mask_addr, uint64_t flags,
+                             struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, mask_addr, sizeof(uint64_t)))
+        return (uint64_t)-EFAULT;
+    return (uint64_t)signalfd_create_fd(p, (int)fd, *(const uint64_t *)mask_addr, (int)flags);
 }
 
 static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
@@ -1953,7 +2338,8 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     st->mode = (attr.type == VFS_NODE_DIRECTORY ? 0040000
               : attr.type == VFS_NODE_SYMLINK ? 0120000
               : attr.type == VFS_NODE_DEVICE ? 0020000
-              : attr.type == VFS_NODE_FIFO ? 0010000 : 0100000)
+              : attr.type == VFS_NODE_FIFO ? 0010000
+              : attr.type == VFS_NODE_SOCKET ? 0140000 : 0100000)
              | attr.mode;
     st->nlink = attr.nlink;
     st->uid = attr.uid;
@@ -1977,7 +2363,8 @@ static void store_extron_stat(struct extron_stat *st,
     st->mode = (attr->type == VFS_NODE_DIRECTORY ? 0040000
               : attr->type == VFS_NODE_SYMLINK ? 0120000
               : attr->type == VFS_NODE_DEVICE ? 0020000
-              : attr->type == VFS_NODE_FIFO ? 0010000 : 0100000)
+              : attr->type == VFS_NODE_FIFO ? 0010000
+              : attr->type == VFS_NODE_SOCKET ? 0140000 : 0100000)
              | attr->mode;
     st->nlink = attr->nlink;
     st->uid = attr->uid;
@@ -2932,6 +3319,26 @@ static const syscall_fn syscall_table[] = {
     [SYS_SIGPENDING] = sys_sigpending,
     [SYS_MREMAP] = sys_mremap,
     [SYS_FLOCK] = sys_flock,
+    [SYS_SOCKET] = sys_socket,
+    [SYS_SOCKETPAIR] = sys_socketpair,
+    [SYS_BIND] = sys_bind,
+    [SYS_LISTEN] = sys_listen,
+    [SYS_ACCEPT] = sys_accept,
+    [SYS_CONNECT] = sys_connect,
+    [SYS_GETSOCKNAME] = sys_getsockname,
+    [SYS_GETPEERNAME] = sys_getpeername,
+    [SYS_SHUTDOWN] = sys_shutdown,
+    [SYS_SENDMSG] = sys_sendmsg,
+    [SYS_RECVMSG] = sys_recvmsg,
+    [SYS_SOCKOPT] = sys_sockopt,
+    [SYS_EPOLL_CREATE] = sys_epoll_create,
+    [SYS_EPOLL_CTL] = sys_epoll_ctl,
+    [SYS_EPOLL_WAIT] = sys_epoll_wait,
+    [SYS_EVENTFD] = sys_eventfd,
+    [SYS_TIMERFD_CREATE] = sys_timerfd_create,
+    [SYS_TIMERFD_SETTIME] = sys_timerfd_settime,
+    [SYS_TIMERFD_GETTIME] = sys_timerfd_gettime,
+    [SYS_SIGNALFD] = sys_signalfd,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

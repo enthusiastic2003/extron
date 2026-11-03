@@ -10,12 +10,18 @@
 
 struct proc;
 struct pipe_buffer;
+struct usock;
 
 enum open_file_kind {
     FILE_VNODE,
     FILE_PIPE_READER,
     FILE_PIPE_WRITER,
     FILE_PIPE_RDWR,      /* O_RDWR open of a FIFO: both ends of one pipe */
+    FILE_SOCKET,         /* AF_UNIX socket (kernel/fs/socket.c) */
+    FILE_EPOLL,          /* kernel/fs/evfd.c */
+    FILE_EVENTFD,
+    FILE_TIMERFD,
+    FILE_SIGNALFD,
 };
 
 /* One shared open-file description. Descriptor slots are per-process;
@@ -28,6 +34,8 @@ struct open_file {
     union {
         struct vfs_node *node;
         struct pipe_buffer *pipe;
+        struct usock *sock;
+        void *special;           /* epoll/eventfd/timerfd/signalfd state */
     } object;
     struct vfs_path path; /* retained location; used by directory-relative *at */
     size_t offset;
@@ -67,9 +75,23 @@ int     file_poll(struct proc *p, int fd, short events, short *revents);
  * The current kernel is single-core, so a waiter can scan descriptors and
  * enter this channel without an intervening producer running. */
 void    file_poll_notify(void);
+uint64_t file_poll_generation(void);
 int     file_poll_wait_until(uint64_t deadline_tick);
 int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
 int     file_get_node(struct proc *p, int fd, struct vfs_node **out);
+/* Sockets: wrap a new socket in a descriptor, or fetch the socket behind one. */
+int     file_install_socket(struct proc *p, struct usock *s, int open_flags, int cloexec);
+struct usock *file_socket(struct proc *p, int fd, int *open_flags);
+/* eventfd/timerfd/signalfd/epoll descriptors (kernel/fs/evfd.c). */
+int     file_install_special(struct proc *p, enum open_file_kind kind, void *priv,
+                             int open_flags, int cloexec);
+void   *file_special(struct open_file *f);
+enum open_file_kind file_kind(const struct open_file *f);
+int     file_status_flags(const struct open_file *f);
+struct open_file *file_description_rw(struct proc *p, int fd);
+int     file_pollable(const struct open_file *f);      /* false for regular files/dirs */
+void    file_poll_description(struct open_file *f, short events, short *revents);
+uint64_t file_poll_next_event_ns(struct open_file *f); /* earliest timerfd expiry or 0 */
 const struct open_file *file_description(struct proc *p, int fd);   /* identity token for locks */
 uint64_t file_offset(struct proc *p, int fd);
 

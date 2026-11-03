@@ -2,6 +2,8 @@
 #include <kernel/drivers/tty.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/lock.h>
+#include <kernel/fs/socket.h>
+#include <kernel/fs/evfd.h>
 #include <kernel/fs/ext2.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/devfs.h>
@@ -18,6 +20,7 @@
 /* Extron's mlibc ABI values (abi-bits/fcntl.h). */
 #define O_ACCMODE  03
 #define O_RDONLY   00
+#define O_RDWR_FLAG 02
 #define O_WRONLY   01
 #define O_RDWR     02
 #define O_APPEND   02000
@@ -69,8 +72,17 @@ static struct open_file reserved_slot;
 static spinlock_t poll_wait_lock = SPINLOCK_INIT;
 static char poll_wait_channel;
 
+static uint64_t poll_generation;
+
 void file_poll_notify(void) {
+    poll_generation++;
     wakeup(&poll_wait_channel);
+}
+
+/* Bumped by every readiness change anywhere; lets edge-triggered epoll tell
+ * "new data arrived" from "still readable from before". */
+uint64_t file_poll_generation(void) {
+    return poll_generation;
 }
 
 int file_poll_wait_until(uint64_t deadline_tick) {
@@ -114,11 +126,17 @@ static void file_release(struct open_file *f) {
             fifo_forget(pipe);
             kfree(pipe);
         }
+    } else if (f->kind == FILE_SOCKET) {
+        sock_release(f->object.sock);
+    } else if (f->kind == FILE_EPOLL || f->kind == FILE_EVENTFD
+               || f->kind == FILE_TIMERFD || f->kind == FILE_SIGNALFD) {
+        evfd_release(f);
     } else if (f->kind == FILE_VNODE) {
         lock_release_file(f);           /* flock(2) dies with the description */
         vfs_path_release(&f->path);
         vfs_node_release(f->object.node);
     }
+    epoll_forget_file(f);               /* a closed description leaves every epoll set */
     kfree(f);
 }
 
@@ -314,6 +332,12 @@ int file_open_at(struct proc *p, const struct vfs_path *base,
         int r = fifo_open(p, fd, f, node, flags);
         return r < 0 ? r : fd;
     }
+    if (node->type == VFS_NODE_SOCKET) {           /* sockets are not openable */
+        vfs_path_release(&f->path);
+        vfs_node_release(node);
+        kfree(f);
+        return -ENXIO;
+    }
     if (devfs_is_ptmx(f->object.node)) {
         struct vfs_node *master = pty_allocate_master();
         if (!master) {
@@ -488,7 +512,8 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
         /* d_type: DT_DIR 4, DT_LNK 10, DT_REG 8 */
         entry->type = ventry.type == VFS_NODE_DIRECTORY ? 4
                     : ventry.type == VFS_NODE_SYMLINK   ? 10
-                    : ventry.type == VFS_NODE_FIFO      ? 1 : 8;
+                    : ventry.type == VFS_NODE_FIFO      ? 1
+                    : ventry.type == VFS_NODE_SOCKET    ? 12 : 8;
         size_t name_length = strlen(ventry.name) + 1;
         if (name_length > sizeof(entry->name)) {
             irq_spin_unlock(&f->lock);
@@ -510,8 +535,8 @@ int file_info(struct proc *p, int fd, struct vfs_attr *attr) {
         return vfs_getattr(f->object.node, attr);
     memset(attr, 0, sizeof(*attr));
     attr->ino = (uint64_t)fd + 1;
-    attr->type = VFS_NODE_REGULAR;
-    attr->mode = 0644;
+    attr->type = f->kind == FILE_SOCKET ? VFS_NODE_SOCKET : VFS_NODE_FIFO;   /* pipes are FIFOs */
+    attr->mode = f->kind == FILE_SOCKET ? 0777 : 0600;
     attr->nlink = 1;
     return 0;
 }
@@ -524,6 +549,69 @@ int file_get_path(struct proc *p, int fd, struct vfs_path *out) {
     *out = f->path;
     vfs_path_retain(out);
     return 0;
+}
+
+int file_install_socket(struct proc *p, struct usock *s, int open_flags, int cloexec) {
+    int fd = free_descriptor_from(p, 0);
+    if (fd < 0)
+        return -EMFILE;
+    struct open_file *f = kmalloc(sizeof(*f));
+    if (!f)
+        return -ENOMEM;
+    memset(f, 0, sizeof(*f));
+    f->lock = (spinlock_t)SPINLOCK_INIT;
+    f->refs = 1;
+    f->kind = FILE_SOCKET;
+    f->object.sock = s;
+    f->flags = O_RDWR_FLAG | (open_flags & O_NONBLOCK);
+    p->files[fd] = f;
+    p->fd_flags[fd] = cloexec ? FD_CLOEXEC : 0;
+    return fd;
+}
+
+struct usock *file_socket(struct proc *p, int fd, int *open_flags) {
+    if (!descriptor_ok(p, fd) || p->files[fd]->kind != FILE_SOCKET)
+        return NULL;
+    if (open_flags)
+        *open_flags = p->files[fd]->flags;
+    return p->files[fd]->object.sock;
+}
+
+int file_install_special(struct proc *p, enum open_file_kind kind, void *priv,
+                         int open_flags, int cloexec) {
+    int fd = free_descriptor_from(p, 0);
+    if (fd < 0)
+        return -EMFILE;
+    struct open_file *f = kmalloc(sizeof(*f));
+    if (!f)
+        return -ENOMEM;
+    memset(f, 0, sizeof(*f));
+    f->lock = (spinlock_t)SPINLOCK_INIT;
+    f->refs = 1;
+    f->kind = kind;
+    f->object.special = priv;
+    f->flags = O_RDWR_FLAG | (open_flags & O_NONBLOCK);
+    p->files[fd] = f;
+    p->fd_flags[fd] = cloexec ? FD_CLOEXEC : 0;
+    return fd;
+}
+
+void *file_special(struct open_file *f) { return f->object.special; }
+enum open_file_kind file_kind(const struct open_file *f) { return f->kind; }
+int file_status_flags(const struct open_file *f) { return f->flags; }
+struct open_file *file_description_rw(struct proc *p, int fd) {
+    return descriptor_ok(p, fd) ? p->files[fd] : NULL;
+}
+
+int file_pollable(const struct open_file *f) {
+    if (f->kind != FILE_VNODE)
+        return 1;
+    return f->object.node->type != VFS_NODE_REGULAR
+        && f->object.node->type != VFS_NODE_DIRECTORY;
+}
+
+uint64_t file_poll_next_event_ns(struct open_file *f) {
+    return evfd_next_event_ns(f);
 }
 
 const struct open_file *file_description(struct proc *p, int fd) {
@@ -652,6 +740,11 @@ static long file_read_at(struct proc *p, int fd, void *buffer, size_t count,
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_PIPE_READER || f->kind == FILE_PIPE_RDWR)
         return positional ? -ESPIPE : pipe_read(f, buffer, count);
+    if (f->kind == FILE_SOCKET)
+        return positional ? -ESPIPE : sock_read(f, buffer, count);
+    if (f->kind == FILE_EPOLL || f->kind == FILE_EVENTFD
+            || f->kind == FILE_TIMERFD || f->kind == FILE_SIGNALFD)
+        return positional ? -ESPIPE : evfd_read(f, buffer, count);
     if (f->kind != FILE_VNODE)
         return -EBADF;
     irq_spin_lock(&f->lock);
@@ -701,6 +794,11 @@ static long file_write_at(struct proc *p, int fd, const void *buffer,
     struct open_file *f = p->files[fd];
     if (f->kind == FILE_PIPE_WRITER || f->kind == FILE_PIPE_RDWR)
         return positional ? -ESPIPE : pipe_write(f, buffer, count);
+    if (f->kind == FILE_SOCKET)
+        return positional ? -ESPIPE : sock_write(f, buffer, count);
+    if (f->kind == FILE_EPOLL || f->kind == FILE_EVENTFD
+            || f->kind == FILE_TIMERFD || f->kind == FILE_SIGNALFD)
+        return positional ? -ESPIPE : evfd_write(f, buffer, count);
     if (f->kind != FILE_VNODE)
         return -EBADF;
     irq_spin_lock(&f->lock);
@@ -856,8 +954,12 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
     *revents = 0;
     if (!descriptor_ok(p, fd))
         return -EBADF;
-    struct open_file *f = p->files[fd];
-    
+    file_poll_description(p->files[fd], events, revents);
+    return 0;
+}
+
+void file_poll_description(struct open_file *f, short events, short *revents) {
+    *revents = 0;
     struct tty *t = NULL;
     if (f->kind == FILE_VNODE)
         t = devfs_get_tty(f->object.node);
@@ -877,6 +979,11 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
             *revents |= POLLOUT;
         if (events & POLLIN)
             *revents |= POLLIN;
+    } else if (f->kind == FILE_SOCKET) {
+        sock_poll(f, events, revents);
+    } else if (f->kind == FILE_EPOLL || f->kind == FILE_EVENTFD
+               || f->kind == FILE_TIMERFD || f->kind == FILE_SIGNALFD) {
+        evfd_poll(f, events, revents);
     } else {
         struct pipe_buffer *pipe = f->object.pipe;
         irq_spin_lock(&pipe->lock);
@@ -894,5 +1001,4 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
         }
         irq_spin_unlock(&pipe->lock);
     }
-    return 0;
 }

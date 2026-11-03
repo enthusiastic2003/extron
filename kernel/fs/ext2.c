@@ -1129,6 +1129,7 @@ static int ext2_node_readdir(struct vfs_node *node, size_t index,
             if (fmt == EXT2_S_IFDIR) res.file_type = EXT2_FT_DIR;
             else if (fmt == EXT2_S_IFLNK) res.file_type = EXT2_FT_SYMLINK;
             else if (fmt == EXT2_S_IFIFO) res.file_type = EXT2_FT_FIFO;
+            else if (fmt == EXT2_S_IFSOCK) res.file_type = EXT2_FT_SOCK;
             ext2_free_inode_info(ci);
         }
     }
@@ -1138,6 +1139,7 @@ static int ext2_node_readdir(struct vfs_node *node, size_t index,
         case EXT2_FT_SYMLINK:  entry->type = VFS_NODE_SYMLINK;  break;
         case EXT2_FT_REG_FILE: entry->type = VFS_NODE_REGULAR;  break;
         case EXT2_FT_FIFO:     entry->type = VFS_NODE_FIFO;     break;
+        case EXT2_FT_SOCK:     entry->type = VFS_NODE_SOCKET;   break;
         default:               entry->type = VFS_NODE_REGULAR;   break;
     }
     memcpy(entry->name, res.name, strlen(res.name) + 1);
@@ -1581,6 +1583,7 @@ static enum vfs_node_type ext2_mode_to_vfs_type(uint16_t mode)
         case EXT2_S_IFDIR: return VFS_NODE_DIRECTORY;
         case EXT2_S_IFLNK: return VFS_NODE_SYMLINK;
         case EXT2_S_IFIFO: return VFS_NODE_FIFO;
+        case EXT2_S_IFSOCK: return VFS_NODE_SOCKET;
         default:            return VFS_NODE_REGULAR;
     }
 }
@@ -1883,8 +1886,8 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     struct ext2_inode_info *dir = (struct ext2_inode_info *)parent->private;
     
     if (type != VFS_NODE_REGULAR && type != VFS_NODE_DIRECTORY
-            && type != VFS_NODE_FIFO)
-        return -ENOSYS;     /* files, directories and FIFOs only */
+            && type != VFS_NODE_FIFO && type != VFS_NODE_SOCKET)
+        return -ENOSYS;     /* files, directories, FIFOs and socket names only */
 
     /* Check for existing entry using the raw inode lookup — avoids creating
      * a VFS dentry that would steal the parent reference we don't own. */
@@ -1893,9 +1896,11 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
 
     uint16_t ext2_mode = (type == VFS_NODE_DIRECTORY) ? (EXT2_S_IFDIR | mode)
                        : (type == VFS_NODE_FIFO)      ? (EXT2_S_IFIFO | mode)
+                       : (type == VFS_NODE_SOCKET)    ? (EXT2_S_IFSOCK | mode)
                                                       : (EXT2_S_IFREG | mode);
     uint8_t ext2_type = (type == VFS_NODE_DIRECTORY) ? EXT2_FT_DIR
                       : (type == VFS_NODE_FIFO)      ? EXT2_FT_FIFO
+                      : (type == VFS_NODE_SOCKET)    ? EXT2_FT_SOCK
                                                      : EXT2_FT_REG_FILE;
     
     uint32_t ino;
