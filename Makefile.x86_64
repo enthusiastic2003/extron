@@ -104,6 +104,10 @@ $(DISK):
 
 disk: $(DISK)
 
+# Refresh the test programs on the existing disk, keeping everything else on it.
+disk-tests: $(DISK)
+	tools/refresh_disk_tests.sh $(DISK)
+
 disk-clean:
 	rm -f $(DISK)
 
@@ -121,7 +125,7 @@ check-all: esp
 	python3 tools/x86_boot_test.py --runtests
 
 run: QEMU_DISPLAY = gtk
-run: esp $(BUILD)/OVMF_VARS.fd $(DISK)
+run: esp $(BUILD)/OVMF_VARS.fd disk-tests
 	$(QEMU) $(QEMU_ARGS)
 
 # Headless boot under OVMF; passes iff the smoke test reports success.
@@ -157,5 +161,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-clean check-persist check-boot check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist check-boot check-all
 -include $(DEPS)
