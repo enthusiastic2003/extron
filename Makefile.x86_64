@@ -116,6 +116,10 @@ check-persist: esp
 check-boot: esp
 	python3 tools/x86_boot_test.py
 
+# Boot flow AND the full regression suite in one boot (one QEMU, one login).
+check-all: esp
+	python3 tools/x86_boot_test.py --runtests
+
 run: QEMU_DISPLAY = gtk
 run: esp $(BUILD)/OVMF_VARS.fd $(DISK)
 	$(QEMU) $(QEMU_ARGS)
@@ -153,5 +157,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-clean check-persist check-boot
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-clean check-persist check-boot check-all
 -include $(DEPS)

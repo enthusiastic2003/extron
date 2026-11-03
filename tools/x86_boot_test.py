@@ -2,8 +2,13 @@
 """Boot-flow test: init -> getty -> login -> shell, accounts, permissions,
 respawn and shutdown. Runs one QEMU and drives the serial console.
 
-  x86_boot_test.py            exit status 0 only if every check passes"""
-import fcntl, os, select, subprocess, sys, tempfile, time
+  x86_boot_test.py              boot-flow checks only
+  x86_boot_test.py --runtests   ...and the whole regression suite (`sh /bin/runtests`)
+                                in the same boot, before powering off
+Exit status 0 only if every check passes."""
+import fcntl, os, re, select, subprocess, sys, tempfile, time
+
+RUN_TESTS = "--runtests" in sys.argv
 
 tmp = tempfile.mkdtemp()
 vars_ = os.path.join(tmp, "vars.fd")
@@ -41,9 +46,12 @@ def wait(marker, timeout=30, since=0):
 def send(line):
     q.stdin.write(line.encode() + b"\n"); q.stdin.flush()
 
-def check(what, ok):
+def check(what, ok, detail=None):
     print(f"[boot] {what:<62} {'PASS' if ok else 'FAIL'}")
-    if not ok: failures.append(what)
+    if not ok:
+        failures.append(what)
+        if detail is not None:
+            print("       output was:", repr(detail.strip()[-600:]))
 
 def run(cmd):
     """Run a command and return its output. The end marker is built by the
@@ -80,7 +88,7 @@ check("/etc/shadow is root-only (0600)", "-rw-------" in out)
 out = run("printf '#!/bin/sh\\necho script-ran $1 $2\\n' > /tmp/s.sh; chmod +x /tmp/s.sh; /tmp/s.sh a b")
 check("execve runs #! scripts directly", "script-ran a b" in out)
 out = run("for a in sync init getty login poweroff gzip ls; do p=$(command -v $a) || echo MISS\\ING-$a; done; test -x /bin/sync && echo sync-$((0))k")
-check("every applet init/inittab needs exists (e.g. /bin/sync)", "MISSING" not in out and "sync-0k" in out)
+check("every applet init/inittab needs exists (e.g. /bin/sync)", "MISSING" not in out and "sync-0k" in out, out)
 out = run("cat /var/log/messages")
 check("init logs to /var/log/messages, not the console", "init started" in out)
 out = run("sleep 1 & wait; echo bg-ok")
@@ -113,6 +121,29 @@ check("login prompt after the user logs out", wait(b"login: ", 30, mark))
 
 # --- shutdown: data written before poweroff must be on disk -----------------
 check("root logs in again", login("root", have_prompt=True))
+
+if RUN_TESTS:
+    # The whole regression suite, in this same boot (init + getty + login are
+    # up and the data disk is mounted at /mnt).
+    run("cd /")
+    before = run("memfree")
+    mark = len(buf)
+    send("sh /bin/runtests")
+    done = wait(b"RUNTESTS DONE", 900, mark)
+    text = buf[mark:].decode(errors="replace").replace("\r", "")
+    check("regression suite finished (no hang)", done)
+    fails = re.findall(r"\] [^\n]*\bFAIL\b[^\n]*", text)
+    check("no regression test reported FAIL", not fails, "\n".join(fails[:10]))
+    check("no test exited non-zero", "[exit status" not in text,
+          "\n".join(l for l in text.splitlines() if "[exit status" in l))
+    check("no kernel panic / CPU exception",
+          "KERNEL PANIC" not in text and "CPU EXCEPTION" not in text)
+    after = run("memfree")
+    m1, m2 = re.search(r"MEMFREE (\d+)", before), re.search(r"MEMFREE (\d+)", after)
+    # Page cache and heap high-water legitimately grow once; flag only a big loss.
+    check("memory after the suite is within the warm-up allowance",
+          bool(m1 and m2) and int(m1.group(1)) - int(m2.group(1)) < 16384,
+          before + after)
 run("echo survives-poweroff > /mnt/boot-test-marker")
 send("poweroff")
 t0 = time.time()
