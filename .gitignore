@@ -43,3 +43,5 @@ initrd/
 # A misconfigured DESTDIR can reproduce the absolute repository path beneath
 # the sysroot. It is generated install state, never a deployable sysroot input.
 usr/mlibc-sysroot/home/
+build-x86_64/
+initrd.ext2

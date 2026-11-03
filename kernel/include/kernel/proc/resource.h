@@ -6,7 +6,7 @@
 
 struct proc;
 struct thread;
-struct aarch64_frame;
+struct arch_frame;
 
 /* Matches Extron's mlibc abi-bits/resource.h numbering. */
 #define PROC_RLIMIT_CPU         0
@@ -76,8 +76,8 @@ int resource_set_limit(struct proc *p, int resource,
                        const struct proc_rlimit *value);
 uint64_t resource_nofile_limit(struct proc *p);
 
-void resource_account_exception_enter(const struct aarch64_frame *frame);
-void resource_account_exception_leave(const struct aarch64_frame *frame);
+void resource_account_exception_enter(const struct arch_frame *frame);
+void resource_account_exception_leave(const struct arch_frame *frame);
 void resource_account_switch(struct thread *old, struct thread *next);
 
 void resource_get_self_usage(struct proc *p, struct user_rusage *out);

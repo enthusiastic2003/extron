@@ -105,6 +105,6 @@
  * syscall's result; the caller writes it into f->x[0] and falls through
  * to the normal RESTORE_CONTEXT+eret every other exception already
  * uses — no separate return path needed. */
-uint64_t syscall_dispatch(struct aarch64_frame *f);
+uint64_t syscall_dispatch(struct arch_frame *f);
 
 #endif

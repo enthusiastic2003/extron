@@ -16,7 +16,7 @@
  * range, where normal ELF images and the mmap arena cannot grow into it.
  * Each process has an independent TTBR0, so the VA can be identical in
  * every process. Keep one 64 KiB gap below the architectural limit. */
-#define USER_STACK_TOP 0x0000FFFFFFFF0000ULL
+#define USER_STACK_TOP ARCH_USER_STACK_TOP
 
 /* One page was enough while every payload was hand-written assembly with
  * no call depth and no locals. C code blows through that immediately —
@@ -508,8 +508,7 @@ int proc_exec_replace(struct proc *p, const char *binary_path,
     p->user_argc = out->argc;
     p->user_argv = out->argv;
 
-    __asm__ volatile ("msr ttbr0_el1, %0" :: "r"(p->ttbr0) : "memory");
-    flush_tlb();
+    arch_set_user_pagetable(p->ttbr0);
 
     vm_space_destroy(old);
     file_table_close_cloexec(p);

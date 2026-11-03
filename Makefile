@@ -33,8 +33,8 @@ CFLAGS  = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
           -MMD -MP \
           -Ikernel/include -Ikernel/arch/aarch64/include -g
 
-C_SRC   := $(shell find kernel -name "*.c")
-S_SRC   := $(shell find kernel -name "*.S")
+C_SRC   := $(shell find kernel -name "*.c" -not -path "kernel/arch/x86_64/*")
+S_SRC   := $(shell find kernel -name "*.S" -not -path "kernel/arch/x86_64/*")
 C_OBJ   := $(patsubst kernel/%.c,$(BUILD)/kernel/%.o,$(C_SRC))
 S_OBJ   := $(patsubst kernel/%.S,$(BUILD)/kernel/%.o,$(S_SRC))
 OBJ     := $(C_OBJ) $(S_OBJ)

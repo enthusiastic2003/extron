@@ -118,26 +118,26 @@ static void account_until(struct thread *t, uint64_t now) {
     t->cpu_account_start_ns = now;
 }
 
-void resource_account_exception_enter(const struct aarch64_frame *frame) {
+void resource_account_exception_enter(const struct arch_frame *frame) {
     struct thread *t = my_thread();
     if (!t || !frame || t->state != THREAD_RUNNING
             || !t->cpu_account_start_ns)
         return;
     uint64_t now = timer_uptime_ns();
     account_until(t, now);
-    if ((frame->spsr_el1 & 0xf) == 0)
+    if (FRAME_FROM_USER(frame))
         t->cpu_account_mode = RESOURCE_CPU_SYSTEM;
     t->cpu_account_start_ns = now;
 }
 
-void resource_account_exception_leave(const struct aarch64_frame *frame) {
+void resource_account_exception_leave(const struct arch_frame *frame) {
     struct thread *t = my_thread();
     if (!t || !frame || t->state != THREAD_RUNNING
             || !t->cpu_account_start_ns)
         return;
     uint64_t now = timer_uptime_ns();
     account_until(t, now);
-    t->cpu_account_mode = ((frame->spsr_el1 & 0xf) == 0)
+    t->cpu_account_mode = (FRAME_FROM_USER(frame))
         ? RESOURCE_CPU_USER : RESOURCE_CPU_SYSTEM;
     t->cpu_account_start_ns = now;
 }

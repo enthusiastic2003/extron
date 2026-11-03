@@ -114,7 +114,7 @@ static void write_ctl(uint64_t v) {
     __asm__ volatile ("msr cntp_ctl_el0, %0" :: "r"(v));
 }
 
-static void timer_irq_handler(struct aarch64_frame *f) {
+static void timer_irq_handler(struct arch_frame *f) {
     (void)f;
     write_tval(ticks_per_period); /* re-arm for the next period */
     tick_count++;

@@ -5,7 +5,7 @@
 // (Synchronous/IRQ/FIQ/SError) x 4 source contexts — and the CPU jumps
 // to whichever slot matches, with NOTHING pushed onto the stack
 // automatically (unlike x86's CPU-pushed error code/CS/RFLAGS/SS). Every
-// register in struct aarch64_frame (kernel/arch/aarch64/include/arch/
+// register in struct arch_frame (kernel/arch/aarch64/include/arch/
 // exceptions.h) is saved here explicitly, by us.
 //
 // Our kernel always runs at EL1h (SP_EL1) — set that way back in
@@ -181,7 +181,7 @@ vector_table:
 // Outside the fixed-size table: no 32-instruction constraint here.
 common_exception_entry:
     // x0 = frame pointer, x1 = exception type — both already correctly
-    // placed as exception_dispatch(struct aarch64_frame *f, int type)'s
+    // placed as exception_dispatch(struct arch_frame *f, int type)'s
     // first two AAPCS64 arguments.
     bl  exception_dispatch
     RESTORE_CONTEXT

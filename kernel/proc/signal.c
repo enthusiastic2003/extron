@@ -8,7 +8,7 @@
 #include <arch/irq_spinlock.h>
 #include <stddef.h>
 
-#define USER_VA_LIMIT (1ULL << 48)
+#define USER_VA_LIMIT ARCH_USER_VA_LIMIT
 #define SIGNAL_FRAME_MAGIC 0x455854524f4e5347ULL
 #define SIGKILL 9
 #define SIGSTOP 19
@@ -23,7 +23,6 @@
 #define SI_KERNEL 128
 #define SEGV_MAPERR 1
 #define SIGNAL_SA_NOCLDSTOP 1UL
-#define FPSIMD_MAGIC 0x46508001U
 
 struct user_sigset { uint64_t words[16]; };
 struct user_stack {
@@ -47,44 +46,11 @@ struct user_siginfo {
     } fields;
 };
 
-struct user_aarch64_ctx { uint32_t magic, size; };
-struct user_fpsimd_context {
-    struct user_aarch64_ctx head;
-    uint32_t fpsr;
-    uint32_t fpcr;
-    uint64_t vregs[64];
-};
-struct user_mcontext {
-    uint64_t fault_address;
-    uint64_t regs[31];
-    uint64_t sp;
-    uint64_t pc;
-    uint64_t pstate;
-    uint8_t reserved[4096];
-};
-struct user_ucontext {
-    uint64_t flags;
-    uint64_t link;
-    struct user_stack stack;
-    struct user_sigset sigmask;
-    struct user_mcontext mcontext;
-};
-struct user_signal_frame {
-    uint64_t magic;
-    uint64_t saved_tpidr_el0;
-    struct user_siginfo info;
-    struct user_ucontext ucontext;
-};
+#include <arch/signal_arch.h>
 
 _Static_assert(sizeof(struct user_siginfo) == 128, "siginfo_t ABI size");
 _Static_assert(offsetof(struct user_siginfo, fields) == 16,
                "siginfo_t union ABI offset");
-_Static_assert(sizeof(struct user_fpsimd_context) == 528,
-               "fpsimd_context ABI size");
-_Static_assert(offsetof(struct user_ucontext, mcontext) == 168,
-               "ucontext_t mcontext ABI offset");
-_Static_assert((sizeof(struct user_signal_frame) & 15) == 0,
-               "signal frame preserves AAPCS64 stack alignment");
 
 static bool user_range_ok(struct proc *p, uint64_t addr, uint64_t size) {
     if (!p || !size || addr >= USER_VA_LIMIT || size > USER_VA_LIMIT - addr)
@@ -411,30 +377,7 @@ static void fill_siginfo(struct user_siginfo *out,
     }
 }
 
-static void fill_ucontext(struct user_signal_frame *frame,
-                          const struct aarch64_frame *saved,
-                          uint64_t old_mask) {
-    struct user_ucontext *uc = &frame->ucontext;
-    memset(uc, 0, sizeof(*uc));
-    uc->sigmask.words[0] = old_mask;
-    uc->mcontext.fault_address = saved->far_el1;
-    memcpy(uc->mcontext.regs, saved->x, sizeof(saved->x));
-    uc->mcontext.sp = saved->sp_el0;
-    uc->mcontext.pc = saved->elr_el1;
-    uc->mcontext.pstate = saved->spsr_el1;
-    struct cpu_context state = {0};
-    cpu_context_save_fpsimd(&state);
-    frame->saved_tpidr_el0 = state.tpidr_el0;
-    struct user_fpsimd_context *fp =
-        (struct user_fpsimd_context *)uc->mcontext.reserved;
-    fp->head.magic = FPSIMD_MAGIC;
-    fp->head.size = sizeof(*fp);
-    fp->fpsr = (uint32_t)state.fpsr;
-    fp->fpcr = (uint32_t)state.fpcr;
-    memcpy(fp->vregs, state.v, sizeof(fp->vregs));
-}
-
-static bool deliver(struct aarch64_frame *f, int signo,
+static bool deliver(struct arch_frame *f, int signo,
                     struct signal_action action,
                     const struct signal_info *info, bool synchronous) {
     struct proc *p = my_proc();
@@ -458,7 +401,7 @@ static bool deliver(struct aarch64_frame *f, int signo,
         }
         proc_exit_current(-signo);
     }
-    uint64_t sp = (f->sp_el0 - sizeof(struct user_signal_frame)) & ~0xFULL;
+    uint64_t sp = arch_signal_frame_addr(f);
     if (!user_range_ok(p, sp, sizeof(struct user_signal_frame)))
         proc_exit_current(-SIGSEGV);
     struct user_signal_frame *frame = (struct user_signal_frame *)sp;
@@ -468,25 +411,19 @@ static bool deliver(struct aarch64_frame *f, int signo,
     /* pselect() keeps its temporary mask installed until this exact point.
      * The handler runs under that mask, while sigreturn restores the mask
      * that was active before pselect began waiting. */
-    fill_ucontext(frame, f, return_mask);
+    arch_signal_fill_ucontext(frame, f, return_mask);
     t->signal_mask |= action.mask;
     if (!(action.flags & SIGNAL_SA_NODEFER)) t->signal_mask |= signal_bit(signo);
     if (action.flags & SIGNAL_SA_RESETHAND)
         signal_action_set(p, signo, &(struct signal_action){0});
-    f->x[0] = (uint64_t)signo;
-    f->x[1] = (uint64_t)&frame->info;
-    f->x[2] = (uint64_t)&frame->ucontext;
-    f->x[30] = action.restorer;
-    f->elr_el1 = action.handler;
-    f->spsr_el1 = 0;
-    f->sp_el0 = sp;
+    arch_signal_enter(f, frame, sp, signo, &action);
     return true;
 }
 
-bool signal_deliver_pending(struct aarch64_frame *f) {
+bool signal_deliver_pending(struct arch_frame *f) {
     struct proc *p = my_proc();
     struct thread *t = my_thread();
-    if (!p || !t || (f->spsr_el1 & 0xf) != 0) return false;
+    if (!p || !t || !FRAME_FROM_USER(f)) return false;
     irq_spin_lock(&p->signal_lock);
     uint64_t thread_available = t->signal_pending & ~t->signal_mask;
     uint64_t process_available = p->signal_pending & ~t->signal_mask;
@@ -509,7 +446,7 @@ bool signal_deliver_pending(struct aarch64_frame *f) {
     return deliver(f, signo, action, &info, false);
 }
 
-bool signal_deliver_sync(struct aarch64_frame *f, int signo) {
+bool signal_deliver_sync(struct arch_frame *f, int signo) {
     struct proc *p = my_proc();
     struct thread *t = my_thread();
     if (!p || !t || (t->signal_mask & signal_bit(signo))) return false;
@@ -519,37 +456,22 @@ bool signal_deliver_sync(struct aarch64_frame *f, int signo) {
     struct signal_info info = {
         .signo = signo,
         .code = signo == SIGSEGV ? SEGV_MAPERR : SI_KERNEL,
-        .fault_address = f->far_el1,
+        .fault_address = FRAME_FAULT_ADDR(f),
     };
     return deliver(f, signo, action, &info, true);
 }
 
-uint64_t signal_sigreturn(struct aarch64_frame *f) {
+uint64_t signal_sigreturn(struct arch_frame *f) {
     struct proc *p = my_proc();
-    uint64_t sp = f->sp_el0;
+    uint64_t sp = FRAME_USER_SP(f);
     if (!user_range_ok(p, sp, sizeof(struct user_signal_frame)))
         proc_exit_current(-SIGSEGV);
     struct user_signal_frame *frame = (struct user_signal_frame *)sp;
     if (frame->magic != SIGNAL_FRAME_MAGIC)
         proc_exit_current(-SIGSEGV);
-    struct user_mcontext *mc = &frame->ucontext.mcontext;
-    if (mc->pc >= USER_VA_LIMIT || mc->sp >= USER_VA_LIMIT)
+    if (!arch_signal_restore(f, frame))
         proc_exit_current(-SIGSEGV);
-    struct user_fpsimd_context *fp =
-        (struct user_fpsimd_context *)mc->reserved;
-    if (fp->head.magic != FPSIMD_MAGIC || fp->head.size != sizeof(*fp))
-        proc_exit_current(-SIGSEGV);
-    memcpy(f->x, mc->regs, sizeof(f->x));
-    f->elr_el1 = mc->pc;
-    f->sp_el0 = mc->sp;
-    f->spsr_el1 = 0;
     my_thread()->signal_mask = frame->ucontext.sigmask.words[0]
         & ~signal_bit(SIGKILL) & ~signal_bit(SIGSTOP);
-    struct cpu_context state = {0};
-    state.tpidr_el0 = frame->saved_tpidr_el0;
-    state.fpsr = fp->fpsr;
-    state.fpcr = fp->fpcr;
-    memcpy(state.v, fp->vregs, sizeof(state.v));
-    cpu_context_restore_fpsimd(&state);
-    return f->x[0];
+    return FRAME_RET(f);
 }

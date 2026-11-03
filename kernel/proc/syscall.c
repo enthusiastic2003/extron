@@ -28,12 +28,12 @@
  * execve() has to rewrite where the caller resumes. Both of those live
  * in the frame SAVE_CONTEXT built, so both need to see it.
  */
-typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t, struct aarch64_frame *);
+typedef uint64_t (*syscall_fn)(uint64_t, uint64_t, uint64_t, struct arch_frame *);
 
 /* boot.S sets TCR_EL1.T0SZ=16, so TTBR0 — the calling process's own
  * table — translates VA[0, 2^48). At or above this is either the
  * kernel's TTBR1 half or the non-canonical hole between them. */
-#define USER_VA_LIMIT (1ULL << 48)
+#define USER_VA_LIMIT ARCH_USER_VA_LIMIT
 
 /*
  * Validate a user-supplied buffer before the kernel dereferences it.
@@ -88,7 +88,7 @@ static bool user_buffer_ok(struct proc *p, uint64_t addr, uint64_t len) {
  * console lock, and user_buffer_ok() above needs to become a faulting
  * copy_to_user(). Both change together or neither does. */
 static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)f;
     if (!user_buffer_ok(my_proc(), buf_addr, count)) {
         kprintf("[SYSCALL write] rejected buffer %p (+%lu) from pid %lu\n",
@@ -108,11 +108,11 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf_addr, uint64_t count,
  * anyway, for ABI-number symmetry with x86 and as a fallback, even
  * though it may never actually get called. */
 static uint64_t sys_tcb_set(uint64_t addr, uint64_t arg2, uint64_t arg3,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)arg2;
     (void)arg3;
     (void)f;
-    __asm__ volatile ("msr tpidr_el0, %0" :: "r"(addr) : "memory");
+    arch_set_thread_pointer(addr);
     return 0;
 }
 
@@ -129,7 +129,7 @@ static uint64_t sys_tcb_set(uint64_t addr, uint64_t arg2, uint64_t arg3,
  * still THREAD_RUNNING when called, so no separate queue removal is needed.
  */
 static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)arg2;
     (void)arg3;
     (void)f;
@@ -147,13 +147,13 @@ struct user_thread_create_args {
 };
 
 static uint64_t sys_gettid(uint64_t a, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     return my_thread() ? my_thread()->tid : (uint64_t)-1;
 }
 
 static uint64_t sys_thread_create(uint64_t args_addr, uint64_t b, uint64_t c,
-                                  struct aarch64_frame *f) {
+                                  struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, args_addr, sizeof(struct user_thread_create_args)))
@@ -174,7 +174,7 @@ static uint64_t sys_thread_create(uint64_t args_addr, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_thread_exit(uint64_t a, uint64_t b, uint64_t c,
-                                struct aarch64_frame *f) {
+                                struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     struct thread *t = my_thread();
@@ -201,7 +201,7 @@ static uint64_t sys_thread_exit(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_thread_join(uint64_t tid, uint64_t b, uint64_t c,
-                                struct aarch64_frame *f) {
+                                struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!p || tid == my_thread()->tid)
@@ -220,7 +220,7 @@ static uint64_t sys_thread_join(uint64_t tid, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_futex_wait(uint64_t word_addr, uint64_t expected,
-                               uint64_t timeout_ms, struct aarch64_frame *f) {
+                               uint64_t timeout_ms, struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if ((word_addr & (sizeof(int) - 1))
@@ -236,7 +236,7 @@ static uint64_t sys_futex_wait(uint64_t word_addr, uint64_t expected,
 }
 
 static uint64_t sys_futex_wake(uint64_t word_addr, uint64_t b, uint64_t c,
-                               struct aarch64_frame *f) {
+                               struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if ((word_addr & (sizeof(int) - 1))
@@ -253,7 +253,7 @@ struct user_sigaction {
 };
 
 static uint64_t sys_sigaction(uint64_t signo, uint64_t action_addr,
-                              uint64_t old_addr, struct aarch64_frame *f) {
+                              uint64_t old_addr, struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if (signo < 1 || signo > SIGNAL_MAX)
@@ -293,7 +293,7 @@ static uint64_t sys_sigaction(uint64_t signo, uint64_t action_addr,
 }
 
 static uint64_t sys_kill(uint64_t pid, uint64_t signo, uint64_t c,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)c; (void)f;
     int64_t selector = (int64_t)pid;
     if (selector > 0) {
@@ -312,7 +312,7 @@ static uint64_t sys_kill(uint64_t pid, uint64_t signo, uint64_t c,
 }
 
 static uint64_t sys_tgkill(uint64_t pid, uint64_t tid, uint64_t signo,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)f;
     if ((int64_t)pid <= 0 || (int64_t)tid <= 0)
         return (uint64_t)-1;
@@ -329,7 +329,7 @@ static uint64_t sys_tgkill(uint64_t pid, uint64_t tid, uint64_t signo,
 }
 
 static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_addr,
-                                uint64_t old_addr, struct aarch64_frame *f) {
+                                uint64_t old_addr, struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     uint64_t set = 0, old = 0;
@@ -351,7 +351,7 @@ static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_addr,
 }
 
 static uint64_t sys_sigreturn(uint64_t a, uint64_t b, uint64_t c,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)a; (void)b; (void)c;
     return signal_sigreturn(f);
 }
@@ -359,7 +359,7 @@ static uint64_t sys_sigreturn(uint64_t a, uint64_t b, uint64_t c,
 /* fd 0 is the system console TTY. keyboard.c fills the raw
  * interrupt-driven ring; tty_read() owns termios policy. */
 static uint64_t sys_read(uint64_t fd, uint64_t buf_addr, uint64_t count,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     /* Checked before blocking, not after: kbd_getc() sleeps, and coming
      * back from that only to discover the destination was never valid
@@ -392,7 +392,7 @@ struct extron_pollfd {
 };
 
 static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if (!p || fd >= PROC_MAX_FDS || !p->files[fd])
@@ -501,7 +501,7 @@ static long poll_wait(struct extron_pollfd *fds, size_t count,
 }
 
 static uint64_t sys_poll(uint64_t fds_addr, uint64_t count, uint64_t timeout_raw,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     if (count > PROC_MAX_FDS
             || count > (uint64_t)-1 / sizeof(struct extron_pollfd))
@@ -524,7 +524,7 @@ struct extron_ppoll_request {
 };
 
 static uint64_t sys_ppoll(uint64_t request_addr, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, request_addr, sizeof(struct extron_ppoll_request)))
@@ -569,7 +569,7 @@ static uint64_t sys_ppoll(uint64_t request_addr, uint64_t b, uint64_t c,
 #define F_DUPFD_CLOEXEC 1030
 
 static uint64_t sys_pipe(uint64_t fds_addr, uint64_t flags, uint64_t c,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)c; (void)f;
     if (!user_buffer_ok(my_proc(), fds_addr, 2 * sizeof(int)))
         return (uint64_t)-EFAULT;
@@ -583,7 +583,7 @@ static uint64_t sys_pipe(uint64_t fds_addr, uint64_t flags, uint64_t c,
 }
 
 static uint64_t sys_dup(uint64_t oldfd, uint64_t flags, uint64_t c,
-                        struct aarch64_frame *f) {
+                        struct arch_frame *f) {
     (void)c; (void)f;
     if (flags & ~O_CLOEXEC)
         return (uint64_t)-EINVAL;
@@ -592,7 +592,7 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t flags, uint64_t c,
 }
 
 static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t flags,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     if (flags & ~O_CLOEXEC)
         return (uint64_t)-EINVAL;
@@ -603,7 +603,7 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t flags,
 }
 
 static uint64_t sys_fcntl(uint64_t fd, uint64_t request, uint64_t arg,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)f;
     switch (request) {
         case F_DUPFD:
@@ -631,7 +631,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t request, uint64_t arg,
  * thread_wakeup_expired() (kernel/drivers/timer.c's IRQ handler) simply
  * can't run concurrently with this. */
 static uint64_t sys_sleep(uint64_t seconds, uint64_t nanos, uint64_t arg3,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)arg3;
     (void)f;
     struct thread *t = my_thread();
@@ -658,7 +658,7 @@ static uint64_t sys_sleep(uint64_t seconds, uint64_t nanos, uint64_t arg3,
  * POSIX; it always resumes via a signal, hence the unconditional
  * -EINTR once schedule() returns. */
 static uint64_t sys_pause(uint64_t a, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct thread *t = my_thread();
     t->chan = NULL;
@@ -669,7 +669,7 @@ static uint64_t sys_pause(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)a;
     (void)b;
     (void)c;
@@ -679,7 +679,7 @@ static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_anon_alloc(uint64_t size, uint64_t arg2, uint64_t arg3,
-                               struct aarch64_frame *f) {
+                               struct arch_frame *f) {
     (void)arg2;
     (void)arg3;
     (void)f;
@@ -688,7 +688,7 @@ static uint64_t sys_anon_alloc(uint64_t size, uint64_t arg2, uint64_t arg3,
 }
 
 static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)arg3;
     (void)f;
     struct proc *p = my_proc();
@@ -746,7 +746,7 @@ struct mmap_request {
  * silently pretended to work.
  */
 static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, request_addr, sizeof(struct mmap_request)))
@@ -888,7 +888,7 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)c; (void)f;
     if ((addr & (PAGE_SIZE - 1)) || !size
             || size > (uint64_t)-1 - (PAGE_SIZE - 1))
@@ -899,7 +899,7 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
 }
 
 static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
-                             struct aarch64_frame *f) {
+                             struct arch_frame *f) {
     (void)f;
     if ((addr & (PAGE_SIZE - 1)) || (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)))
         return (uint64_t)-EINVAL;
@@ -913,7 +913,7 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
 }
 
 static uint64_t sys_msync(uint64_t addr, uint64_t len, uint64_t flags,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)f;
     if ((addr & (PAGE_SIZE - 1)) || !len)
         return (uint64_t)-EINVAL;
@@ -934,7 +934,7 @@ static uint64_t sys_msync(uint64_t addr, uint64_t len, uint64_t flags,
  * success (power_reset() loops on the SoC actually resetting), so
  * there's no "success" value to report — only the permission failure. */
 static uint64_t sys_reboot(uint64_t a, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
@@ -954,7 +954,7 @@ static uint64_t sys_reboot(uint64_t a, uint64_t b, uint64_t c,
  * ~28.6ms). timer_uptime_ms() reads CNTPCT_EL0 instead — see its comment
  * in kernel/drivers/timer.c. */
 static uint64_t sys_uptime_ms(uint64_t a, uint64_t b, uint64_t c,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)a;
     (void)b;
     (void)c;
@@ -963,7 +963,7 @@ static uint64_t sys_uptime_ms(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_clock_get(uint64_t clock, uint64_t b, uint64_t c,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     if (clock == 0)
         return (uint64_t)timer_realtime_ns();
@@ -973,7 +973,7 @@ static uint64_t sys_clock_get(uint64_t clock, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_clock_set(uint64_t clock, uint64_t seconds,
-                              uint64_t nanos, struct aarch64_frame *f) {
+                              uint64_t nanos, struct arch_frame *f) {
     (void)f;
     if (clock != 0 || (int64_t)nanos < 0 || nanos >= 1000000000ULL)
         return (uint64_t)-EINVAL;
@@ -1006,7 +1006,7 @@ static uint64_t sys_clock_set(uint64_t clock, uint64_t seconds,
  * arch_translate_vm_flags() marks it NX — data should never be
  * executable, and a WAD is the archetypal attacker-controlled blob.
  */
-static uint64_t sys_map_initrd(uint64_t a, uint64_t b, uint64_t c, struct aarch64_frame *frame) { return (uint64_t)-38; }
+static uint64_t sys_map_initrd(uint64_t a, uint64_t b, uint64_t c, struct arch_frame *frame) { return (uint64_t)-38; }
 
 /*
  * Copy a NUL-terminated string out of user memory.
@@ -1043,7 +1043,7 @@ static long copy_user_string(struct proc *p, uint64_t uaddr, char *dst, size_t m
 }
 
 static uint64_t sys_open(uint64_t path_addr, uint64_t flags, uint64_t mode,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     char path[VFS_PATH_MAX + 1];
     long result = copy_user_string(my_proc(), path_addr, path, sizeof(path));
@@ -1053,19 +1053,19 @@ static uint64_t sys_open(uint64_t path_addr, uint64_t flags, uint64_t mode,
 }
 
 static uint64_t sys_close(uint64_t fd, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return (uint64_t)file_close(my_proc(), (int)fd);
 }
 
 static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)f;
     return (uint64_t)file_seek(my_proc(), (int)fd, (int64_t)offset, (int)whence);
 }
 
 static uint64_t sys_mkdir(uint64_t path_addr, uint64_t mode, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)c; (void)f;
     char path[VFS_PATH_MAX + 1];
     long result = copy_user_string(my_proc(), path_addr, path, sizeof(path));
@@ -1099,19 +1099,19 @@ static uint64_t sys_unlink_common(uint64_t path_addr, int directory) {
 }
 
 static uint64_t sys_unlink(uint64_t path_addr, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return sys_unlink_common(path_addr, 0);
 }
 
 static uint64_t sys_rmdir(uint64_t path_addr, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return sys_unlink_common(path_addr, 1);
 }
 
 static uint64_t sys_rename(uint64_t old_addr, uint64_t new_addr, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)c; (void)f;
     char old_path[VFS_PATH_MAX + 1], new_path[VFS_PATH_MAX + 1];
     struct proc *p = my_proc();
@@ -1132,7 +1132,7 @@ static uint64_t sys_rename(uint64_t old_addr, uint64_t new_addr, uint64_t c,
 }
 
 static uint64_t sys_link(uint64_t old_addr, uint64_t new_addr, uint64_t flags,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     char old_path[VFS_PATH_MAX + 1], new_path[VFS_PATH_MAX + 1];
     struct proc *p = my_proc();
@@ -1150,7 +1150,7 @@ static uint64_t sys_link(uint64_t old_addr, uint64_t new_addr, uint64_t flags,
 }
 
 static uint64_t sys_symlink(uint64_t target_addr, uint64_t link_addr, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)c; (void)f;
     char target[VFS_PATH_MAX + 1], link_path[VFS_PATH_MAX + 1];
     struct proc *p = my_proc();
@@ -1168,7 +1168,7 @@ static uint64_t sys_symlink(uint64_t target_addr, uint64_t link_addr, uint64_t c
 }
 
 static uint64_t sys_readlink(uint64_t path_addr, uint64_t buffer,
-                             uint64_t size, struct aarch64_frame *f) {
+                             uint64_t size, struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, buffer, size)) return (uint64_t)-EFAULT;
@@ -1185,13 +1185,13 @@ static uint64_t sys_readlink(uint64_t path_addr, uint64_t buffer,
 }
 
 static uint64_t sys_getpid(uint64_t a, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     return my_proc()->pid;
 }
 
 static uint64_t sys_getuid(uint64_t a, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
@@ -1201,7 +1201,7 @@ static uint64_t sys_getuid(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_geteuid(uint64_t a, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
@@ -1211,7 +1211,7 @@ static uint64_t sys_geteuid(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_getgid(uint64_t a, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
@@ -1221,7 +1221,7 @@ static uint64_t sys_getgid(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_getegid(uint64_t a, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
@@ -1261,25 +1261,25 @@ static uint64_t set_group_id(uint32_t gid, bool effective_only) {
 }
 
 static uint64_t sys_setuid(uint64_t uid, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return set_user_id((uint32_t)uid, false);
 }
 
 static uint64_t sys_seteuid(uint64_t uid, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return set_user_id((uint32_t)uid, true);
 }
 
 static uint64_t sys_setgid(uint64_t gid, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return set_group_id((uint32_t)gid, false);
 }
 
 static uint64_t sys_setegid(uint64_t gid, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return set_group_id((uint32_t)gid, true);
 }
@@ -1294,7 +1294,7 @@ static uint64_t sys_setegid(uint64_t gid, uint64_t b, uint64_t c,
  * failure would leave the process in a set of IDs no caller ever asked
  * for. */
 static uint64_t sys_setresuid(uint64_t ruid_in, uint64_t euid_in,
-                              uint64_t suid_in, struct aarch64_frame *f) {
+                              uint64_t suid_in, struct arch_frame *f) {
     (void)f;
     int32_t new_r = (int32_t)ruid_in, new_e = (int32_t)euid_in,
             new_s = (int32_t)suid_in;
@@ -1319,7 +1319,7 @@ static uint64_t sys_setresuid(uint64_t ruid_in, uint64_t euid_in,
 }
 
 static uint64_t sys_setresgid(uint64_t rgid_in, uint64_t egid_in,
-                              uint64_t sgid_in, struct aarch64_frame *f) {
+                              uint64_t sgid_in, struct arch_frame *f) {
     (void)f;
     int32_t new_r = (int32_t)rgid_in, new_e = (int32_t)egid_in,
             new_s = (int32_t)sgid_in;
@@ -1344,7 +1344,7 @@ static uint64_t sys_setresgid(uint64_t rgid_in, uint64_t egid_in,
 }
 
 static uint64_t sys_getgroups(uint64_t size, uint64_t list_addr, uint64_t c,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
@@ -1365,7 +1365,7 @@ static uint64_t sys_getgroups(uint64_t size, uint64_t list_addr, uint64_t c,
 }
 
 static uint64_t sys_setgroups(uint64_t size, uint64_t list_addr, uint64_t c,
-                              struct aarch64_frame *f) {
+                              struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     if (size > VFS_GROUP_MAX)
@@ -1386,20 +1386,20 @@ static uint64_t sys_setgroups(uint64_t size, uint64_t list_addr, uint64_t c,
 }
 
 static uint64_t sys_umask(uint64_t mask, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     return proc_set_umask(my_proc(), (uint32_t)mask);
 }
 
 static uint64_t sys_getppid(uint64_t a, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     return p->parent ? p->parent->pid : 0;
 }
 
 static uint64_t sys_getpgid(uint64_t pid, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *caller = my_proc();
     struct proc *target = pid ? proc_lookup(pid) : caller;
@@ -1409,7 +1409,7 @@ static uint64_t sys_getpgid(uint64_t pid, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_setpgid(uint64_t pid, uint64_t pgid, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *caller = my_proc();
     struct proc *target = pid ? proc_lookup(pid) : caller;
@@ -1427,7 +1427,7 @@ static uint64_t sys_setpgid(uint64_t pid, uint64_t pgid, uint64_t c,
 }
 
 static uint64_t sys_setsid(uint64_t a, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)a; (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (p->pgid == p->pid)
@@ -1438,7 +1438,7 @@ static uint64_t sys_setsid(uint64_t a, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_getcwd(uint64_t buffer, uint64_t size, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     if (!size || !user_buffer_ok(p, buffer, size))
@@ -1452,7 +1452,7 @@ static uint64_t sys_getcwd(uint64_t buffer, uint64_t size, uint64_t c,
 }
 
 static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     char path[VFS_PATH_MAX + 1];
     struct proc *p = my_proc();
@@ -1484,7 +1484,7 @@ static uint64_t sys_chdir(uint64_t path_addr, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_fchdir(uint64_t fd, uint64_t b, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     struct vfs_path path;
@@ -1500,7 +1500,7 @@ static uint64_t sys_fchdir(uint64_t fd, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_readdir(uint64_t fd, uint64_t buffer, uint64_t size,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)f;
     if (!user_buffer_ok(my_proc(), buffer, size)) return (uint64_t)-EFAULT;
     return (uint64_t)file_readdir(my_proc(), (int)fd, (void *)buffer, size);
@@ -1557,7 +1557,7 @@ _Static_assert(sizeof(struct extron_stat) == 144,
                "mlibc AArch64 stat: struct size");
 
 static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, stat_addr, sizeof(struct extron_stat)))
@@ -1629,7 +1629,7 @@ static void store_extron_stat(struct extron_stat *st,
 }
 
 static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, request_addr, sizeof(struct path_at_request)))
@@ -1825,7 +1825,7 @@ static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t c,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     struct vfs_node *node;
@@ -1839,7 +1839,7 @@ static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t c,
 }
 
 static uint64_t sys_fchown(uint64_t fd, uint64_t uid, uint64_t gid,
-                           struct aarch64_frame *f) {
+                           struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     struct vfs_node *node;
@@ -1853,7 +1853,7 @@ static uint64_t sys_fchown(uint64_t fd, uint64_t uid, uint64_t gid,
 }
 
 static uint64_t sys_futimens(uint64_t fd, uint64_t times_addr, uint64_t c,
-                             struct aarch64_frame *f) {
+                             struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     struct vfs_node *node;
@@ -1918,7 +1918,7 @@ static uint64_t sys_futimens(uint64_t fd, uint64_t times_addr, uint64_t c,
  * returns the child's pid the ordinary way.
  */
 static uint64_t sys_fork(uint64_t a, uint64_t b, uint64_t c,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)a;
     (void)b;
     (void)c;
@@ -1949,7 +1949,7 @@ static uint64_t sys_fork(uint64_t a, uint64_t b, uint64_t c,
  * return value there, so returning anything else would overwrite it.
  */
 static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
-                           uint64_t envp_addr, struct aarch64_frame *f) {
+                           uint64_t envp_addr, struct arch_frame *f) {
     (void)envp_addr;
     struct proc *p = my_proc();
 
@@ -2057,14 +2057,9 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
     /* Start the new program from a clean register state rather than
      * inheriting the old one's. Anything left behind would be a value
      * from a program that no longer exists. */
-    memset(f->x, 0, sizeof(f->x));
-    f->x[0]     = img.argc;
-    f->x[1]     = img.argv;
-    f->elr_el1  = img.entry;
-    f->spsr_el1 = 0;                  /* EL0t, all masks clear */
-    f->sp_el0   = img.user_sp;
+    arch_frame_init_user(f, img.entry, img.user_sp, img.argc, img.argv);
 
-    return f->x[0];
+    return FRAME_RET(f);
 }
 
 /*
@@ -2144,7 +2139,7 @@ static uint64_t wait_common(uint64_t status_addr, int64_t selector,
 
 static uint64_t sys_wait(uint64_t status_addr, uint64_t selector_raw,
                          uint64_t options_raw,
-                         struct aarch64_frame *f) {
+                         struct arch_frame *f) {
     (void)f;
     return wait_common(status_addr, (int64_t)selector_raw,
                        (int)options_raw, 0);
@@ -2159,7 +2154,7 @@ struct user_wait4_request {
 };
 
 static uint64_t sys_wait4(uint64_t request_addr, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, request_addr, sizeof(struct user_wait4_request)))
@@ -2171,7 +2166,7 @@ static uint64_t sys_wait4(uint64_t request_addr, uint64_t b, uint64_t c,
 }
 
 static uint64_t sys_getrusage(uint64_t scope_raw, uint64_t usage_addr,
-                              uint64_t c, struct aarch64_frame *f) {
+                              uint64_t c, struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, usage_addr, sizeof(struct user_rusage)))
@@ -2187,7 +2182,7 @@ static uint64_t sys_getrusage(uint64_t scope_raw, uint64_t usage_addr,
 }
 
 static uint64_t sys_getrlimit(uint64_t resource, uint64_t limit_addr,
-                              uint64_t c, struct aarch64_frame *f) {
+                              uint64_t c, struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, limit_addr, sizeof(struct proc_rlimit)))
@@ -2201,7 +2196,7 @@ static uint64_t sys_getrlimit(uint64_t resource, uint64_t limit_addr,
 }
 
 static uint64_t sys_setrlimit(uint64_t resource, uint64_t limit_addr,
-                              uint64_t c, struct aarch64_frame *f) {
+                              uint64_t c, struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, limit_addr, sizeof(struct proc_rlimit)))
@@ -2223,7 +2218,7 @@ static spinlock_t hostname_lock = SPINLOCK_INIT;
 static char system_hostname[65] = "extron";
 
 static uint64_t sys_uname(uint64_t address, uint64_t b, uint64_t c,
-                          struct aarch64_frame *f) {
+                          struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, address, sizeof(struct user_utsname)))
@@ -2245,7 +2240,7 @@ static uint64_t sys_uname(uint64_t address, uint64_t b, uint64_t c,
  * length bytes and is restricted to root. The configured hostname is global,
  * as it describes the running system rather than one process. */
 static uint64_t sys_hostname(uint64_t operation, uint64_t address,
-                             uint64_t length, struct aarch64_frame *f) {
+                             uint64_t length, struct arch_frame *f) {
     (void)f;
     struct proc *p = my_proc();
     if (operation == 0) {
@@ -2286,7 +2281,7 @@ static uint64_t sys_hostname(uint64_t operation, uint64_t address,
  * returns EINVAL. Keeping the result in an output pointer distinguishes those
  * two cases from the kernel's usual negative errno convention. */
 static uint64_t sys_sysconf(uint64_t number, uint64_t result_address,
-                            uint64_t c, struct aarch64_frame *f) {
+                            uint64_t c, struct arch_frame *f) {
     (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, result_address, sizeof(int64_t)))
@@ -2347,7 +2342,7 @@ struct user_statvfs_request {
 };
 
 static uint64_t sys_statvfs(uint64_t request_address, uint64_t b, uint64_t c,
-                            struct aarch64_frame *f) {
+                            struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, request_address, sizeof(struct user_statvfs_request)))
@@ -2409,7 +2404,7 @@ struct user_pathconf_request {
 };
 
 static uint64_t sys_pathconf(uint64_t request_address, uint64_t b, uint64_t c,
-                             struct aarch64_frame *f) {
+                             struct arch_frame *f) {
     (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     if (!user_buffer_ok(p, request_address, sizeof(struct user_pathconf_request)))
@@ -2551,11 +2546,11 @@ static const syscall_fn syscall_table[] = {
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))
 
-uint64_t syscall_dispatch(struct aarch64_frame *f) {
-    uint64_t nr   = f->x[8];
-    uint64_t arg1 = f->x[0];
-    uint64_t arg2 = f->x[1];
-    uint64_t arg3 = f->x[2];
+uint64_t syscall_dispatch(struct arch_frame *f) {
+    uint64_t nr   = FRAME_SYSNR(f);
+    uint64_t arg1 = FRAME_ARG(f, 0);
+    uint64_t arg2 = FRAME_ARG(f, 1);
+    uint64_t arg3 = FRAME_ARG(f, 2);
 
     if (nr >= SYSCALL_COUNT || !syscall_table[nr]) {
         kprintf("[SYSCALL] invalid syscall number %lu\n", (unsigned long)nr);

@@ -60,24 +60,7 @@ void sched_init(void) {
 void proc_bootstrap_trampoline(void) {
     struct thread *t = current_thread;
     struct proc *p = t->process;
-    /* argc/argv land in x0/x1, where AAPCS64 puts main()'s first two
-     * arguments — so entering _start is an ordinary call as far as the
-     * process can tell. Before this, x0/x1 held whatever the kernel had
-     * last left in them, and usr/lib/crt0.S zeroed them itself to hide
-     * it; it now passes them straight through. */
-    register uint64_t argc   __asm__("x0") = p->user_argc;
-    register uint64_t argv   __asm__("x1") = p->user_argv;
-    register uint64_t elr    __asm__("x2") = t->entry;
-    register uint64_t spsr   __asm__("x3") = 0x0;   /* EL0t, all masks clear */
-    register uint64_t sp_el0 __asm__("x4") = t->user_sp;
-    __asm__ volatile (
-        "msr elr_el1, %2\n\t"
-        "msr spsr_el1, %3\n\t"
-        "msr sp_el0, %4\n\t"
-        "eret"
-        :: "r"(argc), "r"(argv), "r"(elr), "r"(spsr), "r"(sp_el0)
-        : "memory"
-    );
+    arch_enter_user(t->entry, t->user_sp, p->user_argc, p->user_argv);
     __builtin_unreachable();
 }
 
@@ -121,9 +104,7 @@ void proc_bootstrap_trampoline(void) {
  * and eret takes DAIF from SPSR_EL1.
  */
 static void install_and_switch(struct thread *old, struct thread *next) {
-    uint64_t daif;
-    __asm__ volatile ("mrs %0, daif" : "=r"(daif));
-    __asm__ volatile ("msr daifset, #3" ::: "memory");
+    uint64_t daif = arch_irq_save();
 
     resource_account_switch(old, next);
 
@@ -131,10 +112,9 @@ static void install_and_switch(struct thread *old, struct thread *next) {
     current_thread = next;
 
     if (!old || old->process->ttbr0 != next->process->ttbr0) {
-        __asm__ volatile ("msr ttbr0_el1, %0"
-                          :: "r"(next->process->ttbr0) : "memory");
-        flush_tlb();
+        arch_set_user_pagetable(next->process->ttbr0);
     }
+    arch_set_kernel_stack(next->kernel_stack_top);
 
     /* sched_start() has no real "old" proc — a throwaway local stands in
      * for context_switch's save-half; nothing ever reads it back, and
@@ -142,7 +122,7 @@ static void install_and_switch(struct thread *old, struct thread *next) {
     struct cpu_context scratch = {0};
     context_switch(old ? &old->context : &scratch, &next->context);
 
-    __asm__ volatile ("msr daif, %0" :: "r"(daif) : "memory");
+    arch_irq_restore(daif);
 }
 
 /*
@@ -162,14 +142,12 @@ static void install_and_switch(struct thread *old, struct thread *next) {
  * and restored around each wait rather than assumed.
  */
 static struct thread *sched_idle_wait(void) {
-    uint64_t daif;
-    __asm__ volatile ("mrs %0, daif" : "=r"(daif));
+    uint64_t daif = arch_irq_save();
 
     in_idle = 1;
     for (;;) {
-        __asm__ volatile ("msr daifclr, #3");
-        __asm__ volatile ("wfi");
-        __asm__ volatile ("msr daif, %0" :: "r"(daif) : "memory");
+        arch_wait_for_interrupt();
+        arch_irq_restore(daif);
 
         struct thread *next = sched_policy_pick_next();
         if (next) {
@@ -247,7 +225,7 @@ void schedule(void) {
 void sched_start(void) {
     struct thread *first = sched_policy_pick_next();
     if (!first) {
-        panic("aarch64 sched_start: no process to start");
+        panic("sched_start: no process to start");
     }
 
     kprintf("[SCHED] Launching PID %lu TID %lu (entry=%p)\n",
@@ -259,5 +237,5 @@ void sched_start(void) {
     /* install_and_switch()'s context_switch() never returns here: the
      * very first proc has never run, so its saved context.lr points at
      * proc_bootstrap_trampoline(), which eret's and never comes back. */
-    panic("aarch64 sched_start: unreachable");
+    panic("sched_start: unreachable");
 }

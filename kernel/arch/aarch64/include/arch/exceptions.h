@@ -13,7 +13,7 @@
  * syndrome, an "what/why" field) plus FAR_EL1 (fault address) stand in
  * for x86's error_code/cr2.
  */
-struct aarch64_frame {
+struct arch_frame {
     uint64_t x[31]; /* x0-x30 (x30 = LR) */
     uint64_t elr_el1;
     uint64_t spsr_el1;
@@ -36,6 +36,28 @@ struct aarch64_frame {
     uint64_t sp_el0;
 };
 
+#define ARCH_FRAME_SIZE 288
+
+/* Arch-neutral trap-frame accessors used by shared kernel code. */
+#define FRAME_SYSNR(f)       ((f)->x[8])
+#define FRAME_ARG(f, n)      ((f)->x[n])
+#define FRAME_RET(f)         ((f)->x[0])
+#define FRAME_FROM_USER(f)   (((f)->spsr_el1 & 0xf) == 0)
+#define FRAME_USER_SP(f)     ((f)->sp_el0)
+#define FRAME_FAULT_ADDR(f)  ((f)->far_el1)
+
+/* Rewrite `f` so the next return-to-user starts a fresh program image. */
+static inline void arch_frame_init_user(struct arch_frame *f, uint64_t entry,
+                                        uint64_t sp, uint64_t arg0,
+                                        uint64_t arg1) {
+    __builtin_memset(f->x, 0, sizeof(f->x));
+    f->x[0]     = arg0;
+    f->x[1]     = arg1;
+    f->elr_el1  = entry;
+    f->spsr_el1 = 0;                  /* EL0t, all masks clear */
+    f->sp_el0   = sp;
+}
+
 /* Exception type, as set by exceptions.S before branching into C —
  * distinguishes which of VBAR_EL1's 4 exception classes fired (only the
  * "Current EL, SP_ELx" group is reachable right now; no EL0/userspace
@@ -47,7 +69,7 @@ enum aarch64_exception_type {
     AARCH64_EXC_SERROR = 3,
 };
 
-typedef void (*aarch64_irq_handler_fn)(struct aarch64_frame *f);
+typedef void (*arch_irq_handler_fn)(struct arch_frame *f);
 
 /* Points VBAR_EL1 at the vector table in exceptions.S. Call first, before
  * anything that could fault (including the GIC's own MMIO mapping) —
@@ -65,6 +87,6 @@ void exceptions_enable_irqs(void);
 
 /* Registers a handler for one GIC interrupt ID, dispatched from the IRQ
  * path once gic_init() + an actual enabled interrupt source exist. */
-void register_irq_handler(unsigned irq, aarch64_irq_handler_fn handler);
+void register_irq_handler(unsigned irq, arch_irq_handler_fn handler);
 
 #endif

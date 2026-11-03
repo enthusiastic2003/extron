@@ -40,7 +40,7 @@
  * SP_EL0 and TPIDR_EL0 context-switch misses before it, and invisible
  * for the same reason.
  */
-struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
+struct proc *proc_fork(struct proc *parent, struct arch_frame *f) {
     if (!parent || !parent->mm)
         return NULL;
     struct thread *caller = my_thread();
@@ -98,14 +98,14 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
      * left context.sp at kernel_stack_top; the frame occupies the 288
      * bytes below it, and context.sp moves down to match — which is
      * precisely the state RESTORE_CONTEXT expects to find. */
-    struct aarch64_frame *cf =
-        (struct aarch64_frame *)(child->main_thread.kernel_stack_top
-                                 - sizeof(struct aarch64_frame));
+    struct arch_frame *cf =
+        (struct arch_frame *)(child->main_thread.kernel_stack_top
+                                 - sizeof(struct arch_frame));
     *cf = *f;
-    cf->x[0] = 0;                       /* fork() returns 0 in the child */
+    FRAME_RET(cf) = 0;                       /* fork() returns 0 in the child */
 
-    child->main_thread.context.sp = (uint64_t)cf;
-    child->main_thread.context.lr = (uint64_t)proc_fork_trampoline;
+    arch_context_set_resume(&child->main_thread.context, (uint64_t)cf,
+                            proc_fork_trampoline);
 
     /* Live FP/SIMD + TPIDR_EL0, straight out of the hardware. Must come
      * after proc_init(), which zeroes the whole context. */
@@ -120,5 +120,5 @@ struct proc *proc_fork(struct proc *parent, struct aarch64_frame *f) {
  * by hand rather than by that macro, so a struct that drifted out of
  * step with it would put the frame at the wrong offset and RESTORE_
  * CONTEXT would read 288 bytes of something else. */
-_Static_assert(sizeof(struct aarch64_frame) == 288,
-               "exception_vectors.S SAVE_CONTEXT reserves 288 bytes");
+_Static_assert(sizeof(struct arch_frame) == ARCH_FRAME_SIZE,
+               "arch frame size must match the asm save/restore macros");

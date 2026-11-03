@@ -29,9 +29,9 @@
 
 #define IRQ_HANDLER_MAX 256
 
-static aarch64_irq_handler_fn irq_handlers[IRQ_HANDLER_MAX];
+static arch_irq_handler_fn irq_handlers[IRQ_HANDLER_MAX];
 
-void register_irq_handler(unsigned irq, aarch64_irq_handler_fn handler) {
+void register_irq_handler(unsigned irq, arch_irq_handler_fn handler) {
     if (irq < IRQ_HANDLER_MAX) {
         irq_handlers[irq] = handler;
     }
@@ -90,7 +90,7 @@ static int fault_signal(uint32_t ec) {
     }
 }
 
-void exception_dispatch(struct aarch64_frame *f, int type) {
+void exception_dispatch(struct arch_frame *f, int type) {
     resource_account_exception_enter(f);
 
     if (type == AARCH64_EXC_IRQ || type == AARCH64_EXC_FIQ) {

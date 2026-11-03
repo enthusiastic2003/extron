@@ -3,8 +3,7 @@
 #include <kernel/drivers/serial.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
-#include <arch/gic.h>
-#include <arch/exceptions.h>
+#include <arch/irq.h>
 #include <arch/irq_spinlock.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -68,7 +67,7 @@ static void ring_push(uint8_t c) {
     ring->buf[head] = c;
     /* Publish the byte before the index that advertises it, or the
      * consumer can read the new head and find a stale byte under it. */
-    __asm__ volatile ("dmb ishst" ::: "memory");
+    arch_memory_barrier_store();
     ring->head = next;
 }
 
@@ -81,7 +80,7 @@ static void drain_uart(void) {
         ring_push((uint8_t)c);
     }
 }
-static void kbd_irq_handler(struct aarch64_frame *f) {
+static void kbd_irq_handler(struct arch_frame *f) {
     (void)f;
     drain_uart();
 }
@@ -95,8 +94,8 @@ void init_kbd(void) {
         kprintf("[KBD] no memory for the shared input ring\n");
     }
 
-    register_irq_handler(GIC_SPI_UART0, kbd_irq_handler);
-    gic_enable_irq(GIC_SPI_UART0);
+    register_irq_handler(ARCH_IRQ_SERIAL, kbd_irq_handler);
+    arch_irq_enable_line(ARCH_IRQ_SERIAL);
     serial_enable_rx_irq();
 }
 

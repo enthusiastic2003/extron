@@ -1,0 +1,103 @@
+# x86-64 UEFI build of Extron. Companion to the aarch64 Makefile; shares
+# every arch-neutral kernel source and swaps in kernel/arch/x86_64/.
+#
+#   make -f Makefile.x86_64            # kernel.elf + BOOTX64.EFI + ESP tree
+#   make -f Makefile.x86_64 run        # boot it under QEMU + OVMF
+#   make -f Makefile.x86_64 check      # headless boot, assert on serial output
+
+BUILD  := build-x86_64
+CC     := gcc
+LD     := ld
+OBJCOPY:= objcopy
+
+# -mno-red-zone / -mcmodel=kernel: interrupt-safe, higher-half code model.
+# -mgeneral-regs-only: the kernel never touches x87/SSE, so a user process's
+#   FP state survives syscalls and IRQs untouched and context_switch is the one
+#   place that FXSAVEs/FXRSTORs it (same invariant the aarch64 build keeps).
+CFLAGS := -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
+          -fno-pic -fno-pie -mcmodel=kernel -mno-red-zone -mgeneral-regs-only \
+          -fno-omit-frame-pointer -fno-strict-aliasing -MMD -MP \
+          -Ikernel/include -Ikernel/arch/x86_64/include -g \
+          -Wno-unused-parameter -Wno-missing-field-initializers
+
+# Shared sources, minus everything that is Raspberry Pi / aarch64 specific.
+EXCLUDE := kernel/mm/paging.c kernel/drivers/uart.c kernel/drivers/timer.c \
+           kernel/drivers/emmc.c kernel/drivers/mailbox.c kernel/drivers/fb.c \
+           kernel/drivers/power.c
+C_SRC  := $(filter-out $(EXCLUDE),$(shell find kernel -name '*.c' -not -path 'kernel/arch/*')) \
+          $(wildcard kernel/arch/x86_64/*.c)
+S_SRC  := $(wildcard kernel/arch/x86_64/*.S) $(wildcard kernel/arch/x86_64/proc/*.S)
+OBJ    := $(patsubst %.c,$(BUILD)/%.o,$(C_SRC)) $(patsubst %.S,$(BUILD)/%.o,$(S_SRC))
+DEPS   := $(OBJ:.o=.d)
+
+KERNEL_ELF := $(BUILD)/kernel.elf
+LOADER     := $(BUILD)/BOOTX64.EFI
+ESP        := $(BUILD)/esp
+INITRD     ?= initrd.ext2
+
+LOADER_CFLAGS := -ffreestanding -fno-stack-protector -fshort-wchar -mno-red-zone \
+                 -fpie -O2 -Wall -Wextra -mgeneral-regs-only -fno-builtin \
+                 -fno-ident -fno-asynchronous-unwind-tables -Iboot/uefi
+
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
+QEMU      ?= qemu-system-x86_64
+QEMU_MEM  ?= 512M
+
+all: $(KERNEL_ELF) $(LOADER) esp
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(KERNEL_ELF): $(OBJ) kernel/arch/x86_64/linker.ld
+	$(LD) -nostdlib -z max-page-size=0x1000 -T kernel/arch/x86_64/linker.ld -o $@ $(OBJ)
+
+$(BUILD)/loader.o: boot/uefi/loader.c boot/uefi/efi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LOADER_CFLAGS) -c $< -o $@
+
+$(LOADER): $(BUILD)/loader.o
+	$(LD) -m i386pep --subsystem 10 -e efi_main --image-base 0x100000 -s -o $@ $<
+
+# FAT ESP tree (QEMU serves it directly with -drive file=fat:rw:...).
+esp: $(KERNEL_ELF) $(LOADER) $(INITRD)
+	@mkdir -p $(ESP)/EFI/BOOT $(ESP)/extron
+	cp $(LOADER) $(ESP)/EFI/BOOT/BOOTX64.EFI
+	cp $(KERNEL_ELF) $(ESP)/extron/kernel.elf
+	cp $(INITRD) $(ESP)/extron/initrd.ext2
+
+$(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
+	@mkdir -p $(BUILD)
+	cp $< $@
+
+QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display none \
+            -drive if=pflash,format=raw,unit=0,readonly=on,file=$(OVMF_CODE) \
+            -drive if=pflash,format=raw,unit=1,file=$(BUILD)/OVMF_VARS.fd \
+            -drive format=raw,file=fat:rw:$(ESP) \
+            -serial stdio -no-reboot
+
+run: esp $(BUILD)/OVMF_VARS.fd
+	$(QEMU) $(QEMU_ARGS)
+
+# Headless boot under OVMF; passes iff the smoke test reports success.
+check: esp $(BUILD)/OVMF_VARS.fd
+	@rm -f $(BUILD)/serial.log
+	@timeout 60 $(QEMU) $(subst -serial stdio,-serial file:$(BUILD)/serial.log,$(QEMU_ARGS)) || true
+	@grep -q 'SMOKE TEST PASSED' $(BUILD)/serial.log \
+	    && echo "x86-64 UEFI boot + smoke test: PASS" \
+	    || { echo "x86-64 UEFI boot + smoke test: FAIL (see $(BUILD)/serial.log)"; tail -30 $(BUILD)/serial.log; exit 1; }
+
+# Build the bring-up initrd (freestanding smoke-test payload as /bin/sh).
+$(INITRD): tools/build_x86_initrd.sh usr/x86_64/init.c
+	tools/build_x86_initrd.sh $@
+
+clean:
+	rm -rf $(BUILD)
+
+.PHONY: all esp run check clean
+-include $(DEPS)

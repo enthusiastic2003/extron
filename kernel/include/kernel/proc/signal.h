@@ -6,7 +6,7 @@
 
 struct proc;
 struct thread;
-struct aarch64_frame;
+struct arch_frame;
 
 #define SIGNAL_MAX 64
 
@@ -56,8 +56,8 @@ int signal_mask_update(struct thread *t, int how, const uint64_t *set,
                        uint64_t *old);
 bool signal_pending_unblocked(struct thread *t);
 
-bool signal_deliver_pending(struct aarch64_frame *f);
-bool signal_deliver_sync(struct aarch64_frame *f, int signo);
-uint64_t signal_sigreturn(struct aarch64_frame *f);
+bool signal_deliver_pending(struct arch_frame *f);
+bool signal_deliver_sync(struct arch_frame *f, int signo);
+uint64_t signal_sigreturn(struct arch_frame *f);
 
 #endif

@@ -55,7 +55,7 @@ static void delay_cycles(volatile int cycles);
 static volatile uint32_t emmc_irq_status = 0;
 static void *emmc_io_wait = (void *)&emmc_irq_status;
 
-static void emmc_irq_handler(struct aarch64_frame *f) {
+static void emmc_irq_handler(struct arch_frame *f) {
     (void)f;
     uint32_t stat = *(volatile uint32_t *)(emmc_base + 0x30 /* SDHCI_INTSTAT */);
     *(volatile uint32_t *)(emmc_base + 0x30) = stat; /* ack */

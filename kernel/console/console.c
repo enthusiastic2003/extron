@@ -27,7 +27,7 @@ void set_console_write_loc(uint64_t vga_offset) {
  * choke point every VGA touch goes through, rather than in every
  * caller. */
 static inline void putc_at(int x, int y, char c, char color) {
-#if !defined(__aarch64__)
+#if !defined(__aarch64__) && !defined(__x86_64__)
     int i = (y * VGA_WIDTH + x) * 2;
     vga[i]     = c;
     vga[i + 1] = color;
@@ -51,7 +51,7 @@ void clear_screen(char color) {
 
 /* --- scrolling --- */
 static void scroll(void) {
-#if !defined(__aarch64__)
+#if !defined(__aarch64__) && !defined(__x86_64__)
     for (int y = 1; y < VGA_HEIGHT; y++) {
         for (int x = 0; x < VGA_WIDTH; x++) {
             int from = (y * VGA_WIDTH + x) * 2;
