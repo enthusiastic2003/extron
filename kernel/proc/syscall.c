@@ -2821,8 +2821,19 @@ static uint64_t sys_fork(uint64_t a, uint64_t b, uint64_t c,
  * that was just written into f->x[0] — exception_dispatch() assigns the
  * return value there, so returning anything else would overwrite it.
  */
-static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
-                           uint64_t envp_addr, struct arch_frame *f) {
+/* argv/envp are copied into one heap block: at the new limits they are far too
+ * big for the 32 KiB kernel stack. */
+struct exec_scratch {
+    char        argbuf[EXEC_ARG_BYTES];
+    const char *args[EXEC_MAX_ARGS];
+    char        envbuf[EXEC_ENV_BYTES];
+    const char *envs[EXEC_MAX_ENVS];
+    const char *nargs[EXEC_MAX_ARGS];      /* #! rewriting */
+};
+
+static uint64_t sys_execve_inner(uint64_t path_addr, uint64_t argv_addr,
+                                 uint64_t envp_addr, struct arch_frame *f,
+                                 struct exec_scratch *sc) {
     (void)envp_addr;
     struct proc *p = my_proc();
 
@@ -2853,21 +2864,19 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
      * the bytes it points at are bounded, and the bound is small enough
      * that the whole block fits in the top page of the new stack — see
      * build_arg_stack() in kernel/proc/exec.c. */
-    char        argbuf[EXEC_ARG_BYTES];
-    const char *args[EXEC_MAX_ARGS];
+    char       *argbuf = sc->argbuf;
+    const char **args  = sc->args;
     int         argc = 0;
     size_t      used = 0;
 
     if (argv_addr) {
         for (;;) {
             if (argc >= EXEC_MAX_ARGS) {
-                kprintf("[SYSCALL execve] too many arguments (max %d)\n",
-                        EXEC_MAX_ARGS);
-                return (uint64_t)-1;
+                return (uint64_t)-E2BIG;
             }
             uint64_t slot = argv_addr + (uint64_t)argc * sizeof(uint64_t);
             if (!user_buffer_ok(p, slot, sizeof(uint64_t)))
-                return (uint64_t)-1;
+                return (uint64_t)-EFAULT;
             uint64_t str = *(const uint64_t *)slot;
             if (!str)
                 break;                       /* argv[argc] == NULL */
@@ -2875,8 +2884,7 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
             long len = copy_user_string(p, str, argbuf + used,
                                         EXEC_ARG_BYTES - used);
             if (len < 0) {
-                kprintf("[SYSCALL execve] argv[%d] unreadable or too long\n", argc);
-                return (uint64_t)-1;
+                return (uint64_t)(len == -ENAMETOOLONG ? -E2BIG : len);
             }
             args[argc++] = argbuf + used;
             used += (size_t)len + 1;
@@ -2888,20 +2896,19 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
         argc = 1;
     }
 
-    char        envbuf[EXEC_ENV_BYTES];
-    const char *envs[EXEC_MAX_ENVS];
+    char       *envbuf = sc->envbuf;
+    const char **envs  = sc->envs;
     int         envc = 0;
     size_t      env_used = 0;
 
     if (envp_addr) {
         for (;;) {
             if (envc >= EXEC_MAX_ENVS) {
-                kprintf("[SYSCALL execve] too many envs (max %d)\n", EXEC_MAX_ENVS);
-                return (uint64_t)-1;
+                return (uint64_t)-E2BIG;
             }
             uint64_t slot = envp_addr + (uint64_t)envc * sizeof(uint64_t);
             if (!user_buffer_ok(p, slot, sizeof(uint64_t)))
-                return (uint64_t)-1;
+                return (uint64_t)-EFAULT;
             uint64_t str = *(const uint64_t *)slot;
             if (!str)
                 break;
@@ -2909,8 +2916,7 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
             long len = copy_user_string(p, str, envbuf + env_used,
                                         EXEC_ENV_BYTES - env_used);
             if (len < 0) {
-                kprintf("[SYSCALL execve] envp[%d] unreadable or too long\n", envc);
-                return (uint64_t)-1;
+                return (uint64_t)(len == -ENAMETOOLONG ? -E2BIG : len);
             }
             envs[envc++] = envbuf + env_used;
             env_used += (size_t)len + 1;
@@ -2965,7 +2971,7 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
             return (uint64_t)-ENOMEM;
         }
         size_t off = 0;
-        const char *nargs[EXEC_MAX_ARGS];
+        const char **nargs = sc->nargs;
         int nc = 0;
         const char *first[3] = { interp, opt, depth == 0 ? path : run_path };
         bool overflow = false;
@@ -3016,6 +3022,17 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
     arch_frame_init_user(f, img.entry, img.user_sp, img.argc, img.argv);
 
     return FRAME_RET(f);
+}
+
+
+static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
+                           uint64_t envp_addr, struct arch_frame *f) {
+    struct exec_scratch *sc = kmalloc(sizeof(*sc));
+    if (!sc)
+        return (uint64_t)-ENOMEM;
+    uint64_t r = sys_execve_inner(path_addr, argv_addr, envp_addr, f, sc);
+    kfree(sc);
+    return r;
 }
 
 /*

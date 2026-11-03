@@ -23,18 +23,19 @@
  * which PROC_MAP_FRAMEBUFFER (now removed) had repeated for the display.
  */
 
-/* Bounds on what execve() will carry across. Small on purpose: the
- * whole argument block is laid out inside the single top page of the
- * new stack, so it cannot spill into the stack the process is about to
- * start using. */
 /* Read the first `n` bytes of an executable for execve() (script / ELF sniffing).
  * Returns the byte count, or a negative errno (ENOENT, EACCES, ...). */
 long exec_read_head(struct proc *requester, const char *path, void *buf, size_t n);
 
-#define EXEC_MAX_ARGS  32
-#define EXEC_ARG_BYTES 1024
-#define EXEC_MAX_ENVS  32
-#define EXEC_ENV_BYTES 2048   /* total bytes of argv strings */
+/* Bounds on what execve() will carry across (E2BIG beyond them). The argument
+ * block (strings, pointer arrays, auxv) is built in the top EXEC_BLOCK_MAX
+ * bytes of the new stack, under a third of the 128 KiB stack, so the new
+ * program always keeps at least 88 KiB of stack for itself. */
+#define EXEC_MAX_ARGS  1024
+#define EXEC_ARG_BYTES (20 * 1024)   /* total bytes of argv strings */
+#define EXEC_MAX_ENVS  256
+#define EXEC_ENV_BYTES (8 * 1024)    /* total bytes of environment strings */
+#define EXEC_BLOCK_MAX (40 * 1024)
 
 /* The current stack is eagerly mapped and fixed-size. Resource-limit
  * reporting uses this same definition so RLIMIT_STACK cannot drift away

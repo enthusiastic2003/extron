@@ -195,3 +195,13 @@ that no longer exist.
 
 Limits: load averages are always 0.00, CPU time in `/proc/stat` only covers live
 processes, `tty_nr` is always 0, and `/proc/<pid>/task` and `maps` do not exist.
+
+## execve limits
+
+`EXEC_MAX_ARGS` 1024 arguments, `EXEC_ARG_BYTES` 20 KiB of argument strings,
+`EXEC_MAX_ENVS` 256 variables, `EXEC_ENV_BYTES` 8 KiB of environment strings
+(`sysconf(_SC_ARG_MAX)` reports the sum, 28 KiB). Beyond them execve returns
+`E2BIG`. The block (strings, argv/envp arrays, auxv) is assembled in a heap
+buffer of `EXEC_BLOCK_MAX` (40 KiB) and copied into the top of the new
+stack, so a program always keeps at least 88 KiB of its 128 KiB stack. Raising the
+limits further means growing the fixed, eagerly mapped stack (`EXEC_USER_STACK_BYTES`).

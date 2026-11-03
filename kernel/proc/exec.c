@@ -42,18 +42,19 @@
 #define EXEC_PATH_BYTES 128
 #define EXEC_RANDOM_BYTES 16
 
-/* The whole argument block has to fit in the single page it is written
- * into, or build_arg_stack() would run off the bottom of that page and
- * corrupt the stack page below it. Sized so it cannot: worst case is
- * every argument present, every byte used, plus argc's own word, the
- * argv pointer array, argv's NULL terminator, envp's (empty) NULL
- * terminator, the auxv block, plus 16 bytes of alignment slack. */
+/* The whole argument block is built in a kernel buffer of EXEC_BLOCK_MAX
+ * bytes and copied to the top of the new stack, so worst case has to fit:
+ * every argument and variable present with every byte used, plus argc's own
+ * word, the argv/envp pointer arrays and their NULL terminators, the auxv
+ * block and 16 bytes of alignment slack. */
 _Static_assert(EXEC_ARG_BYTES + EXEC_ENV_BYTES
                + EXEC_PATH_BYTES
                + EXEC_RANDOM_BYTES
                + (EXEC_MAX_ARGS + EXEC_MAX_ENVS + 3) * sizeof(uint64_t)
                + EXEC_AUXV_ENTRIES * 2 * sizeof(uint64_t) + 16
-               < PAGE_SIZE, "exec argument block must fit one stack page");
+               <= EXEC_BLOCK_MAX, "exec argument block must fit EXEC_BLOCK_MAX");
+_Static_assert(EXEC_BLOCK_MAX * 3 <= EXEC_USER_STACK_BYTES,
+               "the argument block may take at most a third of the stack");
 
 static spinlock_t exec_random_lock = SPINLOCK_INIT;
 static uint64_t exec_random_sequence;
@@ -114,13 +115,15 @@ static void fill_exec_random(uint8_t bytes[EXEC_RANDOM_BYTES],
  * pointer, so the first thing the process does — establishing its
  * own frame below sp — can't tread on them.
  *
- * `top_phys` is the physical page backing [USER_STACK_TOP-PAGE_SIZE,
- * USER_STACK_TOP). Writing through the HHDM is what lets this run
+ * The block is assembled in a kernel buffer and copied into the top
+ * EXEC_BLOCK_MAX bytes of the stack through the HHDM (found by walking
+ * `ttbr0`'s page tables, since those pages are not physically contiguous).
+ * Writing through the HHDM is what lets this run
  * before the address space is ever installed — during execve the
  * process is still executing out of the image about to be replaced, so
  * the new stack simply isn't reachable by its own VA yet.
  */
-static virt_addr_t build_arg_stack(phys_addr_t top_phys,
+static virt_addr_t build_arg_stack(phys_addr_t ttbr0,
                                    const char *exec_path,
                                    const char *const *args, int argc,
                                    const char *const *envp, int envc,
@@ -129,14 +132,22 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
                                    uint32_t uid, uint32_t euid,
                                    uint32_t gid, uint32_t egid,
                                    virt_addr_t *out_argv_va) {
-    uint8_t     *page    = (uint8_t *)phys_to_virt_hhdm(top_phys);
-    virt_addr_t  page_va = USER_STACK_TOP - PAGE_SIZE;
-    virt_addr_t  str_va[EXEC_MAX_ARGS];
-    virt_addr_t  env_va[EXEC_MAX_ENVS];
-    size_t       off = PAGE_SIZE;
+    /* Built in a temporary buffer whose end maps to USER_STACK_TOP; the used
+     * tail is copied into the (non-contiguous) stack pages at the end. */
+    uint8_t     *page    = kmalloc(EXEC_BLOCK_MAX);
+    virt_addr_t *str_va  = kmalloc(EXEC_MAX_ARGS * sizeof(virt_addr_t));
+    virt_addr_t *env_va  = kmalloc(EXEC_MAX_ENVS * sizeof(virt_addr_t));
+    if (!page || !str_va || !env_va) {
+        if (page) kfree(page);
+        if (str_va) kfree(str_va);
+        if (env_va) kfree(env_va);
+        return 0;
+    }
+    virt_addr_t  page_va = USER_STACK_TOP - EXEC_BLOCK_MAX;   /* VA of page[0] */
+    size_t       off = EXEC_BLOCK_MAX;
 
     uint8_t random_bytes[EXEC_RANDOM_BYTES];
-    fill_exec_random(random_bytes, top_phys, aux);
+    fill_exec_random(random_bytes, ttbr0, aux);
     off -= sizeof(random_bytes);
     memcpy(page + off, random_bytes, sizeof(random_bytes));
     virt_addr_t random_va = page_va + off;
@@ -218,8 +229,26 @@ static virt_addr_t build_arg_stack(phys_addr_t top_phys,
     AUXV(AT_NULL,   0);
     #undef AUXV
 
-    *out_argv_va = page_va + off + sizeof(uint64_t);
-    return page_va + off;
+    /* Copy the finished block into the stack, one page at a time. */
+    virt_addr_t result = page_va + off;
+    for (size_t pos = off; pos < EXEC_BLOCK_MAX;) {
+        virt_addr_t va = page_va + pos;
+        size_t in_page = PAGE_SIZE - (size_t)(va & (PAGE_SIZE - 1));
+        if (in_page > EXEC_BLOCK_MAX - pos)
+            in_page = EXEC_BLOCK_MAX - pos;
+        phys_addr_t phys = virt_to_phys((pml4_t)ttbr0, va & ~(virt_addr_t)(PAGE_SIZE - 1));
+        if (!phys) {                               /* cannot happen: the stack is mapped */
+            kfree(page); kfree(str_va); kfree(env_va);
+            return 0;
+        }
+        memcpy((uint8_t *)phys_to_virt_hhdm(phys) + (va & (PAGE_SIZE - 1)), page + pos, in_page);
+        pos += in_page;
+    }
+    kfree(page);
+    kfree(str_va);
+    kfree(env_va);
+    *out_argv_va = result + sizeof(uint64_t);
+    return result;
 }
 
 /*
@@ -411,7 +440,6 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
         real_start  = interp_aux.entry;
     }
 
-    phys_addr_t top_phys = 0;
     for (size_t i = 0; i < USER_STACK_PAGES; i++) {
         phys_addr_t stack_phys = (phys_addr_t)pmm_alloc_page();
         if (!stack_phys) {
@@ -429,8 +457,6 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
             pmm_free_page((void *)stack_phys);
             goto fail;
         }
-        if (i == USER_STACK_PAGES - 1)
-            top_phys = stack_phys;
     }
     if (vm_insert_region(mm, USER_STACK_VA,
                          USER_STACK_PAGES * PAGE_SIZE, true) != 0)
@@ -452,10 +478,14 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     }
 
     out->entry   = real_start;
-    out->user_sp = build_arg_stack(top_phys, binary_path, args, argc, envp, envc, &aux,
+    out->user_sp = build_arg_stack(ttbr0, binary_path, args, argc, envp, envc, &aux,
                                    interp_base,
                                    aux_uid, aux_euid, aux_gid, aux_egid,
                                    &out->argv);
+    if (!out->user_sp) {
+        kprintf("[EXEC] could not build the argument block for %s\n", binary_path);
+        goto fail;
+    }
     out->argc    = (uint64_t)argc;
 
     /* No MMIO mapping here any more. The UART used to be identity-mapped
