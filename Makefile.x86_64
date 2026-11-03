@@ -120,6 +120,11 @@ check-persist: esp
 check-boot: esp
 	python3 tools/x86_boot_test.py
 
+# C libraries behind Python's optional modules (zlib, bzip2, xz, zstd, libffi,
+# ncurses, readline, sqlite) as static archives in build-x86_64/extlibs/prefix.
+libs:
+	tools/build_x86_libs.sh
+
 # CPython 3.14 for the data disk (needs the userland first; ~1 minute).
 python:
 	tools/build_x86_python.sh
@@ -169,5 +174,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist python check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist libs python check-boot check-disk check-all
 -include $(DEPS)

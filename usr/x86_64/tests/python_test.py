@@ -315,6 +315,124 @@ def t_multiprocessing():
     check("multiprocessing.Event wakes across processes", ev.wait(10))
     p.join(10)
 
+def t_compression():
+    import zlib, gzip, bz2, lzma, io, tarfile, zipfile, os, tempfile
+    data = (b"extron compresses well " * 2000) + os.urandom(64)
+    z = zlib.compress(data, 9)
+    check("zlib round trip and it shrinks", zlib.decompress(z) == data and len(z) < len(data) // 10)
+    check("zlib crc32/adler32", zlib.crc32(b"abc") == 0x352441c2 and zlib.adler32(b"abc") == 0x024d0127)
+    c = zlib.compressobj(); d = zlib.decompressobj()
+    part = c.compress(data[:50000]) + c.flush()
+    check("zlib streaming", d.decompress(part) == data[:50000])
+    check("gzip round trip", gzip.decompress(gzip.compress(data)) == data)
+    check("bz2 round trip", bz2.decompress(bz2.compress(data)) == data)
+    check("lzma/xz round trip", lzma.decompress(lzma.compress(data)) == data)
+    try:
+        from compression import zstd
+        check("zstd round trip", zstd.decompress(zstd.compress(data)) == data)
+    except ImportError as e:
+        check("zstd round trip", False, e)
+    d = tempfile.mkdtemp(dir="/mnt")
+    try:
+        with tarfile.open(d + "/a.tar.gz", "w:gz") as t:
+            info = tarfile.TarInfo("f.txt"); info.size = len(data); t.addfile(info, io.BytesIO(data))
+        with tarfile.open(d + "/a.tar.gz") as t:
+            check("tarfile .tar.gz round trip", t.extractfile("f.txt").read() == data)
+        with tarfile.open(d + "/a.tar.xz", "w:xz") as t:
+            info = tarfile.TarInfo("f.txt"); info.size = 5; t.addfile(info, io.BytesIO(b"hello"))
+        with tarfile.open(d + "/a.tar.bz2", "w:bz2") as t:
+            info = tarfile.TarInfo("f.txt"); info.size = 5; t.addfile(info, io.BytesIO(b"hello"))
+        check("tarfile xz and bz2", tarfile.open(d + "/a.tar.xz").extractfile("f.txt").read() == b"hello"
+              and tarfile.open(d + "/a.tar.bz2").extractfile("f.txt").read() == b"hello")
+        with zipfile.ZipFile(d + "/a.zip", "w", zipfile.ZIP_DEFLATED) as zf: zf.writestr("x.txt", data)
+        with zipfile.ZipFile(d + "/a.zip") as zf:
+            check("zipfile deflate round trip", zf.read("x.txt") == data and zf.testzip() is None)
+        with gzip.open(d + "/f.gz", "wt", encoding="utf-8") as g: g.write("héllo\n" * 100)
+        with gzip.open(d + "/f.gz", "rt", encoding="utf-8") as g: check("gzip.open text mode", g.read() == "héllo\n" * 100)
+    finally:
+        import shutil; shutil.rmtree(d)
+
+def t_ctypes():
+    import ctypes, ctypes.util
+    libc = ctypes.CDLL(None)
+    check("ctypes: call libc strlen", libc.strlen(b"extron") == 6)
+    libc.abs.argtypes = [ctypes.c_int]; libc.abs.restype = ctypes.c_int
+    check("ctypes: argtypes/restype", libc.abs(-42) == 42)
+    class Pt(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_int), ("y", ctypes.c_double)]
+    p = Pt(3, 4.5)
+    check("ctypes: Structure layout", ctypes.sizeof(Pt) == 16 and p.x == 3 and p.y == 4.5)
+    buf = ctypes.create_string_buffer(16)
+    libc.snprintf.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p]
+    libc.snprintf(buf, 16, b"hi %s", b"there") if False else None
+    arr = (ctypes.c_int * 5)(5, 3, 1, 4, 2)
+    CMP = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+    calls = []
+    def cmp(a, b):
+        calls.append(1); return a[0] - b[0]
+    libc.qsort(arr, 5, ctypes.sizeof(ctypes.c_int), CMP(cmp))
+    check("ctypes: callback from C (qsort)", list(arr) == [1, 2, 3, 4, 5] and calls)
+    check("ctypes: pointers and byref", ctypes.c_int.from_buffer(bytearray(b"\x07\0\0\0")).value == 7)
+    check("ctypes: c_char_p / string_at", ctypes.string_at(ctypes.c_char_p(b"abcdef"), 3) == b"abc")
+    check("ctypes: getpid via libc", libc.getpid() > 0)
+
+def t_sqlite():
+    import sqlite3, os, tempfile, threading
+    db = sqlite3.connect(":memory:")
+    db.execute("create table t (id integer primary key, name text, v real)")
+    db.executemany("insert into t(name, v) values (?, ?)", [("a", 1.5), ("b", 2.5), ("é", 3.5)])
+    rows = db.execute("select name, v from t order by id").fetchall()
+    check("sqlite in-memory insert/select", rows == [("a", 1.5), ("b", 2.5), ("é", 3.5)])
+    check("sqlite aggregates", db.execute("select count(*), sum(v), max(name) from t").fetchone() == (3, 7.5, "é"))
+    check("sqlite version is 3.50", sqlite3.sqlite_version.startswith("3.50"))
+    d = tempfile.mkdtemp(dir="/mnt")
+    try:
+        path = d + "/test.db"
+        c = sqlite3.connect(path)
+        c.execute("create table kv (k text primary key, v text)")
+        with c:
+            for i in range(200): c.execute("insert into kv values (?, ?)", (str(i), "x" * i))
+        c.close()
+        c = sqlite3.connect(path)
+        check("sqlite file database persists", c.execute("select count(*), length(v) from kv where k='150'").fetchone() == (1, 150))
+        c.execute("pragma journal_mode=wal")      # needs shared memory / locking: allowed to fail
+        check("sqlite integrity_check", c.execute("pragma integrity_check").fetchone() == ("ok",))
+        c.execute("begin"); c.execute("insert into kv values ('rollback', 'me')"); c.rollback()
+        check("sqlite rollback", c.execute("select count(*) from kv where k='rollback'").fetchone() == (0,))
+        res = []
+        def reader():
+            cc = sqlite3.connect(path); res.append(cc.execute("select count(*) from kv").fetchone()[0]); cc.close()
+        t = threading.Thread(target=reader); t.start(); t.join()
+        check("sqlite from another thread", res == [200])
+        c.close()
+        c = sqlite3.connect(path); c.execute("delete from kv"); c.commit(); c.execute("vacuum"); c.close()
+        check("sqlite vacuum shrinks the file", os.path.getsize(path) < 40000)
+    finally:
+        import shutil; shutil.rmtree(d)
+
+def t_curses_readline():
+    import os
+    import curses
+    os.environ["TERM"] = "xterm"
+    curses.setupterm("xterm", 1)
+    check("curses.setupterm with a built-in terminal description", curses.tigetstr("clear") is not None)
+    check("curses: tigetnum cols/lines", curses.tigetnum("cols") == 80)
+    check("curses: tparm / cursor addressing", curses.tparm(curses.tigetstr("cup"), 2, 3) == b"\x1b[3;4H")
+    import readline
+    readline.add_history("print(1)")
+    check("readline module and history", readline.get_current_history_length() == 1
+          and readline.get_history_item(1) == "print(1)")
+    readline.clear_history()
+    check("readline: parse_and_bind accepted", readline.parse_and_bind("tab: complete") is None)
+    import cmd, io
+    class C(cmd.Cmd):
+        use_rawinput = False
+        def do_hi(self, arg): self.stdout.write("hello " + arg + "\n")
+        def do_EOF(self, arg): return True      # end of input stops the loop
+    out = io.StringIO()
+    C(stdin=io.StringIO("hi there\n"), stdout=out).cmdloop()
+    check("cmd.Cmd loop", "hello there" in out.getvalue())
+
 def t_unittest_and_misc_modules():
     import unittest, io, tarfile, zipfile, csv
     class T(unittest.TestCase):
@@ -341,7 +459,7 @@ def t_unittest_and_misc_modules():
 
 ALL = (t_basics, t_stdlib_modules, t_time_and_clock, t_files, t_threads, t_processes,
        t_signals, t_io_multiplexing, t_misc_os, t_asyncio, t_multiprocessing,
-       t_unittest_and_misc_modules)
+       t_compression, t_ctypes, t_sqlite, t_curses_readline, t_unittest_and_misc_modules)
 # `python_test.py t_threads t_processes` runs just those sections (for debugging).
 wanted = set(sys.argv[1:])
 for fn in ALL:

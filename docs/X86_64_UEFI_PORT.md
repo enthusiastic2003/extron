@@ -250,3 +250,22 @@ syscall is never switched out half way, and an earlier version that slept in the
 driver corrupted data as soon as two processes read the disk at once (found by
 `multiprocessing`). Making the kernel preemptible would need ext2 and `struct
 open_file` locking reworked first.
+
+## Libraries for Python's optional modules
+
+`tools/build_x86_libs.sh` (`make x86-libs`, run automatically by the Python build) builds
+zlib, bzip2, xz (liblzma), zstd, libffi, ncurses (wide, terminal descriptions
+compiled in with `--with-fallbacks`, so no terminfo database is needed), readline and
+sqlite as static PIC archives in `build-x86_64/extlibs/prefix`. They are linked
+into Python's extension modules, so the target needs nothing extra. With them Python
+gains `zlib`, `gzip`, `bz2`, `lzma`, `compression.zstd`, `ctypes`, `curses`, `readline` and
+`sqlite3` (`tarfile`/`zipfile` compression included). Still absent: `_ssl`/`_hashlib`
+(OpenSSL), `_uuid` (libuuid; `uuid` falls back to pure Python), `_tkinter`, `dbm`.
+
+Gotchas found on the way:
+* The compiler wrapper undefines `__linux__`, which libffi tests to choose its
+  closure-memory strategy; without `-DFFI_MMAP_EXEC_WRIT=1` closures (ctypes callbacks)
+  land in non-executable malloc memory and crash on first call.
+* libreadline.a does not carry its ncurses dependency: configure needs
+  `LIBREADLINE_LIBS="-lreadline -lncursesw"`.
+* Shared-object links get `-lgcc` (128-bit division in `_decimal`).

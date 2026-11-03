@@ -7,8 +7,10 @@
 #
 # Needs: the userland sysroot, curl, and a host python3 of the SAME minor version
 # (cross builds run the build python to freeze modules and compile bytecode).
-# Optional libraries (zlib, openssl, ctypes, readline, ...) are not available, so
-# those modules are simply absent; every other standard module is built.
+# The C libraries behind the optional modules (zlib, bzip2, lzma, zstd, ctypes/libffi,
+# curses, readline, sqlite3) come from tools/build_x86_libs.sh (run automatically if
+# they have not been built). openssl and libuuid are not available, so _ssl, _hashlib
+# and _uuid stay absent; every other standard module is built.
 #
 # Overrides: PY_VERSION PY_SHA256 JOBS REBUILD=1
 set -euo pipefail
@@ -28,6 +30,9 @@ say() { printf '\n== %s\n' "$*"; }
 [ -f "$EXTRON_SYSROOT/usr/lib/libc.so" ] || { echo "build the userland first: make -f Makefile.x86_64 userland" >&2; exit 1; }
 HOSTMM="$("$BUILD_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 [ "$HOSTMM" = "$MM" ] || { echo "host python $HOSTMM does not match $MM (set PY_VERSION or BUILD_PYTHON)" >&2; exit 1; }
+
+EXT="$REPO/build-x86_64/extlibs/prefix"
+[ -f "$REPO/build-x86_64/extlibs/.built-sqlite" ] || "$REPO/tools/build_x86_libs.sh"
 
 mkdir -p "$PYDIR"
 TARBALL="$PYDIR/Python-$PY_VERSION.tgz"
@@ -54,14 +59,23 @@ ac_cv_working_tzset=yes
 # which raises #UD. SSE (what the kernel does enable) stays on.
 ax_cv_check_cflags__Werror__mavx2=no
 SITE
+    # No pkg-config here: tell configure where each library is.
     (cd "$PYDIR/build" &&
      CONFIG_SITE="$PYDIR/config.site" CC="$CC" CFLAGS="-O2" \
+     CPPFLAGS="-I$EXT/include" LDFLAGS="-L$EXT/lib" \
+     ZLIB_CFLAGS="-I$EXT/include" ZLIB_LIBS="-lz" \
+     BZIP2_CFLAGS="-I$EXT/include" BZIP2_LIBS="-lbz2" \
+     LIBLZMA_CFLAGS="-I$EXT/include" LIBLZMA_LIBS="-llzma" \
+     LIBZSTD_CFLAGS="-I$EXT/include" LIBZSTD_LIBS="-lzstd" \
+     LIBFFI_CFLAGS="-I$EXT/include" LIBFFI_LIBS="-lffi" \
+     CURSES_CFLAGS="-I$EXT/include" CURSES_LIBS="-lncursesw" \
+     PANEL_CFLAGS="-I$EXT/include" PANEL_LIBS="-lpanelw -lncursesw" \
+     LIBSQLITE3_CFLAGS="-I$EXT/include" LIBSQLITE3_LIBS="-lsqlite3" \
+     LIBREADLINE_CFLAGS="-I$EXT/include" LIBREADLINE_LIBS="-lreadline -lncursesw" \
         ../src/configure --build=x86_64-pc-linux-gnu --host=x86_64-unknown-linux-gnu \
         --prefix=/mnt/python --with-build-python="$BUILD_PY" --disable-ipv6 \
-        --without-ensurepip --disable-test-modules --without-readline \
+        --without-ensurepip --disable-test-modules --with-readline=readline \
         >"$PYDIR/configure.log" 2>&1) || { tail -20 "$PYDIR/configure.log"; exit 1; }
-    # No ncurses in the sysroot.
-    printf '*disabled*\n_curses\n_curses_panel\n' >> "$PYDIR/build/Modules/Setup.local"
 fi
 
 say "building Python"
