@@ -27,20 +27,24 @@ isdir() { debugfs -R "stat $1" "$DISK" 2>/dev/null | grep -q "Type: directory"; 
 } > "$CMDS"
 debugfs -w -f "$CMDS" "$DISK" >/dev/null 2>&1 || true
 
-# CPython: copy it in on first use only (an existing /python is left alone; use
-# `make disk-clean disk` to replace it). Needs enough free space on the disk.
+# CPython: copied in on first use. An existing /python is left alone unless
+# REFRESH_PYTHON=1 (`make disk-python`), which rewrites its files in place and
+# keeps everything else on the disk. Needs enough free space on the disk.
 PYROOT="$(pwd)/build-x86_64/python/rootfs"
-if [ -d "$PYROOT/python" ] && ! isdir python; then
+if [ -d "$PYROOT/python" ] && { ! isdir python || [ "${REFRESH_PYTHON:-0}" = 1 ]; }; then
     PYCMDS="$(mktemp)"
     trap 'rm -f "$CMDS" "$PYCMDS"' EXIT
     (
         cd "$PYROOT"
-        find python -type d | sort | sed 's/^/mkdir /'
+        # mkdir only what is missing (see isdir above)
+        find python -type d | sort | while read -r d; do isdir "$d" || echo "mkdir $d"; done
         find python -type f | sort | while read -r f; do
+            echo "rm $f"
             echo "write $PYROOT/$f $f"
             echo "sif $f mode 0100$(stat -c %a "$f")"
         done
         find python -type l | sort | while read -r l; do
+            echo "rm $l"
             echo "symlink $l $(readlink "$l")"
         done
     ) > "$PYCMDS"

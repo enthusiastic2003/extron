@@ -108,6 +108,10 @@ disk: $(DISK)
 disk-tests: $(DISK)
 	tools/refresh_disk_tests.sh $(DISK)
 
+# Replace /python on the existing disk with the current build (keeps other files).
+disk-python: $(DISK)
+	REFRESH_PYTHON=1 tools/refresh_disk_tests.sh $(DISK)
+
 disk-clean:
 	rm -f $(DISK)
 
@@ -174,5 +178,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist libs python check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-python disk-clean check-persist libs python check-boot check-disk check-all
 -include $(DEPS)
