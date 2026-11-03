@@ -605,11 +605,53 @@ void proc_continue(struct proc *p) {
         wakeup(p->parent);
 }
 
+/* Hand `dying`'s children to init (pid 1) so they never point at a parent
+ * that is about to go away. Children that already exited become reapable
+ * orphans; ones still running are reaped when they exit and a later
+ * proc_reap_orphans() runs. */
+static void proc_reparent_children(struct proc *dying) {
+    irq_spin_lock(&proc_table_lock);
+    struct proc *init = NULL;
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++)
+        if (proc_table[i] && proc_table[i]->pid == 1 && proc_table[i] != dying)
+            init = proc_table[i];
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
+        struct proc *c = proc_table[i];
+        if (!c || c->parent != dying)
+            continue;
+        c->parent = init;       /* NULL when init itself dies: nobody to notify */
+        c->orphan = true;
+    }
+    irq_spin_unlock(&proc_table_lock);
+}
+
+void proc_reap_orphans(void) {
+    struct proc *self = my_proc();
+    struct proc *victims[PROC_MAX_PROCS];
+    size_t n = 0;
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
+        struct proc *c = proc_table[i];
+        if (c && c != self && c->orphan && c->exited && n < PROC_MAX_PROCS)
+            victims[n++] = c;
+    }
+    irq_spin_unlock(&proc_table_lock);
+    for (size_t i = 0; i < n; i++) {
+        struct user_rusage usage;
+        if (victims[i]->parent)
+            resource_reap_child(victims[i]->parent, victims[i], &usage);
+        proc_destroy(victims[i]);
+    }
+}
+
 void proc_exit_current(int status) {
     struct proc *p = my_proc();
     struct thread *self = my_thread();
     if (!p || !self)
         panic("proc_exit_current: no current process/thread");
+
+    proc_reap_orphans();
+    proc_reparent_children(p);
 
     /* A fatal event in one thread kills the process: every sibling shares
      * the same potentially-corrupted address space and file descriptions. */

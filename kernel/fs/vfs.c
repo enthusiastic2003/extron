@@ -746,6 +746,10 @@ int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode,
     struct vfs_path parent;
     char leaf[VFS_NAME_MAX + 1];
     int result = walk(cwd, path, true, cred, &parent, leaf);
+    /* The walk has no leaf for "/", "." and "..": those always exist, and
+     * POSIX (and `mkdir -p`) expects EEXIST, not EINVAL. */
+    if (result == -EINVAL && path && *path)
+        return -EEXIST;
     if (result < 0)
         return result;
     if (parent.dentry->node->type != VFS_NODE_DIRECTORY) {

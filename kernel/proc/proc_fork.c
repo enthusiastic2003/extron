@@ -46,6 +46,7 @@ struct proc *proc_fork(struct proc *parent, struct arch_frame *f) {
     struct thread *caller = my_thread();
     if (!caller || caller->process != parent)
         return NULL;
+    proc_reap_orphans();   /* give back exited orphans' memory before cloning */
 
     struct vm_space *mm = vm_space_clone(parent->mm);
     if (!mm) {

@@ -109,6 +109,7 @@ struct proc {
     uint64_t            children_system_ns;
     int                 exit_status;
     bool                exited;
+    bool                orphan;     /* reparented to init when its parent exited */
     bool                stopped;
     int                 stop_signal;
     bool                stop_event_pending;
@@ -214,6 +215,8 @@ void proc_continue(struct proc *p);
  * schedule away permanently. Non-negative status is a normal exit code;
  * negative status means termination by the corresponding signal number. */
 void proc_exit_current(int status) __attribute__((noreturn));
+/* Destroy exited orphans (zombies whose parent died first). Never the caller. */
+void proc_reap_orphans(void);
 
 /* Create another schedulable thread in p's existing address space. The
  * caller has already validated the userspace entry, stack and TLS values.

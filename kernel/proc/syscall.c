@@ -2258,10 +2258,9 @@ static uint64_t sys_execve(uint64_t path_addr, uint64_t argv_addr,
  * if that is non-NULL, or -1 if the caller has no children at all —
  * which is the terminating condition for a "reap everything" loop.
  *
- * A process whose parent exits first is never reaped: nothing
- * re-parents orphans to an init process, because there is no init
- * process. That leaks the orphan's memory until reboot, and is worth
- * fixing when there's a shell to own the problem.
+ * A process whose parent exits first is reparented to init (pid 1) and
+ * flagged an orphan; exited orphans are destroyed by proc_reap_orphans(),
+ * which runs on every fork and exit, so nobody has to wait() for them.
  */
 static uint64_t wait_common(uint64_t status_addr, int64_t selector,
                             int options, uint64_t usage_addr) {
