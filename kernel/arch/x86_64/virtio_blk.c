@@ -1,6 +1,6 @@
 /*
  * virtio-blk driver (legacy / "transitional" PCI interface, I/O-port BAR0),
- * polled, one request in flight. Exposes the disk as a struct ext2_block_dev
+ * interrupt-driven, one request in flight. Exposes the disk as a struct ext2_block_dev
  * and mounts an ext2 filesystem found on it at /mnt.
  *
  * Legacy interface only: QEMU needs `-device virtio-blk-pci,...,disable-modern=on`
@@ -11,14 +11,21 @@
  * contiguous, so a page-aligned static array is a contiguous DMA region and
  * needs no physical allocator support.
  *
- * Interrupts: none are used. The device's ISR register is read after each
- * request so a level-triggered INTx line is deasserted.
+ * Completion: the requester sleeps (or, before the scheduler exists, sleeps
+ * the CPU with sti;hlt) until the device's INTx interrupt fires. The IRQ
+ * handler reads the ISR register (which also deasserts the level-triggered
+ * line), retires the used-ring entry and wakes the requester. A mutex around
+ * each whole read/write/flush keeps the shared bounce buffer single-owner
+ * while the requester is asleep.
  */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <kernel/console.h>
-#include <kernel/drivers/timer.h>
+#include <kernel/proc/proc.h>
+#include <kernel/proc/sched.h>
+#include <arch/exceptions.h>
+#include <arch/irq.h>
 #include <kernel/fs/ext2.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
@@ -59,7 +66,7 @@
 
 #define MAX_QSZ             512
 #define BOUNCE_SECTORS      128
-#define REQ_TIMEOUT_NS      5000000000ULL
+#define PCI_INT_LINE        0x3C
 
 struct vring_desc { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; };
 
@@ -76,6 +83,9 @@ static volatile uint16_t *avail_flags, *avail_idxp, *avail_ring;
 static volatile uint16_t *used_idxp;
 static bool have_flush, read_only;
 static spinlock_t vblk_lock = SPINLOCK_INIT;
+static volatile bool req_done;       /* set by the IRQ handler */
+static bool dev_busy;                /* whole-operation mutex, guarded by vblk_lock */
+static char busy_chan, done_chan;
 static struct ext2_block_dev vblk_dev;
 
 static uint64_t phys_of(const void *p) {
@@ -85,8 +95,34 @@ static uint64_t phys_of(const void *p) {
 
 static inline void barrier(void) { __asm__ volatile ("mfence" ::: "memory"); }
 
-/* Issue one request. `data` (len bytes) is a bounce-buffer address or NULL
- * for a flush; `to_device` says which way the data moves. */
+static void vblk_irq(struct arch_frame *f) {
+    (void)f;
+    uint8_t isr = inb(io_base + VIO_ISR);      /* read-to-clear; drops the line */
+    if ((isr & 1) && *used_idxp != last_used) {
+        barrier();
+        last_used++;
+        req_done = true;
+        wakeup(&done_chan);
+    }
+}
+
+static void vblk_acquire(void) {
+    irq_spin_lock(&vblk_lock);
+    while (dev_busy)
+        sleep(&busy_chan, &vblk_lock);
+    dev_busy = true;
+    irq_spin_unlock(&vblk_lock);
+}
+
+static void vblk_release(void) {
+    irq_spin_lock(&vblk_lock);
+    dev_busy = false;
+    irq_spin_unlock(&vblk_lock);
+    wakeup(&busy_chan);
+}
+
+/* Issue one request and wait for its interrupt. `data` (len bytes) is a
+ * bounce-buffer address or NULL for a flush. Caller holds the device. */
 static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len,
                         bool to_device) {
     irq_spin_lock(&vblk_lock);
@@ -94,6 +130,7 @@ static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len
     req_hdr.reserved = 0;
     req_hdr.sector = sector;
     req_status = 0xFF;
+    req_done = false;
 
     int n = 0;
     desc[n] = (struct vring_desc){ phys_of(&req_hdr), sizeof(req_hdr), DESC_NEXT, 1 };
@@ -113,19 +150,19 @@ static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len
     barrier();
     outw(io_base + VIO_QUEUE_NOTIFY, 0);
 
-    uint64_t deadline = timer_uptime_ns() + REQ_TIMEOUT_NS;
-    while (*used_idxp == last_used) {
-        if (timer_uptime_ns() > deadline) {
+    /* The check runs with interrupts masked, so the completion cannot slip
+     * in between "not done" and going to sleep. */
+    while (!req_done) {
+        if (my_thread()) {
+            sleep(&done_chan, &vblk_lock);
+        } else {
+            /* Early boot: no scheduler. sti;hlt is atomic, so the IRQ
+             * either already fired or wakes the halted CPU. */
             irq_spin_unlock(&vblk_lock);
-            kprintf("virtio-blk: request timed out (type %u, sector %lu)\n",
-                    type, (unsigned long)sector);
-            return -5;      /* EIO */
+            __asm__ volatile ("sti; hlt; cli" ::: "memory");
+            irq_spin_lock(&vblk_lock);
         }
-        __asm__ volatile ("pause");
     }
-    barrier();
-    last_used++;
-    (void)inb(io_base + VIO_ISR);                    /* ack the interrupt line */
     int ok = req_status == 0;
     irq_spin_unlock(&vblk_lock);
     return ok ? 0 : -5;
@@ -134,33 +171,47 @@ static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len
 static int vblk_read(struct ext2_block_dev *dev, uint64_t lba, size_t count, void *buf) {
     if (lba + count > dev->sector_count) return -5;
     uint8_t *dst = buf;
+    int rc = 0;
+    vblk_acquire();
     while (count) {
         size_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;
-        if (vblk_request(T_IN, lba, bounce, (uint32_t)(n * 512), false) < 0)
-            return -5;
+        if (vblk_request(T_IN, lba, bounce, (uint32_t)(n * 512), false) < 0) {
+            rc = -5;
+            break;
+        }
         memcpy(dst, bounce, n * 512);
         dst += n * 512; lba += n; count -= n;
     }
-    return 0;
+    vblk_release();
+    return rc;
 }
 
 static int vblk_write(struct ext2_block_dev *dev, uint64_t lba, size_t count,
                       const void *buf) {
     if (read_only || lba + count > dev->sector_count) return -5;
     const uint8_t *src = buf;
+    int rc = 0;
+    vblk_acquire();
     while (count) {
         size_t n = count > BOUNCE_SECTORS ? BOUNCE_SECTORS : count;
         memcpy(bounce, src, n * 512);
-        if (vblk_request(T_OUT, lba, bounce, (uint32_t)(n * 512), true) < 0)
-            return -5;
+        if (vblk_request(T_OUT, lba, bounce, (uint32_t)(n * 512), true) < 0) {
+            rc = -5;
+            break;
+        }
         src += n * 512; lba += n; count -= n;
     }
-    return 0;
+    vblk_release();
+    return rc;
 }
 
 static int vblk_flush(struct ext2_block_dev *dev) {
     (void)dev;
-    return have_flush ? vblk_request(T_FLUSH, 0, NULL, 0, true) : 0;
+    if (!have_flush) return 0;
+    vblk_acquire();
+    int rc = vblk_request(T_FLUSH, 0, NULL, 0, true);
+    vblk_release();
+    return rc;
 }
 
 static bool vblk_init(struct pci_loc loc) {
@@ -204,6 +255,21 @@ static bool vblk_init(struct pci_loc loc) {
     avail_idx = last_used = 0;
     outl(io_base + VIO_QUEUE_PFN, (uint32_t)(phys_of(vq_mem) >> 12));
 
+    /* INTx line the firmware routed this device to (legacy PIC, IRQ 0-15). */
+    unsigned irq = pci_read32(loc, PCI_INT_LINE) & 0xFF;
+    if (irq >= 16) {
+        kprintf("virtio-blk: no usable interrupt line (%u)\n", irq);
+        outb(io_base + VIO_STATUS, ST_FAILED);
+        return false;
+    }
+    register_irq_handler(irq, vblk_irq);
+    if (irq >= 8) {                       /* PCI INTx is level-triggered: set ELCR */
+        outb(0x4D1, inb(0x4D1) | (1u << (irq - 8)));
+    } else {
+        outb(0x4D0, inb(0x4D0) | (1u << irq));
+    }
+    arch_irq_enable_line(irq);
+
     outb(io_base + VIO_STATUS, ST_ACK | ST_DRIVER | ST_DRIVER_OK);
 
     uint64_t cap = (uint64_t)inl(io_base + VIO_BLK_CAPACITY)
@@ -217,6 +283,7 @@ static bool vblk_init(struct pci_loc loc) {
             (unsigned long)cap, (unsigned long)(cap / 2048),
             read_only ? ", read-only" : "", have_flush ? ", flush" : "",
             qsz, io_base);
+    kprintf("virtio-blk: completion by IRQ %u\n", irq);
     return true;
 }
 
