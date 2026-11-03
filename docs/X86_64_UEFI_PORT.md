@@ -133,3 +133,43 @@ busybox) and the mlibc regression programs in `/opt/tests`.
 * Known limitation: syscalls still run with interrupts masked (several
   handlers rely on that for atomicity, e.g. `sys_write`); making them
   preemptible needs an audit of every such handler first.
+
+## Persistent storage (virtio-blk + ext2)
+
+A raw ext2 image attached to QEMU as a virtio-blk disk is mounted at `/mnt`
+and survives reboots.
+
+* **Driver** — `kernel/arch/x86_64/virtio_blk.c` (+ `pci.c`): PCI bus walk,
+  **legacy** virtio interface (I/O-port BAR0), polled, one request in flight,
+  64 KiB bounce buffer and virtqueue in static `.bss` (the kernel image is
+  physically contiguous, so no DMA allocator is needed). It exposes the disk as
+  a `struct ext2_block_dev`, so the existing ext2 driver is used unchanged.
+  QEMU needs `disable-modern=on` (PCIe slots default to modern-only, which this
+  driver detects and reports but does not drive). Modern virtio (capability
+  parsing, MMIO BAR, possibly above the 4 GiB identity map) and interrupts are
+  future work.
+* **Mounting** — `arch_mount_data_disk()` runs after the root fs and `/dev`
+  are up, creates `/mnt` if needed and mounts the disk if it holds ext2. No
+  disk, or no filesystem on it, is not an error.
+* **Durability** — ext2 writes dirty cached sectors back after each mutating
+  operation. `fsync(2)`/`sync(2)`/`reboot(2)` additionally call
+  `ext2_sync_all()`, which writes back everything and issues a virtio flush.
+  `fsync(-1)` is the kernel's "sync everything" entry point.
+* **Disk image** — `make -f Makefile.x86_64 disk` creates
+  `build-x86_64/disk.img` (64 MiB, `mke2fs -E revision=0 -b 1024`) once;
+  `make run` attaches it automatically. `make disk-clean` removes it.
+* **Tests** — `make check-persist` writes files (including a 1.4 MB one that
+  needs double-indirect blocks), kills QEMU without a clean shutdown, runs
+  `e2fsck -fn` on the image from the host, then boots again and verifies the
+  contents. `mlibc_disk_test` (a regular `/opt/tests` program, run by
+  `check-userland` and `soak` against a fresh disk) exercises big files,
+  shrinking `ftruncate` through every indirect level, rename/link/symlink,
+  directory growth and `d_type`.
+
+Filesystem fixes made along the way: dirent type bytes are only written when the
+FILETYPE feature is set (and `readdir` reads the inode otherwise); directory
+iteration uses a stable byte-offset cookie so `rm -r` doesn't skip entries;
+unlinked symlinks are now reclaimed (a missing reference drop leaked them) and
+fast-symlink text is never freed as block numbers; inodes get
+creation/modification/deletion times; `ftruncate` frees blocks at all
+indirection levels.

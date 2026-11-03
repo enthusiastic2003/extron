@@ -49,6 +49,7 @@
 #include <kernel/klibc/string.h>
 #include <kernel/errno.h>
 #include <kernel/console.h>
+#include <kernel/drivers/timer.h>
 
 #define ext2_dbg(fmt, ...) ((void)0)
 
@@ -126,6 +127,29 @@ static int ext2_sec_cache_get(struct ext2_mount *m, uint64_t lba, int *idx)
     }
     *idx = oldest;
     return 0;
+}
+
+/* Wall-clock seconds for inode timestamps (0 before the RTC is read). */
+static uint32_t ext2_now(void)
+{
+    int64_t ns = timer_realtime_ns();
+    return ns > 0 ? (uint32_t)(ns / 1000000000LL) : 0;
+}
+
+/* Mounts that must be flushed by ext2_sync_all(). */
+#define EXT2_MAX_MOUNTS 8
+static struct ext2_mount *ext2_mounts[EXT2_MAX_MOUNTS];
+
+static void ext2_sync_cache(struct ext2_mount *m);
+
+void ext2_sync_all(void)
+{
+    for (int i = 0; i < EXT2_MAX_MOUNTS; i++) {
+        struct ext2_mount *m = ext2_mounts[i];
+        if (!m) continue;
+        ext2_sync_cache(m);
+        if (m->dev->flush) m->dev->flush(m->dev);
+    }
 }
 
 static void ext2_sync_cache(struct ext2_mount *m)
@@ -472,6 +496,16 @@ struct ext2_mount *ext2_mount_create(struct ext2_block_dev *dev,
     m->total_blocks     = sb.s_blocks_count;
     m->first_data_block = sb.s_first_data_block;
 
+    /* s_feature_incompat lives at superblock byte 96 (rev 1+ only). Without
+     * FILETYPE (0x2) the dirent type byte must stay zero — e2fsck flags a
+     * set one — and readers must look at the inode instead. */
+    {
+        uint32_t incompat = 0;
+        if (sb.s_rev_level >= 1)
+            memcpy(&incompat, sb_buf + 96, sizeof(incompat));
+        m->has_filetype = (incompat & 0x2) != 0;
+    }
+
     /* rev0 always uses 128-byte inodes. */
     if (sb.s_rev_level >= 1 && sb.s_inode_size != 0)
         m->inode_size = sb.s_inode_size;
@@ -497,12 +531,17 @@ struct ext2_mount *ext2_mount_create(struct ext2_block_dev *dev,
              m->block_size, m->total_inodes, m->total_blocks,
              m->inodes_per_group);
 
+    for (int i = 0; i < EXT2_MAX_MOUNTS; i++) {
+        if (!ext2_mounts[i]) { ext2_mounts[i] = m; break; }
+    }
     return m;
 }
 
 void ext2_mount_destroy(struct ext2_mount *m)
 {
     if (!m) return;
+    for (int i = 0; i < EXT2_MAX_MOUNTS; i++)
+        if (ext2_mounts[i] == m) ext2_mounts[i] = NULL;
     kfree(m->scratch);
     kfree(m->ind_l1);
     kfree(m->ind_l2);
@@ -760,6 +799,10 @@ long ext2_write_data(struct ext2_mount *m, struct ext2_inode_info *info,
         info->disk.i_size = off;
         inode_dirty = true;
     }
+    if (total_written > 0) {
+        info->disk.i_mtime = info->disk.i_ctime = ext2_now();
+        inode_dirty = true;
+    }
 
     if (inode_dirty) {
         ext2_sync_inode(m, info);
@@ -825,8 +868,17 @@ long ext2_read_data(struct ext2_mount *m, struct ext2_inode_info *info,
 /*  Public API: directory iteration                                     */
 /* ==================================================================== */
 
+/*
+ * Directory iteration. `cookie` is a byte offset into the directory (0 =
+ * start); on success out->next is the cookie to resume from. Using the byte
+ * offset rather than "the Nth live entry" keeps iteration stable when entries
+ * are unlinked mid-scan (rm -r does exactly that): every entry that exists
+ * for the whole scan is returned exactly once. A cookie may land inside a
+ * record that a deletion merged into its predecessor, so each block is walked
+ * from its start and entries beginning before the cookie are skipped.
+ */
 int ext2_iter_dir(struct ext2_mount *m, struct ext2_inode_info *info,
-                  size_t idx, struct ext2_dir_result *out)
+                  size_t cookie, struct ext2_dir_result *out)
 {
     if (!m || !info || !out)
         return -EINVAL;
@@ -834,17 +886,12 @@ int ext2_iter_dir(struct ext2_mount *m, struct ext2_inode_info *info,
     if ((info->disk.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR)
         return -ENOTDIR;
 
-    uint32_t dir_size = info->disk.i_size;
-    uint32_t pos = 0;
-    size_t   visible_idx = 0;
+    uint32_t bs = m->block_size;
+    uint64_t dir_size = info->disk.i_size;
 
-    while (pos < dir_size) {
-        /* Which block are we in? */
-        uint32_t file_block = pos / m->block_size;
-        size_t   block_off  = pos % m->block_size;
-
+    for (uint64_t blk = cookie / bs; blk * bs < dir_size; blk++) {
         uint32_t disk_block;
-        int ret = inode_bmap(m, &info->disk, file_block, &disk_block);
+        int ret = inode_bmap(m, &info->disk, (uint32_t)blk, &disk_block);
         if (ret < 0)
             return ret;
         if (disk_block == 0)
@@ -854,30 +901,25 @@ int ext2_iter_dir(struct ext2_mount *m, struct ext2_inode_info *info,
         if (ret < 0)
             return ret;
 
-        /* Walk entries within this block starting from block_off. */
-        while (block_off < m->block_size && pos < dir_size) {
+        uint32_t off = 0;
+        while (off < bs && blk * bs + off < dir_size) {
             struct ext2_disk_dirent *de =
-                (struct ext2_disk_dirent *)(m->scratch + block_off);
-
-            if (de->rec_len == 0)
+                (struct ext2_disk_dirent *)(m->scratch + off);
+            if (de->rec_len < 8 || off + de->rec_len > bs)
                 return 0;  /* corrupt — bail */
 
-            if (de->inode != 0) {
-                /* Live entry. */
-                if (visible_idx == idx) {
-                    out->ino = de->inode;
-                    out->file_type = de->file_type;
-                    size_t nlen = de->name_len;
-                    if (nlen > 255) nlen = 255;
-                    memcpy(out->name, (uint8_t *)de + 8, nlen);
-                    out->name[nlen] = '\0';
-                    return 1;
-                }
-                visible_idx++;
+            uint64_t start = blk * bs + off;
+            if (start >= cookie && de->inode != 0) {
+                out->ino = de->inode;
+                out->file_type = de->file_type;
+                size_t nlen = de->name_len;
+                if (nlen > 255) nlen = 255;
+                memcpy(out->name, (uint8_t *)de + 8, nlen);
+                out->name[nlen] = '\0';
+                out->next = start + de->rec_len;
+                return 1;
             }
-
-            pos       += de->rec_len;
-            block_off += de->rec_len;
+            off += de->rec_len;
         }
     }
 
@@ -1077,6 +1119,18 @@ static int ext2_node_readdir(struct vfs_node *node, size_t index,
         return ret;
 
     entry->ino = res.ino;
+    entry->next_cookie = res.next;
+    /* Without the FILETYPE feature the dirent carries no type; ask the inode. */
+    if (!info->mount->has_filetype) {
+        struct ext2_inode_info *ci = ext2_lookup_inode(info->mount, res.ino);
+        res.file_type = EXT2_FT_REG_FILE;
+        if (ci) {
+            uint16_t fmt = ci->disk.i_mode & EXT2_S_IFMT;
+            if (fmt == EXT2_S_IFDIR) res.file_type = EXT2_FT_DIR;
+            else if (fmt == EXT2_S_IFLNK) res.file_type = EXT2_FT_SYMLINK;
+            ext2_free_inode_info(ci);
+        }
+    }
     /* Map ext2 file_type → vfs_node_type. */
     switch (res.file_type) {
         case EXT2_FT_DIR:      entry->type = VFS_NODE_DIRECTORY; break;
@@ -1132,7 +1186,14 @@ static void ext2_node_destroy(struct vfs_node *node)
          * immediately in ext2_node_remove() instead — see its comment. */
         struct vfs_node dummy;
         dummy.private = info;
-        ext2_node_truncate(&dummy, 0);
+        /* A fast symlink keeps its target text in i_block[]; those words
+         * are not block numbers and must never be freed as such. */
+        bool fast_symlink = (info->disk.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK
+                            && info->disk.i_blocks == 0;
+        if (!fast_symlink)
+            ext2_node_truncate(&dummy, 0);
+        info->disk.i_dtime = ext2_now();
+        ext2_sync_inode(info->mount, info);
         ext2_free_inode(info->mount, info->ino, false);
     }
     ext2_free_inode_info(info);
@@ -1255,12 +1316,54 @@ static int ext2_remove_dirent(struct ext2_mount *m, struct ext2_inode_info *dir,
     return -ENOENT;
 }
 
+/* Free the data blocks of an indirect subtree beyond the first `keep` data
+ * blocks it covers. `level` 1 is a table of data blocks, 2 a table of level-1
+ * tables, 3 of level-2. With keep == 0 the whole subtree, `blk` itself
+ * included, is released and true is returned (the caller clears its pointer).
+ * Otherwise the table is rewritten in place and false is returned.
+ * `di->i_blocks` is kept in step. */
+static bool ext2_trunc_subtree(struct ext2_mount *m, struct ext2_disk_inode *di,
+                               uint32_t blk, int level, uint64_t keep)
+{
+    uint32_t bs = m->block_size, ptrs = bs / 4, sectors = bs / 512;
+    uint64_t span = 1;                          /* data blocks per entry */
+    for (int l = 1; l < level; l++) span *= ptrs;
+
+    uint32_t *tbl = kmalloc(bs);
+    if (tbl && read_block(m, blk, tbl) == 0) {
+        for (uint32_t i = 0; i < ptrs; i++) {
+            if (!tbl[i]) continue;
+            uint64_t start = (uint64_t)i * span;
+            if (keep > start + span - 1 && keep >= start + span)
+                continue;                       /* entirely kept */
+            if (level == 1) {
+                if (keep <= start) {
+                    ext2_free_block(m, tbl[i]);
+                    tbl[i] = 0;
+                    if (di->i_blocks >= sectors) di->i_blocks -= sectors;
+                }
+            } else if (keep <= start) {
+                ext2_trunc_subtree(m, di, tbl[i], level - 1, 0);
+                tbl[i] = 0;
+            } else if (ext2_trunc_subtree(m, di, tbl[i], level - 1, keep - start)) {
+                tbl[i] = 0;
+            }
+        }
+        if (keep) write_block(m, blk, tbl);
+    }
+    if (tbl) kfree(tbl);
+    if (keep == 0) {
+        ext2_free_block(m, blk);
+        if (di->i_blocks >= sectors) di->i_blocks -= sectors;
+        return true;
+    }
+    return false;
+}
+
 /* ftruncate to a non-zero size. Growing is sparse (just raises i_size; reads
  * of the hole return zeros). Shrinking zeroes the tail of the last kept
- * block — so a later grow cannot resurrect stale bytes — and frees whole
- * blocks past it. Only direct and single-indirect blocks are handled: that
- * is all this driver's allocator ever creates; a file that already has
- * double/triple-indirect blocks (made elsewhere) is refused with -ENOSYS. */
+ * block — so a later grow cannot resurrect stale bytes — and frees every
+ * block past it, through all indirection levels. */
 static int ext2_truncate_to(struct ext2_mount *m, struct ext2_inode_info *info,
                             size_t size)
 {
@@ -1272,10 +1375,9 @@ static int ext2_truncate_to(struct ext2_mount *m, struct ext2_inode_info *info,
         ext2_sync_cache(m);
         return r;
     }
-    if (di->i_block[13] || di->i_block[14]) return -ENOSYS;
 
     uint32_t bs = m->block_size, ptrs = bs / 4, sectors = bs / 512;
-    uint32_t keep = (uint32_t)((size + bs - 1) / bs);   /* blocks that stay */
+    uint64_t keep = ((uint64_t)size + bs - 1) / bs;      /* blocks that stay */
 
     m->ind_l1_block = 0; m->ind_l2_block = 0; m->ind_l3_block = 0;
 
@@ -1288,34 +1390,21 @@ static int ext2_truncate_to(struct ext2_mount *m, struct ext2_inode_info *info,
         }
     }
 
-    for (uint32_t i = keep; i < 12; i++) {
-        if (di->i_block[i]) {
+    for (uint32_t i = 0; i < 12; i++) {
+        if (i >= keep && di->i_block[i]) {
             ext2_free_block(m, di->i_block[i]);
             di->i_block[i] = 0;
             if (di->i_blocks >= sectors) di->i_blocks -= sectors;
         }
     }
-    if (di->i_block[12]) {
-        uint32_t *ind1 = kmalloc(bs);
-        if (!ind1) return -ENOMEM;
-        if (read_block(m, di->i_block[12], ind1) == 0) {
-            uint32_t first = keep > 12 ? keep - 12 : 0;
-            for (uint32_t i = first; i < ptrs; i++) {
-                if (ind1[i]) {
-                    ext2_free_block(m, ind1[i]);
-                    ind1[i] = 0;
-                    if (di->i_blocks >= sectors) di->i_blocks -= sectors;
-                }
-            }
-            if (keep <= 12) {
-                ext2_free_block(m, di->i_block[12]);
-                di->i_block[12] = 0;
-                if (di->i_blocks >= sectors) di->i_blocks -= sectors;
-            } else {
-                write_block(m, di->i_block[12], ind1);
-            }
-        }
-        kfree(ind1);
+    uint64_t base[3] = { 12, 12 + (uint64_t)ptrs,
+                         12 + (uint64_t)ptrs + (uint64_t)ptrs * ptrs };
+    for (int lvl = 0; lvl < 3; lvl++) {
+        uint32_t *slot = &di->i_block[12 + lvl];
+        if (!*slot) continue;
+        uint64_t k = keep > base[lvl] ? keep - base[lvl] : 0;
+        if (ext2_trunc_subtree(m, di, *slot, lvl + 1, k))
+            *slot = 0;
     }
     di->i_size = (uint32_t)size;
     int r = ext2_sync_inode(m, info);
@@ -1683,7 +1772,7 @@ static int ext2_alloc_inode(struct ext2_mount *m, uint16_t mode, uint32_t uid, u
                 info->disk.i_uid = uid;
                 info->disk.i_gid = gid;
                 info->disk.i_links_count = 1;
-                // We'd set timestamps here if we had a RTC.
+                info->disk.i_atime = info->disk.i_ctime = info->disk.i_mtime = ext2_now();
                 
                 ext2_sync_inode(m, info);
                 kfree(info);
@@ -1740,7 +1829,7 @@ static int ext2_add_dirent(struct ext2_mount *m, struct ext2_inode_info *dir,
                 }
                 
                 de->inode = ino;
-                de->file_type = file_type;
+                de->file_type = m->has_filetype ? file_type : 0;
                 de->name_len = namelen;
                 memcpy((uint8_t *)de + 8, name, namelen);
                 
@@ -1770,7 +1859,7 @@ static int ext2_add_dirent(struct ext2_mount *m, struct ext2_inode_info *dir,
     de->inode = ino;
     de->rec_len = m->block_size;
     de->name_len = namelen;
-    de->file_type = file_type;
+    de->file_type = m->has_filetype ? file_type : 0;
     memcpy((uint8_t *)de + 8, name, namelen);
     
     if (write_block(m, new_disk_block, m->scratch) < 0) return -EIO;
@@ -1824,14 +1913,14 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
             dot->inode = ino;
             dot->rec_len = 12;
             dot->name_len = 1;
-            dot->file_type = EXT2_FT_DIR;
+            dot->file_type = m->has_filetype ? EXT2_FT_DIR : 0;
             ((uint8_t *)dot + 8)[0] = '.';
             
             struct ext2_disk_dirent *dotdot = (struct ext2_disk_dirent *)(m->scratch + 12);
             dotdot->inode = dir->ino;
             dotdot->rec_len = m->block_size - 12;
             dotdot->name_len = 2;
-            dotdot->file_type = EXT2_FT_DIR;
+            dotdot->file_type = m->has_filetype ? EXT2_FT_DIR : 0;
             ((uint8_t *)dotdot + 8)[0] = '.';
             ((uint8_t *)dotdot + 8)[1] = '.';
             
@@ -1965,6 +2054,8 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
         struct vfs_node dummy;
         dummy.private = target;
         ext2_node_truncate(&dummy, 0);
+        target->disk.i_dtime = ext2_now();
+        ext2_sync_inode(m, target);
         ext2_free_inode(m, target->ino, 1);
     } else {
         if (target->disk.i_links_count > 0)
@@ -2089,7 +2180,16 @@ static int ext2_node_symlink(struct vfs_mount *vfs_m, struct vfs_dentry *parent_
             return -ENOMEM;
         }
         struct vfs_dentry *d = kmalloc(sizeof(*d));
-        vfs_dentry_init(d, node, parent_dentry, name, NULL);
+        if (!d) {
+            vfs_node_release(node);     /* also frees new_lnk via destroy */
+            return -ENOMEM;
+        }
+        if (vfs_dentry_init(d, node, parent_dentry, name, NULL) < 0) {
+            kfree(d);
+            vfs_node_release(node);
+            return -EIO;
+        }
+        vfs_node_release(node);         /* the dentry now holds the reference */
         *out = d;
     } else {
         ext2_free_inode_info(new_lnk);

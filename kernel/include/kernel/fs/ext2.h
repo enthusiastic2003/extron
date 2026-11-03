@@ -19,6 +19,10 @@ struct ext2_block_dev {
                          uint64_t lba, size_t count, const void *buf);
     uint64_t sector_count;
     uint32_t sector_size;   /* 512, virtually always */
+    /* Optional: make previously written sectors durable (device cache
+     * flush). NULL for devices with nothing to flush — but every
+     * allocator must then zero this field, not leave it uninitialised. */
+    int (*flush)(struct ext2_block_dev *dev);
 };
 
 /* =====================================================================
@@ -144,6 +148,7 @@ struct ext2_mount {
     uint32_t  total_blocks;
     uint32_t  first_data_block;  /* 0 for bs>1K, 1 for bs=1K */
     uint8_t  *scratch;           /* block_size bytes, reusable read buffer */
+    bool      has_filetype;      /* incompat FILETYPE feature: dirents carry a type byte */
 
     /* Indirect-block cache. Without this, inode_bmap() re-reads the
      * same indirect table from disk once per file block whenever a
@@ -190,6 +195,7 @@ struct ext2_dir_result {
     uint32_t ino;
     uint8_t  file_type;           /* EXT2_FT_* */
     char     name[256];           /* null-terminated */
+    uint64_t next;                /* cookie to resume iteration after this entry */
 };
 
 /* =====================================================================
@@ -203,6 +209,10 @@ struct ext2_dir_result {
 
 /* Read the superblock, validate magic, populate the mount struct.
  * Returns NULL on failure (bad magic, I/O error, allocation failure). */
+/* Write back every dirty cached sector of every mounted ext2 filesystem and
+ * flush the underlying devices. Used by fsync/sync and before reboot. */
+void ext2_sync_all(void);
+
 struct ext2_mount *ext2_mount_create(struct ext2_block_dev *dev,
                                      uint64_t part_lba);
 void ext2_mount_destroy(struct ext2_mount *m);

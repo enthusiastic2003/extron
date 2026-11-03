@@ -19,10 +19,19 @@ args = ap.parse_args()
 tmp = tempfile.mkdtemp()
 vars_ = os.path.join(tmp, "vars.fd")
 open(vars_, "wb").write(open("/usr/share/OVMF/OVMF_VARS_4M.fd", "rb").read())
+# Fresh data disk per run so tests that use /mnt (virtio-blk + ext2) run too.
+disk_img = os.path.join(tmp, "disk.img")
+disk_args = []
+try:
+    subprocess.check_call(["mke2fs", "-q", "-t", "ext2", "-E", "revision=0", "-b", "1024", disk_img, "32M"])
+    disk_args = ["-drive", f"if=none,id=data0,format=raw,file={disk_img}",
+                 "-device", "virtio-blk-pci,drive=data0,disable-modern=on"]
+except (OSError, subprocess.CalledProcessError):
+    print("note: mke2fs unavailable; running without a data disk")
 q = subprocess.Popen(["qemu-system-x86_64", "-machine", "q35", "-m", args.mem, "-cpu", "max", "-display", "none",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive", f"if=pflash,format=raw,unit=1,file={vars_}",
-    "-drive", "format=raw,file=fat:rw:build-x86_64/esp", "-serial", "stdio", "-monitor", "none", "-no-reboot"],
+    "-drive", "format=raw,file=fat:rw:build-x86_64/esp"] + disk_args + ["-serial", "stdio", "-monitor", "none", "-no-reboot"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 fcntl.fcntl(q.stdout, fcntl.F_SETFL, os.O_NONBLOCK)
 buf = b""

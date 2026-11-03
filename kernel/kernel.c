@@ -1,5 +1,9 @@
 #include <kernel/drivers/pty.h>
 #include <kernel/console.h>
+
+/* Architectures with a data-disk driver override this (strong definition).
+ * It runs after the root filesystem and /dev are up. */
+__attribute__((weak)) void arch_mount_data_disk(void) {}
 #include <kernel/panic.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
@@ -147,6 +151,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * now resolves through the VFS, so anything placed under /bin at
      * runtime is immediately runnable. */
     devfs_init();
+    arch_mount_data_disk();
     
 
 

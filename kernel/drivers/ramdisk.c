@@ -51,6 +51,7 @@ bool try_ramdisk_mount(uint64_t mb2_addr) {
         rdev->dev.read_sectors = ram_read;
         rdev->dev.write_sectors = ram_write;
         rdev->dev.sector_size = 512;
+        rdev->dev.flush = NULL;
         rdev->dev.sector_count = initrd_size / 512;
         rdev->data = initrd_data;
         

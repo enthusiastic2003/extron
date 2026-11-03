@@ -8,10 +8,15 @@ args = sys.argv[1:]; limit = 40
 if args[:1] == ["-t"]: limit = float(args[1]); args = args[2:]
 tmp = tempfile.mkdtemp(); vars_ = os.path.join(tmp, "vars.fd")
 open(vars_, "wb").write(open("/usr/share/OVMF/OVMF_VARS_4M.fd", "rb").read())
+# EXTRON_DISK=<raw image>: attach it as a legacy virtio-blk data disk (/mnt).
+disk_args = []
+if os.environ.get("EXTRON_DISK"):
+    disk_args = ["-drive", f"if=none,id=data0,format=raw,file={os.environ['EXTRON_DISK']}",
+                 "-device", "virtio-blk-pci,drive=data0,disable-modern=on"]
 q = subprocess.Popen(["qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-cpu", "max", "-display", "none",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive", f"if=pflash,format=raw,unit=1,file={vars_}",
-    "-drive", "format=raw,file=fat:rw:build-x86_64/esp", "-serial", "stdio", "-monitor", "none", "-no-reboot"],
+    "-drive", "format=raw,file=fat:rw:build-x86_64/esp"] + disk_args + ["-serial", "stdio", "-monitor", "none", "-no-reboot"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 fcntl.fcntl(q.stdout, fcntl.F_SETFL, os.O_NONBLOCK)
 buf = b""; t0 = time.time()

@@ -82,6 +82,10 @@ struct vfs_setattr {
 
 struct vfs_dirent {
     uint64_t ino;
+    /* Resume position after this entry, for filesystems whose directory
+     * cursor is not simply "entry number" (ext2: a byte offset, stable under
+     * unlink). 0 means the caller advances by one. */
+    uint64_t next_cookie;
     enum vfs_node_type type;
     char name[VFS_NAME_MAX + 1];
 };

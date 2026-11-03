@@ -1,6 +1,7 @@
 #include <kernel/drivers/pty.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/fs/file.h>
+#include <kernel/fs/ext2.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/devfs.h>
 #include <kernel/errno.h>
@@ -372,19 +373,23 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
     irq_spin_lock(&f->lock);
     struct extron_dirent *entry = buffer;
     struct vfs_dirent ventry;
+    ventry.next_cookie = 0;
     int result = vfs_readdir(f->object.node, f->offset, &ventry);
     if (result > 0) {
         entry->ino = ventry.ino;
-        entry->off = (int64_t)(f->offset + 1);
+        size_t next = ventry.next_cookie ? (size_t)ventry.next_cookie : f->offset + 1;
+        entry->off = (int64_t)next;
         entry->reclen = sizeof(*entry);
-        entry->type = ventry.type == VFS_NODE_DIRECTORY ? 4 : 8;
+        /* d_type: DT_DIR 4, DT_LNK 10, DT_REG 8 */
+        entry->type = ventry.type == VFS_NODE_DIRECTORY ? 4
+                    : ventry.type == VFS_NODE_SYMLINK   ? 10 : 8;
         size_t name_length = strlen(ventry.name) + 1;
         if (name_length > sizeof(entry->name)) {
             irq_spin_unlock(&f->lock);
             return -EIO;
         }
         memcpy(entry->name, ventry.name, name_length);
-        f->offset++;
+        f->offset = next;
         result = sizeof(*entry);
     }
     irq_spin_unlock(&f->lock);
@@ -667,12 +672,13 @@ long file_truncate(struct proc *p, int fd, int64_t size) {
     return r;
 }
 
-/* fsync: validates the descriptor. The root filesystem is currently
- * RAM-backed, so there is nothing to flush; a block-device-backed
- * filesystem hooks its flush in here. */
+/* fsync: validates the descriptor, then writes back every dirty sector and
+ * flushes the devices. Coarser than a per-file flush (it covers all mounted
+ * filesystems) but always sufficient. */
 long file_sync(struct proc *p, int fd) {
-    if (!descriptor_ok(p, fd))
+    if (fd != -1 && !descriptor_ok(p, fd))   /* -1: sync(2), no descriptor */
         return -EBADF;
+    ext2_sync_all();
     return 0;
 }
 

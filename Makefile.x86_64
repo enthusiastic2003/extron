@@ -52,6 +52,15 @@ QEMU      ?= qemu-system-x86_64
 QEMU_MEM  ?= 512M
 QEMU_DISPLAY ?= none
 
+# Persistent data disk: a raw ext2 image attached as a legacy virtio-blk
+# device, mounted by the kernel at /mnt. Created on first use, never
+# overwritten (use `make disk-clean` to start over).
+DISK      ?= $(BUILD)/disk.img
+DISK_MB   ?= 64
+DISK_QEMU  = -drive if=none,id=data0,format=raw,file=$(DISK) \
+             -device virtio-blk-pci,drive=data0,disable-modern=on
+DISK_ARGS  = $(if $(wildcard $(DISK)),$(DISK_QEMU))
+
 all: $(KERNEL_ELF) $(LOADER) esp
 
 $(BUILD)/%.o: %.c
@@ -87,10 +96,25 @@ QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display $(QEMU_DISPLAY) \
             -drive if=pflash,format=raw,unit=0,readonly=on,file=$(OVMF_CODE) \
             -drive if=pflash,format=raw,unit=1,file=$(BUILD)/OVMF_VARS.fd \
             -drive format=raw,file=fat:rw:$(ESP) \
+            $(DISK_ARGS) \
             -serial stdio -no-reboot
 
+$(DISK):
+	@mkdir -p $(dir $@)
+	mke2fs -q -t ext2 -E revision=0 -b 1024 $@ $(DISK_MB)M
+
+disk: $(DISK)
+
+disk-clean:
+	rm -f $(DISK)
+
+# Boot, write files to the data disk, kill QEMU, boot again, verify them,
+# and fsck the image on the host.
+check-persist: esp
+	python3 tools/x86_persist_test.py
+
 run: QEMU_DISPLAY = gtk
-run: esp $(BUILD)/OVMF_VARS.fd
+run: esp $(BUILD)/OVMF_VARS.fd $(DISK)
 	$(QEMU) $(QEMU_ARGS)
 
 # Headless boot under OVMF; passes iff the smoke test reports success.
@@ -122,5 +146,5 @@ soak: esp
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean userland check-userland soak
+.PHONY: all esp run check clean userland check-userland soak disk disk-clean check-persist
 -include $(DEPS)

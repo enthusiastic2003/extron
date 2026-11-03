@@ -6,6 +6,7 @@
 #include <kernel/mm/uvm.h>
 #include <kernel/mm/paging.h>
 #include <kernel/drivers/timer.h>
+#include <kernel/fs/ext2.h>
 #include <kernel/drivers/keyboard.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/power.h>
@@ -1111,13 +1112,20 @@ static uint64_t sys_msync(uint64_t addr, uint64_t len, uint64_t flags,
  * there's no "success" value to report — only the permission failure. */
 static uint64_t sys_reboot(uint64_t a, uint64_t b, uint64_t c,
                            struct arch_frame *f) {
-    (void)a; (void)b; (void)c; (void)f;
+    (void)b; (void)c; (void)f;
     struct proc *p = my_proc();
     irq_spin_lock(&p->cred_lock);
     bool root = p->euid == 0;
     irq_spin_unlock(&p->cred_lock);
     if (!root)
         return (uint64_t)-EPERM;
+    ext2_sync_all();   /* nothing may be left in the write-back cache */
+#ifdef __x86_64__
+    if ((uint32_t)a == 0x4321fedcu) {   /* Linux RB_POWER_OFF */
+        extern void power_off(void);
+        power_off();
+    }
+#endif
     power_reset();
 }
 

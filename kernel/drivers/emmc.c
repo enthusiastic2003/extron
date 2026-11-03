@@ -578,6 +578,7 @@ void emmc_mount_ext2(void) {
     dev->write_sectors = emmc_block_dev_write;
     dev->sector_size = 512;
     dev->sector_count = 0; /* Unused by ext2_read_data */
+    dev->flush = NULL;
 
     extern const struct vfs_fs_ops ext2_fs_ops;
 
