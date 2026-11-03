@@ -38,6 +38,7 @@ struct tty {
     struct tty_termios termios;
     struct tty_winsize winsize;
     uint64_t foreground_pgid;
+    uint64_t session_id;        /* session whose controlling terminal this is (0: none) */
 
     /* Raw input ring buffer (from hardware or PTY master) */
     char     in_buf[TTY_BUFFER_SIZE];

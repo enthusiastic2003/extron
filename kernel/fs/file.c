@@ -1,6 +1,7 @@
 #include <kernel/drivers/pty.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/fs/file.h>
+#include <kernel/fs/lock.h>
 #include <kernel/fs/ext2.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/fs/devfs.h>
@@ -16,6 +17,7 @@
 
 /* Extron's mlibc ABI values (abi-bits/fcntl.h). */
 #define O_ACCMODE  03
+#define O_RDONLY   00
 #define O_WRONLY   01
 #define O_RDWR     02
 #define O_APPEND   02000
@@ -37,8 +39,29 @@ struct pipe_buffer {
     size_t used;
     unsigned readers;
     unsigned writers;
+    struct vfs_node *fifo_node;   /* named FIFO this pipe backs (held), else NULL */
     char data[PIPE_CAPACITY];
 };
+
+/* Named FIFOs: every open of one filesystem node shares a pipe_buffer, which
+ * lives while any descriptor is open and is then discarded (POSIX). */
+#define FIFO_MAX 32
+static struct pipe_buffer *fifo_table[FIFO_MAX];
+
+static struct pipe_buffer *fifo_lookup(struct vfs_node *node) {
+    for (int i = 0; i < FIFO_MAX; i++)
+        if (fifo_table[i] && fifo_table[i]->fifo_node == node)
+            return fifo_table[i];
+    return NULL;
+}
+
+static void fifo_forget(struct pipe_buffer *pipe) {
+    for (int i = 0; i < FIFO_MAX; i++)
+        if (fifo_table[i] == pipe)
+            fifo_table[i] = NULL;
+    if (pipe->fifo_node)
+        vfs_node_release(pipe->fifo_node);
+}
 
 /* Placeholder for file_pipe()'s two-slot reservation below. Never
  * installed as a real descriptor and never dereferenced. */
@@ -73,12 +96,13 @@ static void file_release(struct open_file *f) {
     if (!last)
         return;
 
-    if (f->kind == FILE_PIPE_READER || f->kind == FILE_PIPE_WRITER) {
+    if (f->kind == FILE_PIPE_READER || f->kind == FILE_PIPE_WRITER
+            || f->kind == FILE_PIPE_RDWR) {
         struct pipe_buffer *pipe = f->object.pipe;
         irq_spin_lock(&pipe->lock);
-        if (f->kind == FILE_PIPE_READER)
+        if (f->kind != FILE_PIPE_WRITER)
             pipe->readers--;
-        else
+        if (f->kind != FILE_PIPE_READER)
             pipe->writers--;
         bool free_pipe = !pipe->readers && !pipe->writers;
         /* Readers need EOF when the final writer closes; writers need to
@@ -86,9 +110,12 @@ static void file_release(struct open_file *f) {
         wakeup(pipe);
         file_poll_notify();
         irq_spin_unlock(&pipe->lock);
-        if (free_pipe)
+        if (free_pipe) {
+            fifo_forget(pipe);
             kfree(pipe);
+        }
     } else if (f->kind == FILE_VNODE) {
+        lock_release_file(f);           /* flock(2) dies with the description */
         vfs_path_release(&f->path);
         vfs_node_release(f->object.node);
     }
@@ -171,6 +198,8 @@ void file_table_close_all(struct proc *p) {
             struct open_file *f = p->files[fd];
             p->files[fd] = NULL;
             p->fd_flags[fd] = 0;
+            if (f->kind == FILE_VNODE)
+                lock_release_proc_node(p, f->object.node);
             file_release(f);
         }
     }
@@ -182,6 +211,78 @@ void file_table_close_cloexec(struct proc *p) {
     for (int fd = 0; fd < PROC_MAX_FDS; fd++)
         if (p->files[fd] && (p->fd_flags[fd] & FD_CLOEXEC))
             file_close(p, fd);
+}
+
+/* Open a named FIFO: attach `f` to the node's shared pipe, creating it on the
+ * first open, and apply the POSIX blocking rules. Consumes `f` and `node`
+ * on failure; on success `f` owns the descriptor slot. */
+static int fifo_open(struct proc *p, int fd, struct open_file *f,
+                     struct vfs_node *node, int flags) {
+    int acc = flags & O_ACCMODE;
+    struct pipe_buffer *pipe = fifo_lookup(node);
+    if (!pipe) {
+        int slot = -1;
+        for (int i = 0; i < FIFO_MAX; i++)
+            if (!fifo_table[i]) { slot = i; break; }
+        pipe = slot < 0 ? NULL : kmalloc(sizeof(*pipe));
+        if (!pipe) {
+            vfs_path_release(&f->path);
+            vfs_node_release(node);
+            kfree(f);
+            return slot < 0 ? -ENFILE : -ENOMEM;
+        }
+        memset(pipe, 0, sizeof(*pipe));
+        pipe->lock = (spinlock_t)SPINLOCK_INIT;
+        pipe->fifo_node = node;         /* the pipe keeps the lookup reference */
+        vfs_node_retain(node);
+        fifo_table[slot] = pipe;
+    }
+    /* Descriptor now counts toward its end(s); the registry entry cannot be
+     * freed under us while readers+writers is non-zero. */
+    irq_spin_lock(&pipe->lock);
+    if (acc != O_WRONLY) pipe->readers++;
+    if (acc != O_RDONLY) pipe->writers++;
+    wakeup(pipe);                       /* a peer may be waiting for us */
+    file_poll_notify();
+
+    int err = 0;
+    if (acc == O_WRONLY && !pipe->readers && (flags & O_NONBLOCK)) {
+        err = -ENXIO;
+    } else if (acc != O_RDWR && !(flags & O_NONBLOCK)) {
+        unsigned *peer = acc == O_RDONLY ? &pipe->writers : &pipe->readers;
+        while (!*peer && !err) {
+            sleep(pipe, &pipe->lock);
+            if (!*peer && signal_pending_unblocked(my_thread()))
+                err = -4;               /* EINTR */
+        }
+    }
+    if (err) {
+        if (acc != O_WRONLY) pipe->readers--;
+        if (acc != O_RDONLY) pipe->writers--;
+        bool free_pipe = !pipe->readers && !pipe->writers;
+        wakeup(pipe);
+        irq_spin_unlock(&pipe->lock);
+        if (free_pipe) {
+            fifo_forget(pipe);
+            kfree(pipe);
+        }
+        vfs_path_release(&f->path);
+        vfs_node_release(node);
+        kfree(f);
+        return err;
+    }
+    irq_spin_unlock(&pipe->lock);
+
+    /* The pipe holds its own node reference; drop the open's. */
+    vfs_path_release(&f->path);
+    vfs_node_release(node);
+    f->kind = acc == O_RDONLY ? FILE_PIPE_READER
+            : acc == O_WRONLY ? FILE_PIPE_WRITER : FILE_PIPE_RDWR;
+    f->object.pipe = pipe;
+    f->flags = flags & (O_NONBLOCK | O_ACCMODE);
+    p->files[fd] = f;
+    p->fd_flags[fd] = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    return 0;
 }
 
 int file_open_at(struct proc *p, const struct vfs_path *base,
@@ -209,6 +310,10 @@ int file_open_at(struct proc *p, const struct vfs_path *base,
     f->refs = 1;
     f->kind = FILE_VNODE;
     f->object.node = node;
+    if (node->type == VFS_NODE_FIFO) {
+        int r = fifo_open(p, fd, f, node, flags);
+        return r < 0 ? r : fd;
+    }
     if (devfs_is_ptmx(f->object.node)) {
         struct vfs_node *master = pty_allocate_master();
         if (!master) {
@@ -382,7 +487,8 @@ long file_readdir(struct proc *p, int fd, void *buffer, size_t size) {
         entry->reclen = sizeof(*entry);
         /* d_type: DT_DIR 4, DT_LNK 10, DT_REG 8 */
         entry->type = ventry.type == VFS_NODE_DIRECTORY ? 4
-                    : ventry.type == VFS_NODE_SYMLINK   ? 10 : 8;
+                    : ventry.type == VFS_NODE_SYMLINK   ? 10
+                    : ventry.type == VFS_NODE_FIFO      ? 1 : 8;
         size_t name_length = strlen(ventry.name) + 1;
         if (name_length > sizeof(entry->name)) {
             irq_spin_unlock(&f->lock);
@@ -418,6 +524,14 @@ int file_get_path(struct proc *p, int fd, struct vfs_path *out) {
     *out = f->path;
     vfs_path_retain(out);
     return 0;
+}
+
+const struct open_file *file_description(struct proc *p, int fd) {
+    return descriptor_ok(p, fd) ? p->files[fd] : NULL;
+}
+
+uint64_t file_offset(struct proc *p, int fd) {
+    return descriptor_ok(p, fd) ? (uint64_t)p->files[fd]->offset : 0;
 }
 
 int file_get_node(struct proc *p, int fd, struct vfs_node **out) {
@@ -536,7 +650,7 @@ static long file_read_at(struct proc *p, int fd, void *buffer, size_t count,
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_PIPE_READER)
+    if (f->kind == FILE_PIPE_READER || f->kind == FILE_PIPE_RDWR)
         return positional ? -ESPIPE : pipe_read(f, buffer, count);
     if (f->kind != FILE_VNODE)
         return -EBADF;
@@ -585,7 +699,7 @@ static long file_write_at(struct proc *p, int fd, const void *buffer,
     if (!descriptor_ok(p, fd))
         return -EBADF;
     struct open_file *f = p->files[fd];
-    if (f->kind == FILE_PIPE_WRITER)
+    if (f->kind == FILE_PIPE_WRITER || f->kind == FILE_PIPE_RDWR)
         return positional ? -ESPIPE : pipe_write(f, buffer, count);
     if (f->kind != FILE_VNODE)
         return -EBADF;
@@ -712,6 +826,10 @@ int file_close(struct proc *p, int fd) {
     struct open_file *f = p->files[fd];
     p->files[fd] = NULL;
     p->fd_flags[fd] = 0;
+    /* POSIX: closing ANY descriptor for a file drops this process's record
+     * locks on it. */
+    if (f->kind == FILE_VNODE)
+        lock_release_proc_node(p, f->object.node);
     file_release(f);
     return 0;
 }
@@ -762,15 +880,16 @@ int file_poll(struct proc *p, int fd, short events, short *revents) {
     } else {
         struct pipe_buffer *pipe = f->object.pipe;
         irq_spin_lock(&pipe->lock);
-        if (f->kind == FILE_PIPE_READER) {
+        if (f->kind != FILE_PIPE_WRITER) {
             if ((events & POLLIN) && (pipe->used || !pipe->writers))
                 *revents |= POLLIN;
-            if (!pipe->writers)
+            if (!pipe->writers && f->kind == FILE_PIPE_READER)
                 *revents |= POLLHUP;
-        } else {
+        }
+        if (f->kind != FILE_PIPE_READER) {
             if ((events & POLLOUT) && (pipe->used < PIPE_CAPACITY || !pipe->readers))
                 *revents |= POLLOUT;
-            if (!pipe->readers)
+            if (!pipe->readers && f->kind == FILE_PIPE_WRITER)
                 *revents |= POLLERR;
         }
         irq_spin_unlock(&pipe->lock);

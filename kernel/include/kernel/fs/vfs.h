@@ -48,6 +48,7 @@ enum vfs_node_type {
     VFS_NODE_DIRECTORY,
     VFS_NODE_SYMLINK,
     VFS_NODE_DEVICE,
+    VFS_NODE_FIFO,
 };
 
 struct vfs_timestamp {
@@ -198,6 +199,8 @@ int vfs_mount_root(const struct vfs_fs_ops *ops, void *private);
 int vfs_mount_at(const struct vfs_path *cwd, const char *path,
                  const struct vfs_fs_ops *ops, void *private);
 int vfs_root_path(struct vfs_path *out);
+int vfs_mknod(const struct vfs_path *cwd, const char *path, enum vfs_node_type type,
+              uint32_t mode, const struct vfs_cred *cred);
 int vfs_lookup_path(const struct vfs_path *cwd, const char *path,
                     struct vfs_path *out);
 int vfs_lookup_path_nofollow(const struct vfs_path *cwd, const char *path,

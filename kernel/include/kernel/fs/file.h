@@ -15,6 +15,7 @@ enum open_file_kind {
     FILE_VNODE,
     FILE_PIPE_READER,
     FILE_PIPE_WRITER,
+    FILE_PIPE_RDWR,      /* O_RDWR open of a FIFO: both ends of one pipe */
 };
 
 /* One shared open-file description. Descriptor slots are per-process;
@@ -69,6 +70,8 @@ void    file_poll_notify(void);
 int     file_poll_wait_until(uint64_t deadline_tick);
 int     file_get_path(struct proc *p, int fd, struct vfs_path *out);
 int     file_get_node(struct proc *p, int fd, struct vfs_node **out);
+const struct open_file *file_description(struct proc *p, int fd);   /* identity token for locks */
+uint64_t file_offset(struct proc *p, int fd);
 
 #endif
 struct tty *file_get_tty(struct proc *p, int fd);

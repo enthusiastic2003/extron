@@ -17,11 +17,13 @@
 #define EBUSY          16
 #define EEXIST         17
 #define EXDEV          18
+#define ENXIO           6
 #define ENODEV         19
 #define ENOTDIR        20
 #define EISDIR         21
 #define EINVAL         22
 #define ENOTTY         25
+#define ENFILE         23
 #define EMFILE         24
 #define EFBIG          27
 #define ENOSPC         28
@@ -30,6 +32,8 @@
 #define EPIPE          32
 #define ERANGE         34
 #define ENAMETOOLONG   36
+#define EDEADLK        35
+#define ENOLCK         37
 #define ENOSYS         38
 #define ENOTEMPTY      39
 #define ELOOP          40

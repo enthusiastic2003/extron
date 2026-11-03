@@ -1128,6 +1128,7 @@ static int ext2_node_readdir(struct vfs_node *node, size_t index,
             uint16_t fmt = ci->disk.i_mode & EXT2_S_IFMT;
             if (fmt == EXT2_S_IFDIR) res.file_type = EXT2_FT_DIR;
             else if (fmt == EXT2_S_IFLNK) res.file_type = EXT2_FT_SYMLINK;
+            else if (fmt == EXT2_S_IFIFO) res.file_type = EXT2_FT_FIFO;
             ext2_free_inode_info(ci);
         }
     }
@@ -1136,6 +1137,7 @@ static int ext2_node_readdir(struct vfs_node *node, size_t index,
         case EXT2_FT_DIR:      entry->type = VFS_NODE_DIRECTORY; break;
         case EXT2_FT_SYMLINK:  entry->type = VFS_NODE_SYMLINK;  break;
         case EXT2_FT_REG_FILE: entry->type = VFS_NODE_REGULAR;  break;
+        case EXT2_FT_FIFO:     entry->type = VFS_NODE_FIFO;     break;
         default:               entry->type = VFS_NODE_REGULAR;   break;
     }
     memcpy(entry->name, res.name, strlen(res.name) + 1);
@@ -1578,6 +1580,7 @@ static enum vfs_node_type ext2_mode_to_vfs_type(uint16_t mode)
     switch (mode & EXT2_S_IFMT) {
         case EXT2_S_IFDIR: return VFS_NODE_DIRECTORY;
         case EXT2_S_IFLNK: return VFS_NODE_SYMLINK;
+        case EXT2_S_IFIFO: return VFS_NODE_FIFO;
         default:            return VFS_NODE_REGULAR;
     }
 }
@@ -1879,15 +1882,21 @@ static int ext2_node_create(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
     struct vfs_node *parent = parent_dentry->node;
     struct ext2_inode_info *dir = (struct ext2_inode_info *)parent->private;
     
-    if (type != VFS_NODE_REGULAR && type != VFS_NODE_DIRECTORY) return -ENOSYS; /* Only files and dirs for now */
+    if (type != VFS_NODE_REGULAR && type != VFS_NODE_DIRECTORY
+            && type != VFS_NODE_FIFO)
+        return -ENOSYS;     /* files, directories and FIFOs only */
 
     /* Check for existing entry using the raw inode lookup — avoids creating
      * a VFS dentry that would steal the parent reference we don't own. */
     if (lookup_child_ino(m, dir, name, strlen(name)) != 0)
         return -EEXIST;
 
-    uint16_t ext2_mode = (type == VFS_NODE_DIRECTORY) ? (EXT2_S_IFDIR | mode) : (EXT2_S_IFREG | mode);
-    uint8_t ext2_type = (type == VFS_NODE_DIRECTORY) ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+    uint16_t ext2_mode = (type == VFS_NODE_DIRECTORY) ? (EXT2_S_IFDIR | mode)
+                       : (type == VFS_NODE_FIFO)      ? (EXT2_S_IFIFO | mode)
+                                                      : (EXT2_S_IFREG | mode);
+    uint8_t ext2_type = (type == VFS_NODE_DIRECTORY) ? EXT2_FT_DIR
+                      : (type == VFS_NODE_FIFO)      ? EXT2_FT_FIFO
+                                                     : EXT2_FT_REG_FILE;
     
     uint32_t ino;
     int ret = ext2_alloc_inode(m, ext2_mode, uid, gid, &ino);

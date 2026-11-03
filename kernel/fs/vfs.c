@@ -741,8 +741,26 @@ int vfs_open(const struct vfs_path *cwd, const char *path, int flags,
     return result;
 }
 
+static int vfs_make_node(const struct vfs_path *cwd, const char *path,
+                         enum vfs_node_type type, uint32_t mode,
+                         const struct vfs_cred *cred);
+
 int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode,
               const struct vfs_cred *cred) {
+    return vfs_make_node(cwd, path, VFS_NODE_DIRECTORY, mode, cred);
+}
+
+/* mknod(2) for the node types we can represent: FIFOs and regular files. */
+int vfs_mknod(const struct vfs_path *cwd, const char *path, enum vfs_node_type type,
+              uint32_t mode, const struct vfs_cred *cred) {
+    if (type != VFS_NODE_FIFO && type != VFS_NODE_REGULAR)
+        return -EPERM;
+    return vfs_make_node(cwd, path, type, mode, cred);
+}
+
+static int vfs_make_node(const struct vfs_path *cwd, const char *path,
+                         enum vfs_node_type type, uint32_t mode,
+                         const struct vfs_cred *cred) {
     struct vfs_path parent;
     char leaf[VFS_NAME_MAX + 1];
     int result = walk(cwd, path, true, cred, &parent, leaf);
@@ -763,9 +781,9 @@ int vfs_mkdir(const struct vfs_path *cwd, const char *path, uint32_t mode,
     }
     struct vfs_dentry *created = NULL;
     uint32_t uid, gid;
-    creation_identity(&parent, cred, &mode, &uid, &gid, true);
+    creation_identity(&parent, cred, &mode, &uid, &gid, type == VFS_NODE_DIRECTORY);
     result = parent.mount->ops->create(parent.mount, parent.dentry, leaf,
-                                       VFS_NODE_DIRECTORY, mode, uid, gid,
+                                       type, mode, uid, gid,
                                        &created);
     if (result == 0) {
         created->owner_mount = parent.mount;

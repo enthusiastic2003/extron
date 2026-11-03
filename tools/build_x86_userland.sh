@@ -45,13 +45,25 @@ if [ ! -d "$SRC/mlibc/.git" ]; then
 else
     git -C "$SRC/mlibc" fetch -q origin "$MLIBC_REF" && git -C "$SRC/mlibc" checkout -q FETCH_HEAD
 fi
+# mlibc's linux option (epoll, signalfd, mremap, ...) wants a private copy of
+# the Linux UAPI headers; it refuses system include paths.
+KH="$UL/linux-headers"
+if [ ! -d "$KH/linux" ]; then
+    mkdir -p "$KH"
+    cp -r /usr/include/linux /usr/include/asm-generic "$KH/"
+    if [ -d /usr/include/x86_64-linux-gnu/asm ]; then cp -r /usr/include/x86_64-linux-gnu/asm "$KH/"
+    else cp -r /usr/include/asm "$KH/"; fi
+fi
 rm -rf "$UL/build-mlibc"
 meson setup "$UL/build-mlibc" "$SRC/mlibc" \
     --cross-file "$REPO/third_party/mlibc/cross-x86_64-extron.ini" \
-    --prefix=/usr --libdir=lib -Dbuildtype=release -Dheaders_only=false >/dev/null
+    --prefix=/usr --libdir=lib -Dbuildtype=release -Dheaders_only=false \
+    -Dlinux_kernel_headers="$KH" >/dev/null
 ninja -C "$UL/build-mlibc" >/dev/null
 rm -rf "$SYSROOT"
 DESTDIR="$SYSROOT" ninja -C "$UL/build-mlibc" install >/dev/null
+# The linux option's <sys/ioctl.h> etc. include <asm/...> and <linux/...>.
+cp -r "$KH"/. "$SYSROOT/usr/include/"
 test -f "$SYSROOT/usr/lib/ld.so" && test -f "$SYSROOT/usr/lib/libc.so" && test -f "$SYSROOT/usr/lib/crt1.o"
 
 # ---- BusyBox ----------------------------------------------------------------

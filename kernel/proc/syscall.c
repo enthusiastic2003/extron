@@ -14,6 +14,7 @@
 #include <kernel/proc/futex.h>
 #include <kernel/proc/resource.h>
 #include <kernel/fs/file.h>
+#include <kernel/fs/lock.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/errno.h>
 #include <kernel/klibc/string.h>
@@ -548,6 +549,9 @@ static uint64_t sys_yield(uint64_t a, uint64_t b, uint64_t c,
 #define TIOCSWINSZ 0x5414
 #define TIOCGPGRP  0x540F
 #define TIOCSPGRP  0x5410
+#define TIOCSCTTY  0x540E
+#define TIOCNOTTY  0x5422
+#define TIOCGSID   0x5429
 #define POLLIN 0x0001
 #define POLLOUT 0x0004
 #define POLLNVAL 0x0020
@@ -602,6 +606,42 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
             return (uint64_t)-EFAULT;
         tty_set_winsize(t, (const struct tty_winsize *)arg);
+        return 0;
+    }
+    if (request == TIOCSCTTY) {
+        /* Only a session leader without a controlling terminal may claim
+         * one, and a tty already owned by another session needs the steal
+         * flag (arg == 1) from root. */
+        if (p->pid != p->sid)
+            return (uint64_t)-EPERM;
+        irq_spin_lock(&t->lock);
+        uint64_t owner = t->session_id;
+        if (owner && owner != p->sid && !(arg == 1 && p->euid == 0)) {
+            irq_spin_unlock(&t->lock);
+            return (uint64_t)-EPERM;
+        }
+        t->session_id = p->sid;
+        t->foreground_pgid = p->pgid;
+        irq_spin_unlock(&t->lock);
+        return 0;
+    }
+    if (request == TIOCNOTTY) {
+        irq_spin_lock(&t->lock);
+        bool ours = t->session_id == p->sid;
+        if (ours)
+            t->session_id = 0;
+        irq_spin_unlock(&t->lock);
+        return ours ? 0 : (uint64_t)-ENOTTY;
+    }
+    if (request == TIOCGSID) {
+        if (!user_buffer_ok(p, arg, sizeof(int)))
+            return (uint64_t)-EFAULT;
+        irq_spin_lock(&t->lock);
+        uint64_t sid = t->session_id;
+        irq_spin_unlock(&t->lock);
+        if (!sid)
+            return (uint64_t)-ENOTTY;
+        *(int *)arg = (int)sid;
         return 0;
     }
     if (request == TIOCGPGRP) {
@@ -785,6 +825,12 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t request, uint64_t arg,
             return (uint64_t)file_get_status_flags(my_proc(), (int)fd);
         case F_SETFL:
             return (uint64_t)file_set_status_flags(my_proc(), (int)fd, (int)arg);
+        case 5: case 6: case 7: {        /* F_GETLK / F_SETLK / F_SETLKW */
+            if (!user_buffer_ok(my_proc(), arg, 32))   /* sizeof(struct flock) */
+                return (uint64_t)-EFAULT;
+            return (uint64_t)lock_fcntl(my_proc(), (int)fd, (int)request,
+                                        (void *)arg);
+        }
         default:
             return (uint64_t)-EINVAL;
     }
@@ -833,6 +879,48 @@ static uint64_t sys_pause(uint64_t a, uint64_t b, uint64_t c,
     thread_set_sleeping(t);
     schedule();
     return (uint64_t)-EINTR;
+}
+
+/* sigsuspend(mask): atomically install `mask` and sleep until a signal that
+ * mask leaves deliverable arrives. Always fails with EINTR; the original mask
+ * is restored when the handler returns (same mechanism as ppoll/pselect). */
+static uint64_t sys_sigsuspend(uint64_t mask_addr, uint64_t b, uint64_t c,
+                               struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, mask_addr, sizeof(uint64_t)))
+        return (uint64_t)-EFAULT;
+    uint64_t mask = *(const uint64_t *)mask_addr, old = 0;
+    struct thread *t = my_thread();
+    if (signal_mask_update(t, 2, &mask, &old) != 0)
+        return (uint64_t)-EINVAL;
+    /* Loosening the mask can make an already-pending signal deliverable, so
+     * test before sleeping or it would never wake. */
+    while (!signal_pending_unblocked(t)) {
+        t->chan = NULL;
+        t->sleep_until = 0;
+        thread_set_sleeping(t);
+        schedule();
+    }
+    t->wait_original_mask = old;
+    t->wait_mask_restore = true;
+    return (uint64_t)-EINTR;
+}
+
+/* sigpending(set): signals raised while blocked, for this thread. */
+static uint64_t sys_sigpending(uint64_t set_addr, uint64_t b, uint64_t c,
+                               struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    struct thread *t = my_thread();
+    if (!user_buffer_ok(p, set_addr, 16 * sizeof(uint64_t)))
+        return (uint64_t)-EFAULT;
+    irq_spin_lock(&p->signal_lock);
+    uint64_t pending = (p->signal_pending | t->signal_pending) & t->signal_mask;
+    irq_spin_unlock(&p->signal_lock);
+    memset((void *)set_addr, 0, 16 * sizeof(uint64_t));
+    *(uint64_t *)set_addr = pending;
+    return 0;
 }
 
 static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
@@ -1073,6 +1161,97 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t size, uint64_t c,
     struct proc *p = my_proc();
     vm_free_region(p->mm, addr, size);
     return 0;
+}
+
+/* mremap(old, old_size, new_size, flags): resize an anonymous private mapping.
+ * Shrinks in place, grows in place when the pages after it are free, and
+ * otherwise (MREMAP_MAYMOVE) moves it. MREMAP_FIXED is not supported. */
+#define MREMAP_MAYMOVE 1
+static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
+                           uint64_t new_size, struct arch_frame *f) {
+    uint64_t flags = FRAME_ARG(f, 3);
+    struct proc *p = my_proc();
+    if ((old_addr & (PAGE_SIZE - 1)) || !old_size || !new_size
+            || (flags & ~(uint64_t)MREMAP_MAYMOVE)
+            || old_size > (uint64_t)-1 - PAGE_SIZE
+            || new_size > (uint64_t)-1 - PAGE_SIZE)
+        return (uint64_t)-EINVAL;
+    old_size = (old_size + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    new_size = (new_size + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (old_addr + old_size < old_addr)
+        return (uint64_t)-EINVAL;
+
+    struct vm_space *mm = p->mm;
+    int vflags = 0;
+    bool found = false, room = false;
+    irq_spin_lock(&mm->lock);
+    /* The range may span several adjacent VMAs (an earlier in-place grow adds
+     * one); every piece must be private anonymous memory. */
+    uint64_t cursor = old_addr, old_end = old_addr + old_size;
+    for (struct vma *v = mm->vmas; v && cursor < old_end; v = v->next) {
+        if (v->base + v->size <= cursor)
+            continue;
+        if (v->base > cursor)
+            break;                                  /* hole */
+        if (!v->owns_pages || v->backing) {         /* only private anonymous memory */
+            irq_spin_unlock(&mm->lock);
+            return (uint64_t)-EFAULT;
+        }
+        if (cursor == old_addr)
+            vflags = v->flags;
+        cursor = v->base + v->size;
+    }
+    found = cursor >= old_end;
+    if (found && new_size > old_size) {
+        uint64_t end = old_addr + new_size;
+        room = end > old_addr && end <= mm->heap_end;
+        for (struct vma *v = mm->vmas; room && v; v = v->next)
+            if (v->base < end && old_end < v->base + v->size && v->base + v->size > old_end
+                    && v->base >= old_end)
+                room = false;      /* something occupies the pages after the range */
+        /* A VMA that merely continues past old_end also blocks, since the
+         * extension would overlap it. */
+        for (struct vma *v = mm->vmas; room && v; v = v->next)
+            if (v->base < old_end && v->base + v->size > old_end)
+                room = false;
+    }
+    irq_spin_unlock(&mm->lock);
+    if (!found)
+        return (uint64_t)-EFAULT;
+
+    if (new_size == old_size)
+        return old_addr;
+    if (new_size < old_size) {
+        vm_free_region(mm, old_addr + new_size, old_size - new_size);
+        return old_addr;
+    }
+    if (room) {
+        if (vm_allocate_region_at(mm, old_addr + old_size, new_size - old_size,
+                                  vflags))
+            return old_addr;
+        return (uint64_t)-ENOMEM;
+    }
+    if (!(flags & MREMAP_MAYMOVE))
+        return (uint64_t)-ENOMEM;
+    virt_addr_t fresh = vm_allocate_region(mm, new_size, vflags | VM_WRITE);
+    if (!fresh)
+        return (uint64_t)-ENOMEM;
+    memcpy((void *)fresh, (const void *)old_addr, old_size);
+    if (!(vflags & VM_WRITE)) {
+        int r = vm_protect_region(mm, fresh, new_size, vflags);
+        if (r < 0) {
+            vm_free_region(mm, fresh, new_size);
+            return (uint64_t)r;
+        }
+    }
+    vm_free_region(mm, old_addr, old_size);
+    return (uint64_t)fresh;
+}
+
+static uint64_t sys_flock(uint64_t fd, uint64_t op, uint64_t c,
+                          struct arch_frame *f) {
+    (void)c; (void)f;
+    return (uint64_t)lock_flock(my_proc(), (int)fd, (int)op);
 }
 
 static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
@@ -1773,7 +1952,8 @@ static uint64_t sys_stat(uint64_t target, uint64_t value, uint64_t stat_addr,
     st->ino = attr.ino;
     st->mode = (attr.type == VFS_NODE_DIRECTORY ? 0040000
               : attr.type == VFS_NODE_SYMLINK ? 0120000
-              : attr.type == VFS_NODE_DEVICE ? 0020000 : 0100000)
+              : attr.type == VFS_NODE_DEVICE ? 0020000
+              : attr.type == VFS_NODE_FIFO ? 0010000 : 0100000)
              | attr.mode;
     st->nlink = attr.nlink;
     st->uid = attr.uid;
@@ -1796,7 +1976,8 @@ static void store_extron_stat(struct extron_stat *st,
     st->ino = attr->ino;
     st->mode = (attr->type == VFS_NODE_DIRECTORY ? 0040000
               : attr->type == VFS_NODE_SYMLINK ? 0120000
-              : attr->type == VFS_NODE_DEVICE ? 0020000 : 0100000)
+              : attr->type == VFS_NODE_DEVICE ? 0020000
+              : attr->type == VFS_NODE_FIFO ? 0010000 : 0100000)
              | attr->mode;
     st->nlink = attr->nlink;
     st->uid = attr->uid;
@@ -1893,6 +2074,15 @@ static uint64_t sys_path_at(uint64_t request_addr, uint64_t b, uint64_t c,
             else result = vfs_mkdir(&base1, path1,
                 (uint32_t)request.size & ~proc_get_umask(p), &cred);
             break;
+        case 13: {          /* mknod: size = mode incl. S_IFMT, flags = dev */
+            uint32_t fmt = (uint32_t)request.size & 0170000;
+            enum vfs_node_type nt = fmt == 0010000 ? VFS_NODE_FIFO
+                                  : (fmt == 0100000 || !fmt) ? VFS_NODE_REGULAR
+                                  : VFS_NODE_DEVICE;
+            result = vfs_mknod(&base1, path1, nt,
+                (uint32_t)request.size & 07777 & ~proc_get_umask(p), &cred);
+            break;
+        }
         case 9: {
             if (request.flags & ~(AT_EACCESS_KERNEL
                                   | AT_SYMLINK_NOFOLLOW_KERNEL)) {
@@ -2738,6 +2928,10 @@ static const syscall_fn syscall_table[] = {
     [SYS_FSYNC] = sys_fsync,
     [SYS_GETRANDOM] = sys_getrandom,
     [SYS_YIELD] = sys_yield,
+    [SYS_SIGSUSPEND] = sys_sigsuspend,
+    [SYS_SIGPENDING] = sys_sigpending,
+    [SYS_MREMAP] = sys_mremap,
+    [SYS_FLOCK] = sys_flock,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

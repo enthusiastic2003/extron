@@ -101,6 +101,10 @@
 #define SYS_STATVFS       83
 #define SYS_PATHCONF      84
 #define SYS_SIGALTSTACK   91
+#define SYS_SIGSUSPEND    94
+#define SYS_SIGPENDING    95
+#define SYS_MREMAP        97  /* mremap(old, old_size, new_size, flags) */
+#define SYS_FLOCK         98
 #define SYS_SETITIMER     92
 #define SYS_GETITIMER     93
 #define SYS_FTRUNCATE     87

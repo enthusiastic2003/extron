@@ -126,6 +126,7 @@ struct __attribute__((packed)) ext2_disk_dirent {
 #define EXT2_FT_UNKNOWN  0
 #define EXT2_FT_REG_FILE 1
 #define EXT2_FT_DIR      2
+#define EXT2_FT_FIFO     5
 #define EXT2_FT_CHRDEV   3
 #define EXT2_FT_BLKDEV   4
 #define EXT2_FT_FIFO     5
