@@ -120,6 +120,10 @@ check-persist: esp
 check-boot: esp
 	python3 tools/x86_boot_test.py
 
+# Hung-disk timeout/recovery and RTC write-back (one boot, ~20 s).
+check-disk: esp
+	python3 tools/x86_disk_timeout_test.py
+
 # Boot flow AND the full regression suite in one boot (one QEMU, one login).
 check-all: esp
 	python3 tools/x86_boot_test.py --runtests
@@ -161,5 +165,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist check-boot check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-clean check-persist check-boot check-disk check-all
 -include $(DEPS)

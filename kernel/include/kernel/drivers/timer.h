@@ -27,5 +27,7 @@ uint64_t timer_uptime_ms(void);
 uint64_t timer_uptime_ns(void);
 int64_t timer_realtime_ns(void);
 void timer_set_realtime_ns(int64_t value);
+/* Write the system time back to the hardware RTC where there is one. */
+void timer_sync_rtc(void);
 
 #endif

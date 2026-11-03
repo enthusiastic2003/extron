@@ -22,6 +22,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <kernel/console.h>
+#include <kernel/drivers/timer.h>
 #include <kernel/proc/proc.h>
 #include <kernel/proc/sched.h>
 #include <arch/exceptions.h>
@@ -67,6 +68,7 @@
 #define MAX_QSZ             512
 #define BOUNCE_SECTORS      128
 #define PCI_INT_LINE        0x3C
+#define REQ_TIMEOUT_MS      5000
 
 struct vring_desc { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; };
 
@@ -82,6 +84,8 @@ static struct vring_desc *desc;
 static volatile uint16_t *avail_flags, *avail_idxp, *avail_ring;
 static volatile uint16_t *used_idxp;
 static bool have_flush, read_only;
+static uint32_t host_features;
+static bool dev_dead;                /* a reset failed: fail every request fast */
 static spinlock_t vblk_lock = SPINLOCK_INIT;
 static volatile bool req_done;       /* set by the IRQ handler */
 static bool dev_busy;                /* whole-operation mutex, guarded by vblk_lock */
@@ -94,6 +98,20 @@ static uint64_t phys_of(const void *p) {
 }
 
 static inline void barrier(void) { __asm__ volatile ("mfence" ::: "memory"); }
+
+static bool vblk_start_device(void);
+
+/* The device stopped answering: reset it and rebuild the queue. After a reset
+ * the device may no longer touch guest memory, so the buffers of the abandoned
+ * request are safe to reuse. If the device does not come back it is marked dead. */
+static void vblk_reset(void) {
+    if (!vblk_start_device()) {
+        dev_dead = true;
+        kprintf("virtio-blk: device did not recover; failing all further I/O\n");
+    } else {
+        kprintf("virtio-blk: device reset, I/O resumed\n");
+    }
+}
 
 static void vblk_irq(struct arch_frame *f) {
     (void)f;
@@ -126,6 +144,10 @@ static void vblk_release(void) {
 static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len,
                         bool to_device) {
     irq_spin_lock(&vblk_lock);
+    if (dev_dead) {
+        irq_spin_unlock(&vblk_lock);
+        return -5;
+    }
     req_hdr.type = type;
     req_hdr.reserved = 0;
     req_hdr.sector = sector;
@@ -151,10 +173,22 @@ static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len
     outw(io_base + VIO_QUEUE_NOTIFY, 0);
 
     /* The check runs with interrupts masked, so the completion cannot slip
-     * in between "not done" and going to sleep. */
+     * in between "not done" and going to sleep. A device that never answers
+     * is given REQ_TIMEOUT_MS: the 1 kHz tick wakes a sleeper at its deadline
+     * (and an early-boot waiter notices after each halt). */
+    uint64_t hz = timer_ticks_per_second();
+    uint64_t deadline = timer_ticks() + (REQ_TIMEOUT_MS * hz + 999) / 1000;
+    bool timed_out = false;
     while (!req_done) {
-        if (my_thread()) {
+        if (timer_ticks() >= deadline) {
+            timed_out = true;
+            break;
+        }
+        struct thread *self = my_thread();
+        if (self) {
+            self->sleep_until = deadline;
             sleep(&done_chan, &vblk_lock);
+            self->sleep_until = 0;
         } else {
             /* Early boot: no scheduler. sti;hlt is atomic, so the IRQ
              * either already fired or wakes the halted CPU. */
@@ -162,6 +196,13 @@ static int vblk_request(uint32_t type, uint64_t sector, void *data, uint32_t len
             __asm__ volatile ("sti; hlt; cli" ::: "memory");
             irq_spin_lock(&vblk_lock);
         }
+    }
+    if (timed_out) {
+        kprintf("virtio-blk: request timed out after %d ms (type %u, sector %lu); "
+                "resetting the device\n", REQ_TIMEOUT_MS, type, (unsigned long)sector);
+        vblk_reset();
+        irq_spin_unlock(&vblk_lock);
+        return -5;      /* EIO */
     }
     int ok = req_status == 0;
     irq_spin_unlock(&vblk_lock);
@@ -214,22 +255,16 @@ static int vblk_flush(struct ext2_block_dev *dev) {
     return rc;
 }
 
-static bool vblk_init(struct pci_loc loc) {
-    uint32_t bar0 = pci_read32(loc, PCI_BAR0);
-    if (!(bar0 & 1)) {
-        kprintf("virtio-blk: BAR0 is memory-mapped (modern-only device); "
-                "start QEMU with disable-modern=on\n");
-        return false;
-    }
-    io_base = (uint16_t)(bar0 & ~3u);
-    pci_write16(loc, PCI_COMMAND, pci_read16(loc, PCI_COMMAND)
-                | PCI_CMD_IO | PCI_CMD_BUSMASTER);
-
+/* (Re)initialise the device and its virtqueue: reset, negotiate features,
+ * program the ring, set DRIVER_OK. Used at probe time and to recover from a
+ * hung request. The caller serialises. */
+static bool vblk_start_device(void) {
     outb(io_base + VIO_STATUS, 0);                              /* reset */
     outb(io_base + VIO_STATUS, ST_ACK);
     outb(io_base + VIO_STATUS, ST_ACK | ST_DRIVER);
 
     uint32_t host = inl(io_base + VIO_HOST_FEATURES);
+    host_features = host;
     have_flush = host & F_BLK_FLUSH;
     read_only  = host & F_BLK_RO;
     outl(io_base + VIO_GUEST_FEATURES, host & (F_BLK_FLUSH | F_BLK_RO));
@@ -255,6 +290,21 @@ static bool vblk_init(struct pci_loc loc) {
     avail_idx = last_used = 0;
     outl(io_base + VIO_QUEUE_PFN, (uint32_t)(phys_of(vq_mem) >> 12));
 
+    outb(io_base + VIO_STATUS, ST_ACK | ST_DRIVER | ST_DRIVER_OK);
+    return true;
+}
+
+static bool vblk_init(struct pci_loc loc) {
+    uint32_t bar0 = pci_read32(loc, PCI_BAR0);
+    if (!(bar0 & 1)) {
+        kprintf("virtio-blk: BAR0 is memory-mapped (modern-only device); "
+                "start QEMU with disable-modern=on\n");
+        return false;
+    }
+    io_base = (uint16_t)(bar0 & ~3u);
+    pci_write16(loc, PCI_COMMAND, pci_read16(loc, PCI_COMMAND)
+                | PCI_CMD_IO | PCI_CMD_BUSMASTER);
+
     /* INTx line the firmware routed this device to (legacy PIC, IRQ 0-15). */
     unsigned irq = pci_read32(loc, PCI_INT_LINE) & 0xFF;
     if (irq >= 16) {
@@ -270,7 +320,8 @@ static bool vblk_init(struct pci_loc loc) {
     }
     arch_irq_enable_line(irq);
 
-    outb(io_base + VIO_STATUS, ST_ACK | ST_DRIVER | ST_DRIVER_OK);
+    if (!vblk_start_device())
+        return false;
 
     uint64_t cap = (uint64_t)inl(io_base + VIO_BLK_CAPACITY)
                  | ((uint64_t)inl(io_base + VIO_BLK_CAPACITY + 4) << 32);

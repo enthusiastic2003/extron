@@ -1832,6 +1832,9 @@ static uint64_t sys_clock_get(uint64_t clock, uint64_t b, uint64_t c,
     return (uint64_t)-EINVAL;
 }
 
+/* Platforms without a battery-backed RTC driver keep the clock in RAM only. */
+__attribute__((weak)) void timer_sync_rtc(void) {}
+
 static uint64_t sys_clock_set(uint64_t clock, uint64_t seconds,
                               uint64_t nanos, struct arch_frame *f) {
     (void)f;
@@ -1848,6 +1851,7 @@ static uint64_t sys_clock_set(uint64_t clock, uint64_t seconds,
             || secs < INT64_MIN / 1000000000LL)
         return (uint64_t)-EINVAL;
     timer_set_realtime_ns(secs * 1000000000LL + (int64_t)nanos);
+    timer_sync_rtc();
     return 0;
 }
 

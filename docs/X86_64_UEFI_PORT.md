@@ -205,3 +205,14 @@ processes, `tty_nr` is always 0, and `/proc/<pid>/task` and `maps` do not exist.
 buffer of `EXEC_BLOCK_MAX` (40 KiB) and copied into the top of the new
 stack, so a program always keeps at least 88 KiB of its 128 KiB stack. Raising the
 limits further means growing the fixed, eagerly mapped stack (`EXEC_USER_STACK_BYTES`).
+
+## Disk timeout and the clock
+
+* virtio-blk gives every request 5 s (`REQ_TIMEOUT_MS`). On expiry the driver logs
+  it, resets the device and rebuilds the virtqueue (`vblk_start_device`), and the
+  caller gets `EIO`; if the device does not come back, all further I/O fails fast.
+  `make check-disk` hangs the disk through the QEMU monitor (I/O throttle) to test it.
+* The CMOS RTC is read at boot (stable double-read, 12-hour mode, century register);
+  `clock_settime`/`settimeofday`/`date -s` write the new time back to the RTC
+  (`timer_sync_rtc`), so it survives a reboot. There is no timezone support: the
+  RTC is assumed to hold UTC.

@@ -58,7 +58,7 @@ def run(cmd):
     shell ($((0))) so the echoed command line itself cannot match it."""
     mark = len(buf)
     send(f"{cmd}; echo @@EN$((0))D@@")
-    wait(b"@@EN0D@@\n", 20, mark)
+    wait(b"@@EN0D@@", 20, mark)
     text = buf[mark:].decode(errors="replace").replace("\r", "")
     if os.environ.get("BOOT_DEBUG"):
         print(f"--- run({cmd!r}) ->\n{text}\n---", flush=True)
