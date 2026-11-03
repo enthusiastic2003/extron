@@ -107,6 +107,27 @@ void vfs_node_retain(struct vfs_node *node) {
     irq_spin_unlock(&node->ref_lock);
 }
 
+/* Drop `node` from the inode cache right now. Used when the filesystem frees
+ * the inode while the node is still referenced (rmdir with the directory still
+ * open or some process's cwd): a later file that reuses the inode number must
+ * not be handed this stale node. The node object lives on for its holders. */
+void vfs_cache_evict_node(struct vfs_node *node) {
+    if (!node || !node->inode_num)
+        return;
+    uint32_t hash = hash_node(node->owner_mount, node->inode_num);
+    irq_spin_lock(&icache_lock);
+    struct vfs_node **curr = &icache[hash];
+    while (*curr) {
+        if (*curr == node) {
+            *curr = node->hash_next;
+            break;
+        }
+        curr = &(*curr)->hash_next;
+    }
+    irq_spin_unlock(&icache_lock);
+    node->inode_num = 0;                 /* vfs_node_release() skips the unlink */
+}
+
 void vfs_node_release(struct vfs_node *node) {
     if (!node) return;
     irq_spin_lock(&node->ref_lock);

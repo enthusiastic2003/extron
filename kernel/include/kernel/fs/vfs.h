@@ -188,6 +188,7 @@ void vfs_node_init(struct vfs_node *node, const struct vfs_node_ops *ops,
                    void *private, enum vfs_node_type type);
 void vfs_node_retain(struct vfs_node *node);
 void vfs_node_release(struct vfs_node *node);
+void vfs_cache_evict_node(struct vfs_node *node);
 int vfs_dentry_init(struct vfs_dentry *dentry, struct vfs_node *node,
                     struct vfs_dentry *parent, const char *name, void *private);
 void vfs_dentry_retain(struct vfs_dentry *dentry);

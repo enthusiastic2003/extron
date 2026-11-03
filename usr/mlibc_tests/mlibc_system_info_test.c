@@ -89,7 +89,7 @@ static void test_sysconf(void) {
     check("page size is the kernel's 4 KiB page",
           getpagesize() == 4096 && sysconf(_SC_PAGESIZE) == 4096);
     check("argument/environment byte ceiling is truthful",
-          sysconf(_SC_ARG_MAX) == 3072);
+          sysconf(_SC_ARG_MAX) == 20 * 1024 + 8 * 1024);   /* EXEC_ARG_BYTES + EXEC_ENV_BYTES */
     check("process table limit is truthful", sysconf(_SC_CHILD_MAX) == 255);
     check("scheduler clock tick rate is truthful", sysconf(_SC_CLK_TCK) == 1000);
     check("supplementary group limit is truthful", sysconf(_SC_NGROUPS_MAX) == 16);

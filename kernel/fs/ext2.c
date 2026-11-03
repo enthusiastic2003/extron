@@ -2071,6 +2071,9 @@ static int ext2_node_remove(struct vfs_mount *vfs_m, struct vfs_dentry *parent_d
         target->disk.i_dtime = ext2_now();
         ext2_sync_inode(m, target);
         ext2_free_inode(m, target->ino, 1);
+        /* The inode number is free for reuse now; the cached node must not be
+         * found under it again even though a holder may keep it alive. */
+        vfs_cache_evict_node(target_node);
     } else {
         if (target->disk.i_links_count > 0)
             target->disk.i_links_count--;
