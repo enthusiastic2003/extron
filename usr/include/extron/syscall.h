@@ -89,6 +89,9 @@
 #define SYS_PREAD       85
 #define SYS_PWRITE      86
 #define SYS_FTRUNCATE   87
+#define SYS_SIGALTSTACK 91
+#define SYS_SETITIMER   92
+#define SYS_GETITIMER   93
 #define SYS_FSYNC       88
 #define SYS_GETRANDOM   89
 #define SYS_YIELD       90

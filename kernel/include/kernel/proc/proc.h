@@ -58,6 +58,8 @@ struct thread {
     bool                wait_mask_restore;   /* pselect mask is live until delivery */
     uint64_t            wait_original_mask;  /* mask restored by signal return */
     uint64_t            signal_pending;      /* thread-directed pending signals */
+    virt_addr_t         altstack_sp;         /* sigaltstack(): base; unused while size == 0 */
+    uint64_t            altstack_size;       /* 0 = no alternate signal stack */
     struct signal_info  signal_info[SIGNAL_MAX + 1];
     uint64_t            cpu_account_start_ns;
     enum resource_cpu_mode cpu_account_mode;
@@ -80,6 +82,12 @@ struct proc {
      * usr/lib/crt0.S zeroed them itself to paper over it. */
     uint64_t            user_argc;
     virt_addr_t         user_argv;
+
+    /* setitimer(ITIMER_REAL): absolute deadline in timer_uptime_ns() units
+     * (0 = disarmed) and the reload interval (0 = one-shot). Fired from the
+     * timer tick, which sends SIGALRM. */
+    uint64_t            itimer_next_ns;
+    uint64_t            itimer_interval_ns;
 
     /* Who gets to wait() for this one, and what it left behind. NULL
      * parent = created by the kernel at boot, so nothing will ever reap
@@ -172,6 +180,8 @@ uint64_t      proc_alloc_tid(void);
 void          proc_table_add(struct proc *p);    /* publishes a fully initialized process */
 void          proc_table_remove(struct proc *p);
 struct proc  *proc_lookup(uint64_t pid);
+/* Called by sys_setitimer so the tick handler knows to scan for expiries. */
+void          proc_itimer_armed(void);
 void          proc_for_each(void (*fn)(struct proc *, void *), void *arg);
 void          proc_dump_table(void);
 

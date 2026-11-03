@@ -87,6 +87,8 @@ struct proc *proc_fork(struct proc *parent, struct arch_frame *f) {
     child->user_argv = parent->user_argv;
     signal_process_fork(child, parent);
     child->main_thread.signal_mask = caller->signal_mask;
+    child->main_thread.altstack_sp = caller->altstack_sp;
+    child->main_thread.altstack_size = caller->altstack_size;
     struct vfs_path parent_cwd;
     proc_cwd_snapshot(parent, &parent_cwd);
     vfs_path_release(&child->cwd);

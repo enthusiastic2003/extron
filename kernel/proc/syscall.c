@@ -392,6 +392,117 @@ static uint64_t sys_pwrite(uint64_t fd, uint64_t buf_addr, uint64_t count,
                                  count, (int64_t)FRAME_ARG(f, 3));
 }
 
+/* stack_t as userspace lays it out on LP64. */
+struct user_stack {
+    uint64_t sp;
+    int32_t  flags;
+    int32_t  pad;
+    uint64_t size;
+};
+#define USER_SS_ONSTACK 1
+#define USER_SS_DISABLE 2
+#define USER_MINSIGSTKSZ 2048
+
+static uint64_t sys_sigaltstack(uint64_t new_addr, uint64_t old_addr,
+                                uint64_t c, struct arch_frame *f) {
+    (void)c;
+    struct proc *p = my_proc();
+    struct thread *t = my_thread();
+    uint64_t user_sp = FRAME_USER_SP(f);
+    bool on_stack = t->altstack_size && user_sp > t->altstack_sp
+                    && user_sp <= t->altstack_sp + t->altstack_size;
+    if (old_addr && !user_buffer_ok(p, old_addr, sizeof(struct user_stack)))
+        return (uint64_t)-EFAULT;
+    if (new_addr && !user_buffer_ok(p, new_addr, sizeof(struct user_stack)))
+        return (uint64_t)-EFAULT;
+    if (old_addr) {
+        struct user_stack *o = (struct user_stack *)old_addr;
+        memset(o, 0, sizeof(*o));
+        if (t->altstack_size) {
+            o->sp = t->altstack_sp;
+            o->size = t->altstack_size;
+            o->flags = on_stack ? USER_SS_ONSTACK : 0;
+        } else {
+            o->flags = USER_SS_DISABLE;
+        }
+    }
+    if (new_addr) {
+        const struct user_stack *n = (const struct user_stack *)new_addr;
+        if (on_stack)
+            return (uint64_t)-EPERM;   /* cannot change the stack in use */
+        if (n->flags & USER_SS_DISABLE) {
+            t->altstack_sp = 0;
+            t->altstack_size = 0;
+        } else {
+            if (n->size < USER_MINSIGSTKSZ)
+                return (uint64_t)-ENOMEM;
+            if (!user_buffer_ok(p, n->sp, n->size))
+                return (uint64_t)-ENOMEM;
+            t->altstack_sp = n->sp;
+            t->altstack_size = n->size;
+        }
+    }
+    return 0;
+}
+
+/* struct itimerval on LP64: { timeval interval; timeval value; }. */
+struct user_itimerval {
+    int64_t interval_sec, interval_usec;
+    int64_t value_sec, value_usec;
+};
+
+static void itimer_read(struct proc *p, struct user_itimerval *out) {
+    uint64_t now = timer_uptime_ns();
+    uint64_t left = p->itimer_next_ns > now ? p->itimer_next_ns - now : 0;
+    if (p->itimer_next_ns && !left)
+        left = 1000;   /* due but not yet delivered: report a sliver, not "off" */
+    out->value_sec = (int64_t)(left / 1000000000ULL);
+    out->value_usec = (int64_t)(left % 1000000000ULL / 1000);
+    out->interval_sec = (int64_t)(p->itimer_interval_ns / 1000000000ULL);
+    out->interval_usec = (int64_t)(p->itimer_interval_ns % 1000000000ULL / 1000);
+}
+
+static uint64_t sys_getitimer(uint64_t which, uint64_t addr, uint64_t c,
+                              struct arch_frame *f) {
+    (void)c; (void)f;
+    if (which != 0)
+        return (uint64_t)-EINVAL;   /* only ITIMER_REAL */
+    if (!user_buffer_ok(my_proc(), addr, sizeof(struct user_itimerval)))
+        return (uint64_t)-EFAULT;
+    itimer_read(my_proc(), (struct user_itimerval *)addr);
+    return 0;
+}
+
+static uint64_t sys_setitimer(uint64_t which, uint64_t new_addr,
+                              uint64_t old_addr, struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    if (which != 0)
+        return (uint64_t)-EINVAL;   /* only ITIMER_REAL */
+    if (!new_addr || !user_buffer_ok(p, new_addr, sizeof(struct user_itimerval)))
+        return (uint64_t)-EFAULT;
+    if (old_addr && !user_buffer_ok(p, old_addr, sizeof(struct user_itimerval)))
+        return (uint64_t)-EFAULT;
+    struct user_itimerval nv = *(const struct user_itimerval *)new_addr;
+    if (nv.value_sec < 0 || nv.value_usec < 0 || nv.value_usec >= 1000000
+            || nv.interval_sec < 0 || nv.interval_usec < 0
+            || nv.interval_usec >= 1000000
+            || nv.value_sec > 100000000LL || nv.interval_sec > 100000000LL)
+        return (uint64_t)-EINVAL;
+    if (old_addr)
+        itimer_read(p, (struct user_itimerval *)old_addr);
+    uint64_t value = (uint64_t)nv.value_sec * 1000000000ULL
+                     + (uint64_t)nv.value_usec * 1000ULL;
+    p->itimer_interval_ns = (uint64_t)nv.interval_sec * 1000000000ULL
+                            + (uint64_t)nv.interval_usec * 1000ULL;
+    p->itimer_next_ns = value ? timer_uptime_ns() + value : 0;
+    if (!value)
+        p->itimer_interval_ns = 0;
+    else
+        proc_itimer_armed();
+    return 0;
+}
+
 static uint64_t sys_ftruncate(uint64_t fd, uint64_t size, uint64_t c,
                               struct arch_frame *f) {
     (void)c; (void)f;
@@ -2614,6 +2725,9 @@ static const syscall_fn syscall_table[] = {
     [SYS_PREAD] = sys_pread,
     [SYS_PWRITE] = sys_pwrite,
     [SYS_FTRUNCATE] = sys_ftruncate,
+    [SYS_SIGALTSTACK] = sys_sigaltstack,
+    [SYS_SETITIMER] = sys_setitimer,
+    [SYS_GETITIMER] = sys_getitimer,
     [SYS_FSYNC] = sys_fsync,
     [SYS_GETRANDOM] = sys_getrandom,
     [SYS_YIELD] = sys_yield,

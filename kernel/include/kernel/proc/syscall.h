@@ -100,6 +100,9 @@
 #define SYS_SYSCONF       82
 #define SYS_STATVFS       83
 #define SYS_PATHCONF      84
+#define SYS_SIGALTSTACK   91
+#define SYS_SETITIMER     92
+#define SYS_GETITIMER     93
 #define SYS_FTRUNCATE     87
 #define SYS_FSYNC         88
 #define SYS_GETRANDOM     89

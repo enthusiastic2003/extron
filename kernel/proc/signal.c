@@ -126,6 +126,8 @@ static struct signal_info make_info(int signo, int code) {
 void signal_process_init(struct proc *p) {
     p->signal_lock = (spinlock_t)SPINLOCK_INIT;
     p->signal_pending = 0;
+    p->itimer_next_ns = 0;
+    p->itimer_interval_ns = 0;
     memset(p->signal_info, 0, sizeof(p->signal_info));
     memset(p->signal_actions, 0, sizeof(p->signal_actions));
 }
@@ -143,6 +145,8 @@ void signal_process_exec(struct proc *p) {
     memset(p->signal_info, 0, sizeof(p->signal_info));
     for (struct thread *t = p->threads; t; t = t->next_in_process) {
         t->signal_pending = 0;
+        t->altstack_sp = 0;      /* exec discards the alternate stack */
+        t->altstack_size = 0;
         memset(t->signal_info, 0, sizeof(t->signal_info));
     }
     for (int signo = 1; signo <= SIGNAL_MAX; signo++)
@@ -402,6 +406,14 @@ static bool deliver(struct arch_frame *f, int signo,
         proc_exit_current(-signo);
     }
     uint64_t sp = arch_signal_frame_addr(f);
+    /* SA_ONSTACK: run the handler on the sigaltstack() region unless we are
+     * already on it (a signal arriving inside a handler nests normally). */
+    if ((action.flags & SIGNAL_SA_ONSTACK) && t->altstack_size) {
+        uint64_t user_sp = FRAME_USER_SP(f);
+        uint64_t base = t->altstack_sp, top = base + t->altstack_size;
+        if (!(user_sp > base && user_sp <= top))
+            sp = (top - sizeof(struct user_signal_frame)) & ~0xFULL;
+    }
     if (!user_range_ok(p, sp, sizeof(struct user_signal_frame)))
         proc_exit_current(-SIGSEGV);
     struct user_signal_frame *frame = (struct user_signal_frame *)sp;

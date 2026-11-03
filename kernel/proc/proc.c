@@ -10,6 +10,7 @@
 #include <kernel/console.h>
 #include <kernel/mm/uvm.h>
 #include <kernel/fs/file.h>
+#include <kernel/drivers/timer.h>
 #include <kernel/klibc/string.h>
 #include <arch/irq_spinlock.h>
 #include <stddef.h>
@@ -686,11 +687,40 @@ void wakeup(void *chan) {
     irq_spin_unlock(&proc_table_lock);
 }
 
+/* ITIMER_REAL bookkeeping. `itimers_any` lets the 1 kHz tick skip the scan
+ * entirely when nothing is armed; it is recomputed by every scan. */
+static bool itimers_any;
+void proc_itimer_armed(void) { itimers_any = true; }
+
 void thread_wakeup_expired(uint64_t now) {
+    static struct proc *fired[PROC_MAX_PROCS];   /* IRQ context: not reentrant */
+    size_t nfired = 0;
+    bool scan_timers = itimers_any, any_armed = false;
+    uint64_t now_ns = scan_timers ? timer_uptime_ns() : 0;
     irq_spin_lock(&proc_table_lock);
     for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
         struct proc *p = proc_table[i];
         if (!p) continue;
+        if (scan_timers && p->itimer_next_ns) {
+            bool alive = false;
+            for (struct thread *t = p->threads; t; t = t->next_in_process)
+                if (t->state != THREAD_EXITED) { alive = true; break; }
+            if (!alive) {
+                p->itimer_next_ns = p->itimer_interval_ns = 0;
+            } else if (now_ns >= p->itimer_next_ns) {
+                fired[nfired++] = p;
+                if (p->itimer_interval_ns) {
+                    p->itimer_next_ns += p->itimer_interval_ns;
+                    if (p->itimer_next_ns <= now_ns)   /* missed several periods */
+                        p->itimer_next_ns = now_ns + p->itimer_interval_ns;
+                    any_armed = true;
+                } else {
+                    p->itimer_next_ns = 0;
+                }
+            } else {
+                any_armed = true;
+            }
+        }
         for (struct thread *t = p->threads; t; t = t->next_in_process)
             if (t->state == THREAD_SLEEPING && t->sleep_until
                     && now >= t->sleep_until) {
@@ -706,4 +736,11 @@ void thread_wakeup_expired(uint64_t now) {
             }
     }
     irq_spin_unlock(&proc_table_lock);
+    if (scan_timers) {
+        itimers_any = any_armed;
+        /* signal_send() takes proc_table_lock (via wakeup), so it runs
+         * after the scan, not inside it. */
+        for (size_t i = 0; i < nfired; i++)
+            signal_send(fired[i], SIGNAL_SIGALRM);
+    }
 }
