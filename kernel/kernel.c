@@ -247,16 +247,29 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* Start the interactive system environment. BusyBox is a static mlibc
      * binary whose applets re-exec through /sh; the ramfs provides its
      * writable working tree while retaining initrd files as COW views. */
-    const char *shell_argv[] = { "/bin/sh" };
+    /* Prefer a real init (BusyBox init: inittab, getty, login) when the root
+     * filesystem has one; otherwise fall back to a bare shell as before. */
+    const char *init_path = "/bin/sh";
+    {
+        struct vfs_path root, found;
+        if (vfs_root_path(&root) == 0) {
+            if (vfs_lookup_path(&root, "/sbin/init", &found) == 0) {
+                init_path = "/sbin/init";
+                vfs_path_release(&found);
+            }
+            vfs_path_release(&root);
+        }
+    }
+    const char *shell_argv[] = { init_path };
     const char *shell_env[] = {
         "PATH=/sbin:/usr/sbin:/bin:/usr/bin",
         "HOME=/root",
         "TERM=vt100",
     };
     struct proc *shell = proc_create_from_binary_argv_env(
-        "/bin/sh", shell_argv, 1, shell_env, 3);
+        init_path, shell_argv, 1, shell_env, 3);
     if (!shell)
-        panic("kernel_stage2: failed to create BusyBox ash");
+        panic("kernel_stage2: failed to create the init process");
     sched_policy_add(&shell->main_thread);
 
     kprintf("Starting scheduler - first process.\n");

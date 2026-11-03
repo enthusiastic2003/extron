@@ -112,6 +112,10 @@ disk-clean:
 check-persist: esp
 	python3 tools/x86_persist_test.py
 
+# Boot through init/getty/login: accounts, permissions, respawn, poweroff.
+check-boot: esp
+	python3 tools/x86_boot_test.py
+
 run: QEMU_DISPLAY = gtk
 run: esp $(BUILD)/OVMF_VARS.fd $(DISK)
 	$(QEMU) $(QEMU_ARGS)
@@ -142,8 +146,12 @@ SOAK ?= 10
 soak: esp
 	python3 tools/x86_run_tests.py -n $(SOAK) --log $(BUILD)/soak.log
 
+# compile_commands.json for IDE navigation (IntelliJ/CLion, clangd).
+compdb:
+	tools/gen_compile_commands.py Makefile.x86_64
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean userland check-userland soak disk disk-clean check-persist
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-clean check-persist check-boot
 -include $(DEPS)

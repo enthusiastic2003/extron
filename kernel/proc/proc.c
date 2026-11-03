@@ -1,4 +1,5 @@
 #include <kernel/proc/proc.h>
+#include <kernel/errno.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/futex.h>
 #include <kernel/proc/signal.h>
@@ -623,6 +624,23 @@ static void proc_reparent_children(struct proc *dying) {
         c->orphan = true;
     }
     irq_spin_unlock(&proc_table_lock);
+}
+
+int signal_send_all(struct proc *sender, int signo) {
+    struct proc *targets[PROC_MAX_PROCS];
+    size_t n = 0;
+    irq_spin_lock(&proc_table_lock);
+    for (size_t i = 0; i < PROC_MAX_PROCS; i++) {
+        struct proc *p = proc_table[i];
+        if (p && p != sender && p->pid > 1 && !p->exited)
+            targets[n++] = p;
+    }
+    irq_spin_unlock(&proc_table_lock);
+    int sent = 0;
+    for (size_t i = 0; i < n; i++)
+        if (signal_may_send(sender, targets[i], signo) && signal_send(targets[i], signo) == 0)
+            sent++;
+    return sent ? 0 : -ESRCH;
 }
 
 void proc_reap_orphans(void) {

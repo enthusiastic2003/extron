@@ -92,6 +92,8 @@
 #define SYS_SIGALTSTACK 91
 #define SYS_SIGSUSPEND    94
 #define SYS_SIGPENDING    95
+#define SYS_SIGTIMEDWAIT  119  /* (set*, info*, timeout_ns or -1) */
+#define SYS_GETSID        120
 #define SYS_MREMAP        97  /* mremap(old, old_size, new_size, flags) */
 #define SYS_FLOCK         98
 #define SYS_SOCKET        99
@@ -184,7 +186,7 @@ long     sys_futex_wake(int *word);
  * still calls them (DOOM uses __syscall0/1/2/3 directly), but they're
  * left as-is rather than touched by an unrelated change. */
 static inline long sys_reboot(void) {
-    return __syscall0(SYS_REBOOT);
+    return __syscall1(SYS_REBOOT, 0x01234567 /* RB_AUTOBOOT */);
 }
 
 #endif

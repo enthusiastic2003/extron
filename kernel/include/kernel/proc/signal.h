@@ -59,6 +59,9 @@ int signal_mask_update(struct thread *t, int how, const uint64_t *set,
 bool signal_pending_unblocked(struct thread *t);
 uint64_t signal_pending_set(struct thread *t);
 bool signal_take(struct thread *t, uint64_t mask, struct signal_info *out);
+void signal_fill_user_siginfo(void *out128, const struct signal_info *info);
+/* kill(-1, sig): every process the sender may signal, except itself and init. */
+int signal_send_all(struct proc *sender, int signo);
 
 bool signal_deliver_pending(struct arch_frame *f);
 bool signal_deliver_sync(struct arch_frame *f, int signo);

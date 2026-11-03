@@ -117,7 +117,7 @@ static void mini_shell(void) {
             for (int i = 1; i <= 150; i++) { out("line "); outnum(i); out(": the quick brown fox jumps over the lazy dog\n"); }
         } else if (line[0] == 'e' && line[1] == 'c' && line[2] == 'h' && line[3] == 'o') { out(line + (n > 4 ? 5 : 4)); out("\n"); }
         else if (streq(line, "uname")) out("Extron x86_64 (UEFI)\n");
-        else if (streq(line, "reboot") || streq(line, "exit")) { sc(SYS_REBOOT, 0, 0, 0); }
+        else if (streq(line, "reboot") || streq(line, "exit")) { sc(SYS_REBOOT, 0x01234567, 0, 0); }
         else if (line[0]) {
             /* Not built in: run /bin/<word> with the remaining words as args. */
             char path[64] = "/bin/"; int pl = 5, i = 0;

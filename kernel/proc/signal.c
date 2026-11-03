@@ -427,6 +427,11 @@ static void fill_siginfo(struct user_siginfo *out,
     }
 }
 
+/* Fill a user siginfo_t (128 bytes) for sigtimedwait()/signalfd-style callers. */
+void signal_fill_user_siginfo(void *out, const struct signal_info *info) {
+    fill_siginfo(out, info);
+}
+
 static bool deliver(struct arch_frame *f, int signo,
                     struct signal_action action,
                     const struct signal_info *info, bool synchronous) {

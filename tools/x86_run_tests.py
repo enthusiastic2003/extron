@@ -72,7 +72,22 @@ WARMUP_ALLOWANCE = 16384   # pages (64 MiB): one-time growth during the first it
 problems = []
 baseline = None
 warm = None
-if not read_until(b"/ # ", 90):
+def boot_to_prompt():
+    """Straight into a shell, or init -> getty -> login as root, then cd /."""
+    end = time.time() + 90
+    while time.time() < end:
+        if read_until(b"/ # ", 0.5): return True
+        if read_until(b"login: ", 0.5): break
+    else:
+        return False
+    mark = len(buf)
+    send("root")
+    if not read_until(b"# ", 30, mark): return False
+    mark = len(buf)
+    send("cd /")
+    return read_until(b"/ # ", 20, mark)
+
+if not boot_to_prompt():
     problems.append("never reached the shell prompt")
 else:
     baseline = memfree()

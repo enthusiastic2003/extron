@@ -32,7 +32,33 @@ def pump(wait_for, timeout, mark=0):
             buf += d
             if wait_for in buf[mark:][-200:] and len(buf) > mark + 2: return True
     return False
-ok = pump(b"/ # ", limit)
+def pump_any(waits, timeout, mark=0):
+    """Wait until any of `waits` shows up in the output after `mark`."""
+    global buf
+    end = time.time() + timeout
+    while time.time() < end:
+        tail = buf[mark:][-300:]
+        for w in waits:
+            if w in tail and len(buf) > mark + 2: return w
+        r, _, _ = select.select([q.stdout], [], [], 0.1)
+        if r:
+            try: d = os.read(q.stdout.fileno(), 65536)
+            except BlockingIOError: d = b""
+            if not d: return None
+            buf += d
+    return None
+
+# Boot to a shell prompt: either straight into a shell (smoke/AUTOEXIT image)
+# or through init -> getty -> login, signing in as root and moving to /.
+first = pump_any([b"/ # ", b"login: "], limit)
+ok = first is not None
+if first == b"login: ":
+    mark = len(buf)
+    q.stdin.write(b"root\n"); q.stdin.flush()
+    pump_any([b"# "], 30, mark)
+    mark = len(buf)
+    q.stdin.write(b"cd /\n"); q.stdin.flush()
+    ok = pump_any([b"/ # "], 15, mark) is not None
 for c in args:
     mark = len(buf)
     data = c.encode().replace(b"^C", b"\x03") + b"\n"

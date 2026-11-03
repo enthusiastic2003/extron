@@ -312,6 +312,8 @@ static uint64_t sys_kill(uint64_t pid, uint64_t signo, uint64_t c,
             return (uint64_t)-EPERM;
         return signal_send(target, (int)signo) == 0 ? 0 : (uint64_t)-EINVAL;
     }
+    if (selector == -1)
+        return (uint64_t)(long)signal_send_all(my_proc(), (int)signo);
     uint64_t pgid = selector == 0 ? my_proc()->pgid
                                   : selector < -1 ? (uint64_t)-selector : 0;
     return pgid ? (uint64_t)signal_send_group_from(
@@ -558,6 +560,8 @@ static uint64_t sys_yield(uint64_t a, uint64_t b, uint64_t c,
 #define TIOCSCTTY  0x540E
 #define TIOCNOTTY  0x5422
 #define TIOCGSID   0x5429
+#define TCFLSH     0x540B
+#define TIOCGNAME  0x5480   /* extron: path the tty was opened by, into a char[128] */
 #define POLLIN 0x0001
 #define POLLOUT 0x0004
 #define POLLNVAL 0x0020
@@ -628,6 +632,29 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
         if (!user_buffer_ok(p, arg, sizeof(struct tty_winsize)))
             return (uint64_t)-EFAULT;
         tty_set_winsize(t, (const struct tty_winsize *)arg);
+        return 0;
+    }
+    if (request == TCFLSH) {
+        /* arg: 0 = discard unread input, 1 = pending output (nothing queued
+         * here), 2 = both. Re-applying the current termios with the flush flag
+         * drops the input queue and any half-edited canonical line. */
+        if (arg > 2)
+            return (uint64_t)-EINVAL;
+        if (arg != 1) {
+            struct tty_termios cur;
+            tty_get_termios(t, &cur);
+            tty_set_termios(t, &cur, 1);
+        }
+        return 0;
+    }
+    if (request == TIOCGNAME) {
+        if (!user_buffer_ok(p, arg, 128))
+            return (uint64_t)-EFAULT;
+        struct open_file *fo = p->files[fd];
+        if (fo->kind != FILE_VNODE || !fo->path.dentry)
+            return (uint64_t)-ENOTTY;
+        if (vfs_get_path(&fo->path, (char *)arg, 128) < 0)
+            return (uint64_t)-ENOTTY;
         return 0;
     }
     if (request == TIOCSCTTY) {
@@ -944,6 +971,50 @@ static uint64_t sys_sigsuspend(uint64_t mask_addr, uint64_t b, uint64_t c,
     t->wait_original_mask = old;
     t->wait_mask_restore = true;
     return (uint64_t)-EINTR;
+}
+
+/* sigtimedwait(set, info, timeout_ns): dequeue a pending signal from `set`,
+ * waiting up to timeout_ns (-1 = forever, 0 = poll). Returns the signal number,
+ * -EAGAIN on timeout or -EINTR if some other signal interrupts the wait. */
+static uint64_t sys_sigtimedwait(uint64_t set_addr, uint64_t info_addr,
+                                 uint64_t timeout_ns_raw, struct arch_frame *f) {
+    (void)f;
+    struct proc *p = my_proc();
+    struct thread *t = my_thread();
+    if (!user_buffer_ok(p, set_addr, sizeof(uint64_t)))
+        return (uint64_t)-EFAULT;
+    if (info_addr && !user_buffer_ok(p, info_addr, 128))
+        return (uint64_t)-EFAULT;
+    int64_t timeout_ns = (int64_t)timeout_ns_raw;
+    if (timeout_ns < -1)
+        return (uint64_t)-EINVAL;
+    uint64_t mask = *(const uint64_t *)set_addr;
+    uint64_t hz = timer_ticks_per_second(), deadline = 0;
+    if (timeout_ns > 0) {
+        uint64_t ticks = ((uint64_t)timeout_ns * hz + 999999999ULL) / 1000000000ULL;
+        deadline = timer_ticks() + (ticks ? ticks : 1);
+    }
+    for (;;) {
+        struct signal_info info;
+        if (signal_take(t, mask, &info)) {
+            if (info_addr && user_buffer_ok(p, info_addr, 128))
+                signal_fill_user_siginfo((void *)info_addr, &info);
+            return (uint64_t)info.signo;
+        }
+        if (timeout_ns == 0 || (deadline && timer_ticks() >= deadline))
+            return (uint64_t)-EAGAIN;
+        if (file_poll_wait_until(deadline) < 0)
+            return (uint64_t)-EINTR;
+    }
+}
+
+/* getsid(pid): session id of `pid` (0 = the caller). */
+static uint64_t sys_getsid(uint64_t pid, uint64_t b, uint64_t c, struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *target = pid ? proc_lookup(pid) : my_proc();
+    if (!target)
+        return (uint64_t)-ESRCH;
+    return target->sid;
 }
 
 /* sigpending(set): signals raised while blocked, for this thread. */
@@ -1683,13 +1754,25 @@ static uint64_t sys_reboot(uint64_t a, uint64_t b, uint64_t c,
     irq_spin_unlock(&p->cred_lock);
     if (!root)
         return (uint64_t)-EPERM;
+    uint32_t cmd = (uint32_t)a;
+    /* Linux magic values: CAD on/off only toggle Ctrl-Alt-Del handling (BusyBox
+     * init disables it at startup), RB_AUTOBOOT resets, RB_POWER_OFF powers
+     * off, RB_HALT_SYSTEM stops the CPU. */
+    if (cmd == 0 || cmd == 0x89abcdefu)
+        return 0;
+    if (cmd != 0x01234567u && cmd != 0x4321fedcu && cmd != 0xcdef0123u)
+        return (uint64_t)-EINVAL;
     ext2_sync_all();   /* nothing may be left in the write-back cache */
 #ifdef __x86_64__
-    if ((uint32_t)a == 0x4321fedcu) {   /* Linux RB_POWER_OFF */
+    if (cmd == 0x4321fedcu) {
         extern void power_off(void);
         power_off();
     }
 #endif
+    if (cmd == 0xcdef0123u) {
+        for (;;)
+            arch_wait_for_interrupt();
+    }
     power_reset();
 }
 
@@ -3317,6 +3400,8 @@ static const syscall_fn syscall_table[] = {
     [SYS_YIELD] = sys_yield,
     [SYS_SIGSUSPEND] = sys_sigsuspend,
     [SYS_SIGPENDING] = sys_sigpending,
+    [SYS_SIGTIMEDWAIT] = sys_sigtimedwait,
+    [SYS_GETSID] = sys_getsid,
     [SYS_MREMAP] = sys_mremap,
     [SYS_FLOCK] = sys_flock,
     [SYS_SOCKET] = sys_socket,

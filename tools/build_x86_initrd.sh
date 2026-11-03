@@ -45,9 +45,44 @@ RT
     fi
     if [ -x "$ROOT/bin/busybox" ] && [ "${AUTOEXIT:-0}" != 1 ] && [ "${SMOKE_SHELL:-0}" != 1 ]; then
         rm -f "$ROOT/bin/sh"; ln -s busybox "$ROOT/bin/sh"
-        # Applets that other applets exec by name (tar -z runs `gzip`).
-        for a in gzip gunzip zcat; do ln -sf busybox "$ROOT/bin/$a"; done
-        mkdir -p "$ROOT/root"
+        # Applets that other applets or init exec by path.
+        for a in gzip gunzip zcat login su passwd adduser deluser addgroup delgroup \
+                 chpasswd whoami; do ln -sf busybox "$ROOT/bin/$a"; done
+        mkdir -p "$ROOT/sbin" "$ROOT/root" "$ROOT/home/user" "$ROOT/etc/init.d" "$ROOT/run" "$ROOT/var/log"
+        for a in init getty reboot poweroff halt; do ln -sf ../bin/busybox "$ROOT/sbin/$a"; done
+        chmod 700 "$ROOT/root"; chmod 1777 "$ROOT/tmp"
+
+        # The system the kernel boots into: init -> getty -> login -> sh.
+        cat > "$ROOT/etc/inittab" <<'IT'
+::sysinit:/etc/init.d/rcS
+::respawn:/sbin/getty -L 115200 console vt100
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/sync
+::restart:/sbin/init
+IT
+        cat > "$ROOT/etc/init.d/rcS" <<'RC'
+#!/bin/sh
+# Early system setup, run once by init before the login prompt appears.
+hostname -F /etc/hostname 2>/dev/null
+mkdir -p /tmp /run /var/log
+chmod 1777 /tmp
+RC
+        chmod 755 "$ROOT/etc/init.d/rcS"
+        printf 'Welcome to Extron.\n\n' > "$ROOT/etc/issue"
+        printf '\nExtron OS - a hobby POSIX kernel. Type "poweroff" to shut down.\n\n' > "$ROOT/etc/motd"
+        cat > "$ROOT/etc/profile" <<'PF'
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/opt/tests
+export PAGER=less
+alias ll='ls -l'
+PF
+        printf 'root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000:Extron user:/home/user:/bin/sh\n' > "$ROOT/etc/passwd"
+        printf 'root:x:0:\nuser:x:1000:\n' > "$ROOT/etc/group"
+        # root has no password (development system); `user` has the password "user".
+        USERHASH=$(openssl passwd -1 user 2>/dev/null || echo '*')
+        printf 'root::19000:0:99999:7:::\nuser:%s:19000:0:99999:7:::\n' "$USERHASH" > "$ROOT/etc/shadow"
+        chmod 600 "$ROOT/etc/shadow"
+        printf '/bin/sh\n' > "$ROOT/etc/shells"
+        chown_user=1
     fi
 fi
 # AUTOEXIT=1 (used by `make check`): smoke test resets the VM when done instead of
@@ -55,5 +90,12 @@ fi
 [ "${AUTOEXIT:-0}" = 1 ] && touch "$ROOT/etc/autoexit"
 rm -f "$OUT"
 dd if=/dev/zero of="$OUT" bs=1M count=${IMG_MB:-32} status=none
-mkfs.ext2 -q -E revision=0 -b 1024 -d "$ROOT" "$OUT"
+if [ "${chown_user:-0}" = 1 ] && command -v fakeroot >/dev/null; then
+    # Record real ownership (root everywhere, uid 1000 for the user's home)
+    # without needing root on the build host.
+    fakeroot sh -c "chown -R 0:0 '$ROOT' && chown 1000:1000 '$ROOT/home/user' && \
+        mkfs.ext2 -q -E revision=0 -b 1024 -d '$ROOT' '$OUT'"
+else
+    mkfs.ext2 -q -E revision=0 -b 1024 -d "$ROOT" "$OUT"
+fi
 echo "built $OUT"
