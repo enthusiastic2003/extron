@@ -250,7 +250,69 @@ static struct liballoc_major *allocate_new_page( unsigned int size )
 	
 
 
+#ifdef KHEAP_TRACK
+/* Leak hunting (make KTRACK=1): remember every live allocation with its
+ * caller, and let kheap_track_dump() aggregate the survivors by call site. */
+struct trk { void *ptr; size_t size; void *caller; };
+#define TRK_SLOTS 32768
+static struct trk trk_table[TRK_SLOTS];
+static void trk_add(void *p, size_t n, void *ra) {
+	if (!p) return;
+	size_t i = ((uintptr_t)p >> 4) % TRK_SLOTS;
+	for (size_t k = 0; k < TRK_SLOTS; k++, i = (i + 1) % TRK_SLOTS)
+		if (!trk_table[i].ptr) { trk_table[i] = (struct trk){p, n, ra}; return; }
+}
+static void trk_del(void *p) {
+	if (!p) return;
+	size_t i = ((uintptr_t)p >> 4) % TRK_SLOTS;
+	for (size_t k = 0; k < TRK_SLOTS; k++, i = (i + 1) % TRK_SLOTS) {
+		if (trk_table[i].ptr == p) {
+			/* backward-shift deletion keeps probe chains intact */
+			size_t j = i;
+			for (;;) {
+				trk_table[j].ptr = NULL;
+				size_t n = j;
+				for (;;) {
+					n = (n + 1) % TRK_SLOTS;
+					if (!trk_table[n].ptr) return;
+					size_t home = ((uintptr_t)trk_table[n].ptr >> 4) % TRK_SLOTS;
+					if ((j <= n) ? (home <= j || home > n) : (home <= j && home > n)) break;
+				}
+				trk_table[j] = trk_table[n];
+				j = n;
+			}
+		}
+		if (!trk_table[i].ptr) return;
+	}
+}
+static void *liballoc_real_malloc(size_t req_size);
 void *PREFIX(malloc)(size_t req_size)
+{
+	void *p = liballoc_real_malloc(req_size);
+	trk_add(p, req_size, __builtin_return_address(0));
+	return p;
+}
+void kheap_track_dump(void (*out)(const char *fmt, ...))
+{
+	struct { void *caller; size_t count, bytes; } agg[64];
+	size_t nagg = 0, live = 0;
+	for (size_t i = 0; i < TRK_SLOTS; i++) {
+		if (!trk_table[i].ptr) continue;
+		live++;
+		size_t a;
+		for (a = 0; a < nagg; a++) if (agg[a].caller == trk_table[i].caller) break;
+		if (a == nagg) { if (nagg == 64) continue; agg[nagg++] = (typeof(agg[0])){trk_table[i].caller, 0, 0}; }
+		agg[a].count++; agg[a].bytes += trk_table[i].size;
+	}
+	out("[KHEAP] %lu live allocations, %lu call sites\n", (unsigned long)live, (unsigned long)nagg);
+	for (size_t a = 0; a < nagg; a++)
+		out("[KHEAP]   caller %p: %lu live, %lu bytes\n", agg[a].caller,
+		    (unsigned long)agg[a].count, (unsigned long)agg[a].bytes);
+}
+static void *liballoc_real_malloc(size_t req_size)
+#else
+void *PREFIX(malloc)(size_t req_size)
+#endif
 {
 	int startedBet = 0;
 	unsigned long long bestSize = 0;
@@ -603,7 +665,13 @@ void *PREFIX(malloc)(size_t req_size)
 
 
 
+#ifdef KHEAP_TRACK
+static void liballoc_real_free(void *ptr);
+void PREFIX(free)(void *ptr) { trk_del(ptr); liballoc_real_free(ptr); }
+static void liballoc_real_free(void *ptr)
+#else
 void PREFIX(free)(void *ptr)
+#endif
 {
 	struct liballoc_minor *min;
 	struct liballoc_major *maj;

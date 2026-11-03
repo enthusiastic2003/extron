@@ -96,10 +96,40 @@ driver script that supplies the sysroot headers and crt1 and undefines
 `__linux__`; no custom `x86_64-extron` compiler is needed. BusyBox 1.38.0 is
 built the same way with `patches/busybox/` and `usr/busybox/extron.config`.
 
-`tools/build_x86_initrd.sh` assembles the ext2 root: with a built userland in
-`$EXTRON_USERLAND` (default `~/extron-userland`: `sysroot/` and `out/`) it ships
-`/lib/ld.so`, `/lib/libc.so`, `/bin/busybox` (and `/bin/sh` -> busybox), and the
-mlibc regression programs in `/opt/tests` (`sh /bin/runtests` runs them).
-`make -f Makefile.x86_64 check` keeps using the libc-free smoke payload so it
-needs no userland build.
+### Building it (reproducible)
 
+```
+make -f Makefile.x86_64 userland     # = tools/build_x86_userland.sh (needs network once)
+tools/build_x86_initrd.sh            # ext2 root: ld.so, libc.so, BusyBox, tests
+make -f Makefile.x86_64 run          # or: check, check-userland, soak
+```
+
+`build_x86_userland.sh` clones the mlibc fork (`MLIBC_REPO`/`MLIBC_REF`, default
+branch `x86`), installs meson+ninja if missing, builds mlibc, downloads and
+sha256-verifies BusyBox, applies `patches/busybox` + `usr/busybox/extron.config`,
+and builds the test programs; everything lands in `build-x86_64/userland/`.
+`tools/x86_64-extron-gcc` is the compiler driver it uses (host GCC + sysroot).
+
+The initrd then has `/lib/ld.so`, `/lib/libc.so`, `/bin/busybox` (`/bin/sh` ->
+busybox) and the mlibc regression programs in `/opt/tests`.
+
+### Tests
+
+| target | what it does |
+|---|---|
+| `check` | boots the libc-free smoke payload headless (no userland build needed) |
+| `check-userland` | boots BusyBox image, runs all of `/opt/tests` in the guest, fails on any FAIL / nonzero exit / panic / hang / leak |
+| `soak SOAK=N` | the same, N times in a row (default 10), plus a free-page leak check after each pass |
+
+## Kernel robustness notes
+
+* `timer_ticks()` is derived from the TSC, not counted from PIT interrupts, so
+  interrupts swallowed by long (interrupt-masked) syscalls no longer make
+  `sleep()` deadlines drift.
+* SMEP is enabled when the CPU has it (ring 0 can't execute user pages), on top
+  of NX and CR0.WP. SMAP is not: handlers dereference validated user pointers
+  directly rather than through stac/clac copy helpers.
+* Zombie members keep a process group alive (fixes ash pipelines).
+* Known limitation: syscalls still run with interrupts masked (several
+  handlers rely on that for atomicity, e.g. `sys_write`); making them
+  preemptible needs an audit of every such handler first.

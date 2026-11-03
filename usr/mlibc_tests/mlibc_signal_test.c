@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "arch_compat.h"
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -164,6 +165,12 @@ int main(void) {
     close(ready[1]);
     read(ready[0], &byte, 1);
     close(ready[0]);
+    /* pause() only wakes for a signal that arrives AFTER it blocks; a signal
+     * delivered earlier runs the handler and leaves pause() waiting forever
+     * (the classic reason sigsuspend exists). Give the child time to get
+     * from write(ready) into pause() before signalling. */
+    struct timespec settle = { 0, 100 * 1000 * 1000 };
+    nanosleep(&settle, NULL);
     kill(child, SIGUSR1);
     wait(&status);
     failures += pass("pause() blocks until a signal, then returns -1/EINTR",

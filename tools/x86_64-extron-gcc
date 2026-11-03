@@ -1,0 +1,20 @@
+#!/bin/bash
+# gcc driver for the x86_64-extron mlibc sysroot, using the host GCC.
+# Compile: no host headers, mlibc's headers instead. Link: mlibc crt1 + libc,
+# dynamic by default (/lib/ld.so), -static supported.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SR="${EXTRON_SYSROOT:-$HERE/../build-x86_64/userland/sysroot}"
+GCCINC="$(gcc -print-file-name=include)"
+compile=(-nostdinc -isystem "$SR/usr/include" -isystem "$GCCINC" -D__extron__=1 -U__linux__ -U__linux -U__gnu_linux__ -Ulinux -fno-stack-protector -fno-pie)
+mode=link; static=0; shared=0; pie=1; reloc=0
+for a in "$@"; do case "$a" in
+  -c|-S|-E) mode=compile;; -static) static=1;; -shared) shared=1;; -no-pie) pie=0;; -r) reloc=1;;
+esac; done
+if [ $reloc = 1 ]; then exec gcc -nostdlib "$@"; fi
+if [ $mode = compile ]; then exec gcc "${compile[@]}" -fPIE "$@"; fi
+if [ $shared = 1 ]; then exec gcc "${compile[@]}" -fPIC -nostdlib -L"$SR/usr/lib" "$@"; fi
+if [ $static = 1 ]; then
+  exec gcc "${compile[@]}" -static -nostdlib -L"$SR/usr/lib" "$SR/usr/lib/crt1.o" "$@" -lc -lgcc
+fi
+exec gcc "${compile[@]}" -fPIE -pie -nostdlib -Wl,--dynamic-linker=/lib/ld.so -Wl,-z,max-page-size=0x1000 \
+  -L"$SR/usr/lib" -Wl,-rpath-link,"$SR/usr/lib" "$SR/usr/lib/crt1.o" "$@" -lc -lgcc

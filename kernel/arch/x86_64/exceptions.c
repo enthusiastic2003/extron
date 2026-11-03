@@ -125,6 +125,13 @@ void exceptions_init(void) {
     __asm__ volatile ("mov %0, %%cr0" :: "r"(cr0));
     __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1ULL << 9) | (1ULL << 10);
+    {   /* SMEP (CR4.20): ring 0 must never execute user-mapped pages. SMAP is
+         * deliberately left off — syscall handlers dereference validated user
+         * pointers directly rather than through stac/clac-wrapped copies. */
+        uint32_t a = 7, b, c = 0, d;
+        __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+        if (b & (1u << 7)) cr4 |= (1ULL << 20);
+    }
     __asm__ volatile ("mov %0, %%cr4" :: "r"(cr4));
     __asm__ volatile ("fninit");
 

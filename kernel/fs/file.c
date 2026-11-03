@@ -148,10 +148,10 @@ int file_table_clone(struct proc *dst, struct proc *src) {
         return -1;
     /* proc_init() installed the default console table. Replace it with an
      * exact snapshot: a closed descriptor must remain closed in the child. */
-    for (int fd = 0; fd < PROC_MAX_FDS; fd++) {
-        dst->files[fd] = NULL;
-        dst->fd_flags[fd] = 0;
-    }
+    /* Release them, don't just forget them: proc_init() allocated that
+     * console open_file (and took VFS references), so overwriting the three
+     * slots leaked one open_file plus its node/path references per fork. */
+    file_table_close_all(dst);
     for (int fd = 0; fd < PROC_MAX_FDS; fd++) {
         if (!src->files[fd])
             continue;

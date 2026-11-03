@@ -29,7 +29,19 @@ static inline uint64_t rdtsc(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-uint64_t timer_ticks(void) { return tick_count; }
+/* Scheduler time in ticks, derived from the TSC rather than counted by the
+ * PIT interrupt. Syscalls run with interrupts masked, so a long one (a big
+ * framebuffer write, say) can swallow several 1 ms PIT ticks; counting
+ * interrupts would make every sleep() deadline drift late by that much,
+ * forever. Deriving from the TSC makes missed ticks self-correcting: the next
+ * interrupt that does arrive sees the true time and wakes everything due. */
+static uint64_t tsc_per_tick;
+
+uint64_t timer_ticks(void) {
+    if (!tsc_per_tick)
+        return tick_count;
+    return (rdtsc() - boot_tsc) / tsc_per_tick;
+}
 unsigned timer_ticks_per_second(void) { return configured_hz; }
 
 uint64_t timer_uptime_ns(void) {
@@ -59,7 +71,7 @@ void timer_set_counter_watch(phys_addr_t a, phys_addr_t b) { (void)a; (void)b; }
 static void timer_irq_handler(struct arch_frame *f) {
     (void)f;
     tick_count++;
-    thread_wakeup_expired(tick_count);
+    thread_wakeup_expired(timer_ticks());
     schedule();
 }
 
@@ -110,6 +122,7 @@ void timer_init(unsigned hz) {
     configured_hz = hz;
     tsc_hz = calibrate_tsc();
     boot_tsc = rdtsc();
+    tsc_per_tick = tsc_hz ? tsc_hz / hz : 0;
     kprintf("x86_64: TSC %lu MHz (PIT-calibrated)\n", (unsigned long)(tsc_hz / 1000000));
 
     timer_set_realtime_ns(rtc_unix_seconds() * 1000000000LL);

@@ -430,10 +430,38 @@ static void* pmm_take_free_page_locked(void) {
  * callers that genuinely cannot continue panic at their own call site,
  * where they can say something useful about what failed.
  */
+#ifdef KHEAP_TRACK
+/* KTRACK=1 leak hunting: which call site owns each live physical page. */
+#define PMM_TRK_MAX (1u << 20)
+static void *pmm_owner[PMM_TRK_MAX];
+static inline void pmm_trk_set(void *page, void *ra) {
+    uint64_t i = (uint64_t)page / PAGE_SIZE;
+    if (page && i < PMM_TRK_MAX) pmm_owner[i] = ra;
+}
+void pmm_track_dump(void (*out)(const char *fmt, ...)) {
+    struct { void *caller; size_t pages; } agg[64];
+    size_t n = 0;
+    for (size_t i = 0; i < PMM_TRK_MAX; i++) {
+        if (!pmm_owner[i]) continue;
+        size_t a;
+        for (a = 0; a < n; a++) if (agg[a].caller == pmm_owner[i]) break;
+        if (a == n) { if (n == 64) continue; agg[n].caller = pmm_owner[i]; agg[n].pages = 0; n++; }
+        agg[a].pages++;
+    }
+    for (size_t a = 0; a < n; a++) out("[PMMTRK] caller %p: %lu pages\n", agg[a].caller, (unsigned long)agg[a].pages);
+}
+#define PMM_TRK_ALLOC(p) pmm_trk_set((p), __builtin_return_address(0))
+#define PMM_TRK_FREE(p)  do { uint64_t i_ = (uint64_t)(p) / PAGE_SIZE; if (i_ < PMM_TRK_MAX) pmm_owner[i_] = 0; } while (0)
+#else
+#define PMM_TRK_ALLOC(p) ((void)0)
+#define PMM_TRK_FREE(p)  ((void)0)
+#endif
+
 void* pmm_alloc_page(void) {
     spin_lock(&pmm_lock);
     void* page = pmm_take_free_page_locked();
     spin_unlock(&pmm_lock);
+    PMM_TRK_ALLOC(page);
     return page;
 }
 
@@ -471,6 +499,7 @@ void pmm_free_page(void* phys_addr) {
         panic("PMM: Double free or freeing unallocated page at 0x%lx", addr);
     }
     bitmap_clear(idx);
+    PMM_TRK_FREE(phys_addr);
     /* Reuse freed space promptly rather than letting the cursor run
      * ahead of it: without this a free-heavy workload would keep pushing
      * the cursor forward and only revisit this page on the wrap pass. */

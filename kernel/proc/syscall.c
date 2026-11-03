@@ -670,6 +670,16 @@ static uint64_t sys_pause(uint64_t a, uint64_t b, uint64_t c,
 
 static uint64_t sys_proc_dump(uint64_t a, uint64_t b, uint64_t c,
                               struct arch_frame *f) {
+#ifdef KHEAP_TRACK
+    extern void kheap_track_dump(void (*out)(const char *fmt, ...));
+    kheap_track_dump(kprintf);
+    extern void pmm_track_dump(void (*out)(const char *fmt, ...));
+    pmm_track_dump(kprintf);
+#ifdef __x86_64__
+    extern void paging_track_dump(void (*out)(const char *fmt, ...));
+    paging_track_dump(kprintf);
+#endif
+#endif
     (void)a;
     (void)b;
     (void)c;

@@ -45,9 +45,21 @@ void load_cr3(uint64_t phys_addr) {
 
 static uint64_t *table_ptr(phys_addr_t t) { return phys_to_virt_hhdm(t); }
 
+#ifdef KHEAP_TRACK
+static phys_addr_t dbg_root;                       /* root being mapped into (set by map_*) */
+unsigned long dbg_tbl_user, dbg_tbl_kernel, dbg_tbl_freed;
+void paging_track_dump(void (*out)(const char *fmt, ...)) {
+    out("[PGTRK] page-table pages: user-allocated %lu, kernel-allocated %lu, freed-by-teardown %lu\n",
+        dbg_tbl_user, dbg_tbl_kernel, dbg_tbl_freed);
+}
+#endif
+
 static phys_addr_t alloc_table_zeroed(void) {
     phys_addr_t p = (phys_addr_t)pmm_alloc_page();
     if (!p) return 0;
+#ifdef KHEAP_TRACK
+    if (dbg_root == kernel_pml4) dbg_tbl_kernel++; else dbg_tbl_user++;
+#endif
     uint64_t *v = table_ptr(p);
     for (int i = 0; i < 512; i++) v[i] = 0;
     return p;
@@ -81,6 +93,9 @@ static uint64_t hw_attrs_from_flags(uint64_t flags) {
 }
 
 int map_page_raw(pml4_t pml4, virt_addr_t virt, phys_addr_t phys, uint64_t attrs) {
+#ifdef KHEAP_TRACK
+    dbg_root = pml4;
+#endif
     phys_addr_t pdpt = get_next_table(pml4, PML4_IDX(virt));
     if (!pdpt) return -1;
     phys_addr_t pd = get_next_table(pdpt, PDPT_IDX(virt));
@@ -165,6 +180,9 @@ int kunmap(virt_addr_t v) { return unmap_page(kernel_pml4, v); }
 phys_addr_t kvirt_to_phys(virt_addr_t v) { return virt_to_phys(kernel_pml4, v); }
 
 phys_addr_t create_user_pml4(void) {
+#ifdef KHEAP_TRACK
+    dbg_root = 0;
+#endif
     phys_addr_t p = alloc_table_zeroed();
     if (!p) return 0;
     uint64_t *dst = table_ptr(p);
@@ -187,12 +205,24 @@ void free_user_page_tables(phys_addr_t pml4) {
             for (int k = 0; k < 512; k++) {
                 if (!(l2[k] & PTE_P) || (l2[k] & PTE_PS)) continue;
                 pmm_free_page((void *)(l2[k] & PAGE_ADDR_MASK));
+#ifdef KHEAP_TRACK
+                dbg_tbl_freed++;
+#endif
             }
             pmm_free_page((void *)(l1[j] & PAGE_ADDR_MASK));
+#ifdef KHEAP_TRACK
+            dbg_tbl_freed++;
+#endif
         }
         pmm_free_page((void *)(l0[i] & PAGE_ADDR_MASK));
+#ifdef KHEAP_TRACK
+        dbg_tbl_freed++;
+#endif
     }
     pmm_free_page((void *)pml4);
+#ifdef KHEAP_TRACK
+    dbg_tbl_freed++;
+#endif
 }
 
 uint64_t arch_translate_vm_flags(int vm_flags) {

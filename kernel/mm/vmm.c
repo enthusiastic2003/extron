@@ -160,6 +160,13 @@ int vmm_free_pages(virt_addr_t v, size_t n) {
         bitmap_clear(start + i);
     }
 
+    /* Rewind the next-fit cursor so freed address space is reused at once.
+     * Without this the cursor only ever advances, every thread stack lands
+     * in fresh VA, and the kernel page-table pages backing those new 2 MiB
+     * ranges (never freed) accumulate: ~0.4 page leaked per process. */
+    if (start < last_allocated_index)
+        last_allocated_index = start;
+
     spin_unlock(&vmm_lock);
     return 0;
 }
@@ -189,7 +196,10 @@ int vmm_free_unmapped_page(virt_addr_t v) {
         panic("VMM: vmm_free_unmapped_page() on a MAPPED page: %p\n", (void *)v);
 
     spin_lock(&vmm_lock);
-    bitmap_clear((v - KERNEL_HEAP_START) / PAGE_SIZE);
+    uint64_t index = (v - KERNEL_HEAP_START) / PAGE_SIZE;
+    bitmap_clear(index);
+    if (index < last_allocated_index)
+        last_allocated_index = index;
     spin_unlock(&vmm_lock);
     return 0;
 }

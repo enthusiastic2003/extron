@@ -18,7 +18,7 @@ printf 'root:x:0:0:root:/root:/bin/sh\n' > "$ROOT/etc/passwd"
 printf 'root:x:0:\n' > "$ROOT/etc/group"
 # Optional mlibc userland (see docs/X86_64_UEFI_PORT.md): if a built sysroot and
 # test programs exist, ship the runtime linker, libc and the programs.
-UL="${EXTRON_USERLAND:-$HOME/extron-userland}"
+UL="${EXTRON_USERLAND:-$(pwd)/build-x86_64/userland}"
 if [ -f "$UL/sysroot/usr/lib/ld.so" ]; then
     cp "$UL/sysroot/usr/lib/ld.so" "$UL/sysroot/usr/lib/libc.so" "$ROOT/lib/"
     for f in "$UL"/out/*; do [ -f "$f" ] && install -m 755 "$f" "$ROOT/bin/$(basename "$f")"; done

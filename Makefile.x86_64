@@ -20,6 +20,12 @@ CFLAGS := -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-stack-protector \
           -Ikernel/include -Ikernel/arch/x86_64/include -g \
           -Wno-unused-parameter -Wno-missing-field-initializers
 
+# make KTRACK=1: track live kernel-heap allocations by call site; the
+# SYS_PROC_DUMP syscall then prints them (leak hunting).
+ifeq ($(KTRACK),1)
+CFLAGS += -DKHEAP_TRACK
+endif
+
 # Shared sources, minus everything that is Raspberry Pi / aarch64 specific.
 EXCLUDE := kernel/mm/paging.c kernel/drivers/uart.c kernel/drivers/timer.c \
            kernel/drivers/emmc.c kernel/drivers/mailbox.c kernel/drivers/fb.c \
@@ -97,11 +103,24 @@ check: $(BUILD)/OVMF_VARS.fd
 	    || { echo "x86-64 UEFI boot + smoke test: FAIL (see $(BUILD)/serial.log)"; tail -30 $(BUILD)/serial.log; exit 1; }
 
 # Build the bring-up initrd (freestanding smoke-test payload as /bin/sh).
-$(INITRD): tools/build_x86_initrd.sh usr/x86_64/init.c
+$(INITRD): tools/build_x86_initrd.sh usr/x86_64/init.c $(wildcard $(BUILD)/userland/out/busybox)
 	AUTOEXIT=$(AUTOEXIT) tools/build_x86_initrd.sh $@
+
+# Build mlibc + BusyBox + test programs into build-x86_64/userland (network needed).
+userland:
+	tools/build_x86_userland.sh
+
+# Boot the BusyBox image and run the whole mlibc regression suite in the guest.
+check-userland: esp
+	python3 tools/x86_run_tests.py -n 1
+
+# Repeat the suite N times (default 10) to shake out races, leaks and hangs.
+SOAK ?= 10
+soak: esp
+	python3 tools/x86_run_tests.py -n $(SOAK) --log $(BUILD)/soak.log
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean
+.PHONY: all esp run check clean userland check-userland soak
 -include $(DEPS)

@@ -126,14 +126,25 @@ static void test_broken_pipe(void) {
     close(fds[1]);
 
     check("create pipe for default SIGPIPE action", pipe(fds) == 0);
+    /* The child must not write until the parent has closed the read end, or
+     * the write simply succeeds (a race the scheduler's fork ordering
+     * decides). A second "gate" pipe orders the two. */
+    int gate[2];
+    check("create gate pipe", pipe(gate) == 0);
     pid_t child = fork();
     if (child == 0) {
         close(fds[0]);
+        close(gate[1]);
+        char go;
+        (void)read(gate[0], &go, 1);
         write(fds[1], "x", 1);
         _exit(99);
     }
     close(fds[0]);
     close(fds[1]);
+    close(gate[0]);
+    (void)write(gate[1], "g", 1);
+    close(gate[1]);
     int status = 0;
     check("default SIGPIPE terminates the writer",
           child > 0 && waitpid(child, &status, 0) == child
