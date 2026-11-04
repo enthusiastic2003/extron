@@ -133,6 +133,10 @@ libs:
 coreutils:
 	tools/build_x86_coreutils.sh
 
+# GNU bash 5.3 (/bin/bash, the login shell; needs the userland first).
+bash:
+	tools/build_x86_bash.sh
+
 # CPython 3.14 for the data disk (needs the userland first; ~1 minute).
 python:
 	tools/build_x86_python.sh
@@ -182,5 +186,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-python disk-clean check-persist libs python coreutils check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-python disk-clean check-persist libs python coreutils bash check-boot check-disk check-all
 -include $(DEPS)

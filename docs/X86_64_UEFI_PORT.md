@@ -295,3 +295,27 @@ What porting it needed:
   (`sort | head` printed a stale ENOSYS), `fstatat(fd, "", AT_EMPTY_PATH)` (`ls -R`),
   quiet `ENOSYS` for `vmsplice`/`splice`/`timer_create`, no `uselocale`/`fadvise` nags.
 * Not in coreutils proper: `cmp`, `diff`, `find`, `grep`, `sed`, `awk` stay BusyBox's.
+
+## GNU bash
+
+`tools/build_x86_bash.sh` (`make -f Makefile.x86_64 bash`) cross-builds bash 5.3 with its own
+readline and the shared `libncursesw` from `build_x86_libs.sh`; `/bin/bash` goes into the
+initrd and becomes the login shell for root and `user` (`/etc/passwd`, `/etc/shells`).
+BusyBox `sh` is still `/bin/sh` and runs init and the rc scripts. `/etc/profile` sets
+`PATH`, exports `HOME/USER/LOGNAME/SHELL` (login leaves them to the shell), and for bash
+sets `PS1='\w \$ '` (same shape as BusyBox's `/ # `, which the test harnesses wait for) and
+`INPUTRC=/etc/inputrc` (bracketed paste off). `usr/x86_64/tests/bash_test.bash` has 76 checks
+(arrays, expansions, `[[ ]]`, functions, redirections, process substitution, traps, job
+control, coproc, `wait -n`, `read -t`, ...), run by `runtests` when `/bin/bash` exists.
+
+Cross-build notes: bash's generator programs use `CC_FOR_BUILD=gcc`; run-time configure
+probes are answered in the script (`bash_cv_*`); `bash_cv_termcap_lib=libncursesw` stops it
+linking the host's `libtinfo`; `bash_cv_dev_fd=absent` makes process substitution use FIFOs
+because Extron has no `/dev/fd` yet.
+
+What bash found missing in mlibc/the port (all fixed):
+* `main()` never received `envp` (`__mlibc_start_main` passed only argc/argv), so bash started
+  with an empty environment; BusyBox reads `environ`, which hid it.
+* `getresuid`/`getresgid` sysdeps (bash printed "I have no name!"); `mktemp()` (FIFO names).
+* `strtoimax`/`strtoumax` were a hand-written stub that rejected `+`, mishandled `-` and
+  panicked above base 10; they now share `strtol`'s conversion (`printf %d -1`).

@@ -92,7 +92,7 @@ check("every applet init/inittab needs exists (e.g. /bin/sync)", "MISSING" not i
 out = run("cat /var/log/messages")
 check("init logs to /var/log/messages, not the console", "init started" in out)
 out = run("ps; free; uptime; echo pid1=$(pidof init)")
-check("ps lists init and the shell via /proc", "/sbin/init" in out and "-sh" in out, out)
+check("ps lists init and the shell via /proc", "/sbin/init" in out and ("-sh" in out or "-bash" in out), out)
 check("free reports memory (sysinfo)", "Mem:" in out and "Swap:" in out, out)
 check("uptime and pidof work", "load average" in out and "pid1=1" in out, out)
 out = run("sleep 100 & P=$!; sleep 1; killall sleep; wait $P; echo st=$?")

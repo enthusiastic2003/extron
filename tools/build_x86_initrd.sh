@@ -41,6 +41,11 @@ if [ -f "$UL/sysroot/usr/lib/ld.so" ]; then
         cp -a "$CU/bin" "$ROOT/usr/gnu/bin"
         [ -d "$CU/libexec/coreutils" ] && cp -a "$CU/libexec/coreutils" "$ROOT/usr/libexec/"
     fi
+    # GNU bash (tools/build_x86_bash.sh): /bin/bash, the login shell when present.
+    if [ -x build-x86_64/bash/rootfs/usr/bin/bash ]; then
+        install -m 755 build-x86_64/bash/rootfs/usr/bin/bash "$ROOT/bin/bash"
+        HAVE_BASH=1
+    fi
     for f in "$UL"/out/*; do [ -f "$f" ] && install -m 755 "$f" "$ROOT/bin/$(basename "$f")"; done
     # mlibc regression programs (usr/mlibc_tests) live on the data disk
     # (tools/build_x86_disk.sh), mounted at /mnt; /opt/tests resolves there.
@@ -59,6 +64,13 @@ for t in /opt/tests/*.sh; do
     echo "=== $t"
     sh "$t" || echo "[exit status $?]"
 done
+# bash programs run only when /bin/bash is installed.
+if [ -x /bin/bash ]; then
+    for t in /opt/tests/*.bash; do
+        echo "=== $t"
+        /bin/bash "$t" || echo "[exit status $?]"
+    done
+fi
 # Python programs run only when the data disk carries CPython.
 if [ -x /mnt/python/bin/python3 ]; then
     for t in /opt/tests/*.py; do
@@ -111,10 +123,24 @@ RC
         cat > "$ROOT/etc/profile" <<'PF'
 export PATH=/usr/gnu/bin:/sbin:/usr/sbin:/bin:/usr/bin:/opt/tests
 export PAGER=less
+# login(1) leaves the identity variables for the shell to derive; export them
+# so children (and bash -c) see them.
+: ${USER:=$(id -un 2>/dev/null)}
+export HOME USER LOGNAME=${LOGNAME:-$USER}
 alias ll='ls -l'
+if [ -n "$BASH_VERSION" ]; then
+    export SHELL=/bin/bash INPUTRC=/etc/inputrc
+    PS1='\w \$ '      # same shape as BusyBox's ("/ # "), which the test harnesses wait for
+    HISTFILE=$HOME/.bash_history
+    [ -r /etc/bash.bashrc ] && . /etc/bash.bashrc
+fi
 PF
+        printf '/bin/sh\n/bin/ash\n/bin/bash\n' > "$ROOT/etc/shells"
+        # readline: no bracketed paste (its escape codes just clutter a serial console).
+        printf 'set enable-bracketed-paste off\n' > "$ROOT/etc/inputrc"
         ln -sf /proc/mounts "$ROOT/etc/mtab"
-        printf 'root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000:Extron user:/home/user:/bin/sh\n' > "$ROOT/etc/passwd"
+        LOGIN_SH=/bin/sh; [ "${HAVE_BASH:-0}" = 1 ] && LOGIN_SH=/bin/bash
+        printf 'root:x:0:0:root:/root:%s\nuser:x:1000:1000:Extron user:/home/user:%s\n' "$LOGIN_SH" "$LOGIN_SH" > "$ROOT/etc/passwd"
         printf 'root:x:0:\nuser:x:1000:\n' > "$ROOT/etc/group"
         # root has no password (development system); `user` has the password "user".
         USERHASH=$(openssl passwd -1 user 2>/dev/null || echo '*')

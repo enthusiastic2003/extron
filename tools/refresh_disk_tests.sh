@@ -21,7 +21,7 @@ isdir() { debugfs -R "stat $1" "$DISK" 2>/dev/null | grep -q "Type: directory"; 
         echo "sif $2 mode 0100$3"
     }
     for f in "$UL"/out/tests/*; do [ -f "$f" ] && put "$f" "opt/tests/$(basename "$f")" 755; done
-    for s in usr/x86_64/tests/*.sh usr/x86_64/tests/*.py; do [ -f "$s" ] && put "$s" "opt/tests/$(basename "$s")" 755; done
+    for s in usr/x86_64/tests/*.sh usr/x86_64/tests/*.bash usr/x86_64/tests/*.py; do [ -f "$s" ] && put "$s" "opt/tests/$(basename "$s")" 755; done
     put usr/hello.txt opt/tests/hello.txt 644
     # /hello.txt is the user's sample file: seed it once, never overwrite edits.
     debugfs -R "stat hello.txt" "$DISK" 2>/dev/null | grep -q "Type: regular" \
