@@ -142,9 +142,8 @@ static uint64_t sys_exit(uint64_t status, uint64_t arg2, uint64_t arg3,
     (void)arg2;
     (void)arg3;
     (void)f;
-    struct proc *p = my_proc();
-    kprintf("[SYSCALL exit] pid=%lu status=%lu\n",
-            p ? (unsigned long)p->pid : 0, (unsigned long)status);
+    /* No per-exit log line: a normal exit (even a non-zero status) is not an
+     * error, and every process would otherwise write to the console. */
     proc_exit_current((int)(status & 0xff));
 }
 
