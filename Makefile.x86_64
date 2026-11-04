@@ -34,7 +34,17 @@ C_SRC  := $(filter-out $(EXCLUDE),$(shell find kernel -name '*.c' -not -path 'ke
           $(wildcard kernel/arch/x86_64/*.c)
 S_SRC  := $(wildcard kernel/arch/x86_64/*.S) $(wildcard kernel/arch/x86_64/proc/*.S)
 OBJ    := $(patsubst %.c,$(BUILD)/%.o,$(C_SRC)) $(patsubst %.S,$(BUILD)/%.o,$(S_SRC))
+# lwIP (third_party/lwip, unmodified): compiled into the kernel with its own include
+# path and without warnings; configuration and glue are in kernel/net/.
+LWIP_DIR  := third_party/lwip/src
+LWIP_SRC  := $(wildcard $(LWIP_DIR)/core/*.c $(LWIP_DIR)/core/ipv4/*.c) $(LWIP_DIR)/netif/ethernet.c
+LWIP_OBJ  := $(patsubst %.c,$(BUILD)/%.o,$(LWIP_SRC))
+OBJ    += $(LWIP_OBJ)
 DEPS   := $(OBJ:.o=.d)
+LWIP_CFLAGS := -w -I$(LWIP_DIR)/include -Ikernel/net/include -Ikernel/net/shim
+# Our own glue (kernel/net/*.c) sees lwIP's headers and options too.
+$(BUILD)/kernel/net/%.o: CFLAGS += -I$(LWIP_DIR)/include -Ikernel/net/include
+$(LWIP_OBJ): CFLAGS += $(LWIP_CFLAGS)
 
 KERNEL_ELF := $(BUILD)/kernel.elf
 LOADER     := $(BUILD)/BOOTX64.EFI
@@ -61,6 +71,10 @@ DISK_MB   ?= 512
 DISK_QEMU  = -drive if=none,id=data0,format=raw,file=$(DISK) \
              -device virtio-blk-pci,drive=data0,disable-modern=on
 DISK_ARGS  = $(if $(wildcard $(DISK)),$(DISK_QEMU))
+
+# A virtio-net NIC on QEMU's user-mode network: no host setup, DHCP gives the guest 10.0.2.15,
+# the host is 10.0.2.2, DNS 10.0.2.3, and the host's internet is reachable through NAT.
+NET_ARGS  ?= -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-modern=on
 
 # What the ESP carries. Default: a tiny initramfs whose /init mounts root=/dev/vda
 # and switches to it (USE_INITRD=0: no initramfs, the kernel mounts root= itself).
@@ -107,7 +121,7 @@ QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display $(QEMU_DISPLAY) \
             -drive if=pflash,format=raw,unit=0,readonly=on,file=$(OVMF_CODE) \
             -drive if=pflash,format=raw,unit=1,file=$(BUILD)/OVMF_VARS.fd \
             -drive format=raw,file=fat:rw:$(ESP) \
-            $(DISK_ARGS) \
+            $(DISK_ARGS) $(NET_ARGS) \
             -serial stdio -no-reboot
 
 # The root filesystem image, built on first use from the userland, libraries,
@@ -178,6 +192,10 @@ check-disk: esp $(TEST_DISK)
 check-doom: esp $(TEST_DISK)
 	python3 tools/x86_doom_test.py
 
+# Networking: DHCP, DNS, HTTP downloads from a host-side server, listening in the guest.
+check-net: esp $(TEST_DISK)
+	python3 tools/x86_net_test.py
+
 # Boot flow AND the full regression suite in one boot (one QEMU, one login).
 check-all: esp $(TEST_DISK)
 	python3 tools/x86_boot_test.py --runtests
@@ -220,5 +238,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash doom check-boot check-disk check-all check-doom
+.PHONY: all esp run check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash doom check-boot check-disk check-all check-doom check-net
 -include $(DEPS)

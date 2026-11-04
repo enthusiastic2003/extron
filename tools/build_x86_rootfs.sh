@@ -118,6 +118,35 @@ fi
 
 # ---- configuration ------------------------------------------------------------
 echo "extron" > "$ROOT/etc/hostname"
+# Name resolution (mlibc's resolver): /etc/resolv.conf is the kernel's live view of what
+# DHCP learned (/proc/net/resolv.conf); the service and protocol tables are static.
+printf '127.0.0.1\tlocalhost extron\n' > "$ROOT/etc/hosts"
+ln -sf /proc/net/resolv.conf "$ROOT/etc/resolv.conf"
+cat > "$ROOT/etc/services" <<'SV'
+echo		7/tcp
+echo		7/udp
+ftp-data	20/tcp
+ftp		21/tcp
+ssh		22/tcp
+telnet		23/tcp
+smtp		25/tcp
+domain		53/tcp
+domain		53/udp
+bootps		67/udp
+bootpc		68/udp
+tftp		69/udp
+http		80/tcp
+pop3		110/tcp
+ntp		123/udp
+imap		143/tcp
+https		443/tcp
+SV
+cat > "$ROOT/etc/protocols" <<'PR'
+ip	0	IP
+icmp	1	ICMP
+tcp	6	TCP
+udp	17	UDP
+PR
 cat > "$ROOT/etc/inittab" <<'IT'
 ::sysinit:/etc/init.d/rcS
 ::respawn:/sbin/getty -L 115200 console vt100

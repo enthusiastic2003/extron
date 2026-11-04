@@ -104,11 +104,20 @@ static void idt_set(int v, void *handler, uint8_t type, uint8_t ist) {
 }
 
 #define IRQ_HANDLER_MAX 16
-static arch_irq_handler_fn irq_handlers[IRQ_HANDLER_MAX];
+#define IRQ_SHARE_MAX 4      /* PCI INTx lines are shared: disk and NIC may land on one */
+static arch_irq_handler_fn irq_handlers[IRQ_HANDLER_MAX][IRQ_SHARE_MAX];
 
 void register_irq_handler(unsigned irq, arch_irq_handler_fn handler) {
-    if (irq < IRQ_HANDLER_MAX)
-        irq_handlers[irq] = handler;
+    if (irq >= IRQ_HANDLER_MAX)
+        return;
+    for (int i = 0; i < IRQ_SHARE_MAX; i++) {
+        if (irq_handlers[irq][i] == handler)
+            return;
+        if (!irq_handlers[irq][i]) {
+            irq_handlers[irq][i] = handler;
+            return;
+        }
+    }
 }
 
 void exceptions_init(void) {
@@ -200,8 +209,9 @@ void exception_dispatch(struct arch_frame *f) {
         /* EOI before the handler, for the same reason the aarch64 path EOIs
          * first: a handler that reschedules may never return here. */
         pic_eoi(irq);
-        if (irq_handlers[irq])
-            irq_handlers[irq](f);
+        for (int i = 0; i < IRQ_SHARE_MAX; i++)
+            if (irq_handlers[irq][i])
+                irq_handlers[irq][i](f);
         signal_deliver_pending(f);
         resource_account_exception_leave(f);
         return;

@@ -1,0 +1,4 @@
+lwIP 2.2.0 (STABLE-2_2_0_RELEASE, https://github.com/lwip-tcpip/lwip, BSD license: see COPYING),
+unmodified, trimmed to what the Extron kernel uses: the core (TCP/UDP/ICMP/ARP/DHCP/IPv4,
+raw callback API), netif/ethernet.c and the headers. Configuration and the platform glue
+live in kernel/net/ (lwipopts.h, arch/cc.h); nothing under src/ is edited.

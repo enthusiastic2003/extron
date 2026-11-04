@@ -22,6 +22,7 @@
 #include <kernel/errno.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/socket.h>
+#include <kernel/net_sock.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
 #include <kernel/mm/kheap.h>
@@ -110,6 +111,7 @@ struct usock {
     struct usock *backlog[BACKLOG_MAX];
     int nbacklog, backlog_cap;
 
+    void *inet;                       /* AF_INET socket (kernel/net/inet_sock.c), else NULL */
     char space;                       /* wait channel: room appeared for writers */
     int pending_error;
     struct kcred peer_cred;
@@ -206,6 +208,11 @@ static struct vfs_node *sock_unlink_locked(struct usock *s) {
 }
 
 void sock_release(struct usock *s) {
+    if (s->inet) {                    /* never on the AF_UNIX lists, owns no buffers */
+        inet_sock_free(s->inet);
+        kfree(s);
+        return;
+    }
     irq_spin_lock(&sock_lock);
     struct vfs_node *node = sock_unlink_locked(s);
     free_dq(s);
@@ -218,6 +225,17 @@ void sock_release(struct usock *s) {
 }
 
 int sock_type(const struct usock *s) { return s->type; }
+
+/* A descriptor-level socket wrapping an AF_INET socket. */
+static struct usock *sock_wrap_inet(void *inet) {
+    struct usock *s = kmalloc(sizeof(*s));
+    if (!s)
+        return NULL;
+    memset(s, 0, sizeof(*s));
+    s->type = inet_sock_type(inet);
+    s->inet = inet;
+    return s;
+}
 
 /* ------------------------------------------------------------------ */
 static struct usock *fd_sock(struct proc *p, int fd, int *oflags) {
@@ -285,6 +303,22 @@ static uint32_t fill_addr(const struct usock *s, void *out, uint32_t cap) {
 
 /* ------------------------------------------------------------------ */
 long sock_create(struct proc *p, int domain, int type, int protocol) {
+    if (domain == INET_AF) {
+        long err;
+        void *inet = inet_sock_new(type & SOCK_TYPE_MASK, protocol, &err);
+        if (!inet)
+            return err;
+        struct usock *s = sock_wrap_inet(inet);
+        if (!s) {
+            inet_sock_free(inet);
+            return -ENOMEM;
+        }
+        int fd = file_install_socket(p, s, (type & SOCK_NONBLOCK) ? O_NONBLOCK : 0,
+                                     !!(type & SOCK_CLOEXEC));
+        if (fd < 0)
+            sock_release(s);
+        return fd;
+    }
     if (domain != AF_UNIX)
         return -EAFNOSUPPORT;
     if (protocol != 0)
@@ -341,6 +375,8 @@ long sock_bind(struct proc *p, int fd, const void *addr, size_t len) {
     struct usock *s = fd_sock(p, fd, NULL);
     if (!s)
         return -ENOTSOCK;
+    if (s->inet)
+        return inet_sock_bind(s->inet, addr, len);
     bool abstract; char name[SUN_PATH_MAX + 1]; size_t nlen;
     long r = parse_addr(addr, len, &abstract, name, &nlen);
     if (r < 0)
@@ -389,6 +425,8 @@ long sock_listen(struct proc *p, int fd, int backlog) {
     struct usock *s = fd_sock(p, fd, NULL);
     if (!s)
         return -ENOTSOCK;
+    if (s->inet)
+        return inet_sock_listen(s->inet, backlog);
     if (s->type == SOCK_DGRAM || !s->bound || s->connected)
         return -EOPNOTSUPP;
     irq_spin_lock(&sock_lock);
@@ -404,6 +442,8 @@ long sock_connect(struct proc *p, int fd, const void *addr, size_t len) {
     struct usock *c = fd_sock(p, fd, &oflags);
     if (!c)
         return -ENOTSOCK;
+    if (c->inet)
+        return inet_sock_connect(c->inet, oflags, addr, len);
     bool abstract; char name[SUN_PATH_MAX + 1]; size_t nlen;
     long r = parse_addr(addr, len, &abstract, name, &nlen);
     if (r < 0)
@@ -477,6 +517,22 @@ long sock_accept(struct proc *p, int fd, void *addr, uint32_t *addrlen, int flag
     struct usock *l = fd_sock(p, fd, &oflags);
     if (!l)
         return -ENOTSOCK;
+    if (l->inet) {
+        void *ni;
+        long r = inet_sock_accept(l->inet, oflags, &ni, addr, addrlen);
+        if (r < 0)
+            return r;
+        struct usock *srv = sock_wrap_inet(ni);
+        if (!srv) {
+            inet_sock_free(ni);
+            return -ENOMEM;
+        }
+        int newfd = file_install_socket(p, srv, (flags & SOCK_NONBLOCK) ? O_NONBLOCK : 0,
+                                        !!(flags & SOCK_CLOEXEC));
+        if (newfd < 0)
+            sock_release(srv);
+        return newfd;
+    }
     irq_spin_lock(&sock_lock);
     if (!l->listening) {
         irq_spin_unlock(&sock_lock);
@@ -522,6 +578,8 @@ long sock_getname(struct proc *p, int fd, void *addr, uint32_t *addrlen, int pee
     struct usock *s = fd_sock(p, fd, NULL);
     if (!s)
         return -ENOTSOCK;
+    if (s->inet)
+        return inet_sock_getname(s->inet, addr, addrlen, peer);
     irq_spin_lock(&sock_lock);
     struct usock *t = s;
     if (peer) {
@@ -543,6 +601,8 @@ long sock_shutdown(struct proc *p, int fd, int how) {
         return -ENOTSOCK;
     if (how < 0 || how > 2)
         return -EINVAL;
+    if (s->inet)
+        return inet_sock_shutdown(s->inet, how);
     irq_spin_lock(&sock_lock);
     if (!s->connected) {
         irq_spin_unlock(&sock_lock);
@@ -597,6 +657,15 @@ static long scatter(struct proc *p, const struct sock_iov *iov, int cnt,
         done += take;
     }
     return (long)done;
+}
+
+long sock_gather(struct proc *p, const struct sock_iov *iov, int cnt, size_t skip,
+                 void *dst, size_t max) {
+    return gather(p, iov, cnt, skip, dst, max);
+}
+
+long sock_scatter(struct proc *p, const struct sock_iov *iov, int cnt, const void *src, size_t n) {
+    return scatter(p, iov, cnt, src, n);
 }
 
 static size_t iov_total(const struct sock_iov *iov, int cnt) {
@@ -765,6 +834,8 @@ long sock_sendmsg(struct proc *p, int fd, const void *name, size_t namelen,
     struct usock *s = fd_sock(p, fd, &oflags);
     if (!s)
         return -ENOTSOCK;
+    if (s->inet)
+        return inet_sock_sendmsg(p, s->inet, oflags, name, namelen, iov, cnt, flags);
     if (s->listening)
         return -EINVAL;
     if (is_stream(s)) {
@@ -913,6 +984,8 @@ long sock_recvmsg(struct proc *p, int fd, void *name, uint32_t *namelen,
     struct usock *s = fd_sock(p, fd, &oflags);
     if (!s)
         return -ENOTSOCK;
+    if (s->inet)
+        return inet_sock_recvmsg(p, s->inet, oflags, name, namelen, iov, cnt, flags, msg_flags);
     if (s->listening)
         return -EINVAL;
     if (namelen && name == NULL)
@@ -929,6 +1002,8 @@ long sock_read(struct open_file *f, void *buffer, size_t count) {
     struct sock_iov iov = { buffer, count };
     struct proc *p = my_proc();
     struct usock *s = f->object.sock;
+    if (s->inet)
+        return inet_sock_recvmsg(p, s->inet, f->flags, NULL, NULL, &iov, 1, 0, NULL);
     if (is_stream(s))
         return recv_stream(p, s, f->flags, &iov, 1, 0);
     return recv_dgram(p, s, f->flags, NULL, NULL, &iov, 1, 0, NULL);
@@ -938,6 +1013,8 @@ long sock_write(struct open_file *f, const void *buffer, size_t count) {
     struct sock_iov iov = { (void *)buffer, count };
     struct proc *p = my_proc();
     struct usock *s = f->object.sock;
+    if (s->inet)
+        return inet_sock_sendmsg(p, s->inet, f->flags, NULL, 0, &iov, 1, 0);
     if (is_stream(s))
         return send_stream(p, s, f->flags, &iov, 1, 0);
     return send_dgram(p, s, f->flags, NULL, 0, &iov, 1, 0);
@@ -945,6 +1022,10 @@ long sock_write(struct open_file *f, const void *buffer, size_t count) {
 
 void sock_poll(struct open_file *f, int events, short *revents) {
     struct usock *s = f->object.sock;
+    if (s->inet) {
+        inet_sock_poll(s->inet, events, revents);
+        return;
+    }
     irq_spin_lock(&sock_lock);
     short r = 0;
     if (s->listening) {
@@ -976,6 +1057,8 @@ long sock_opt(struct proc *p, int fd, int set, int level, int name, void *val, u
     struct usock *s = fd_sock(p, fd, NULL);
     if (!s)
         return -ENOTSOCK;
+    if (s->inet)
+        return inet_sock_opt(s->inet, set, level, name, val, len);
     if (level != SOL_SOCKET)
         return -ENOPROTOOPT;
     if (set) {
@@ -1020,6 +1103,8 @@ long sock_opt(struct proc *p, int fd, int set, int level, int name, void *val, u
 }
 
 long sock_bytes_available(struct usock *s) {
+    if (s->inet)
+        return inet_sock_bytes_available(s->inet);
     irq_spin_lock(&sock_lock);
     long n = is_stream(s) ? (long)s->used : (s->dq_head ? (long)s->dq_head->len : 0);
     irq_spin_unlock(&sock_lock);

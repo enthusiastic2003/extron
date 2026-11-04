@@ -13,6 +13,13 @@ disk_args = []
 if os.environ.get("EXTRON_DISK"):
     disk_args = ["-drive", f"if=none,id=data0,format=raw,file={os.environ['EXTRON_DISK']}",
                  "-device", "virtio-blk-pci,drive=data0,disable-modern=on"]
+# EXTRON_NET=1: a virtio-net NIC on QEMU's user-mode network (DHCP 10.0.2.15, DNS
+# 10.0.2.3, the host at 10.0.2.2).
+if os.environ.get("EXTRON_NET"):
+    disk_args += ["-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0,disable-modern=on"]
+    # EXTRON_PCAP=file: also write everything the NIC sends and receives to a pcap file.
+    if os.environ.get("EXTRON_PCAP"):
+        disk_args += ["-object", f"filter-dump,id=f0,netdev=n0,file={os.environ['EXTRON_PCAP']}"]
 q = subprocess.Popen(["qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-cpu", "max", "-display", "none",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive", f"if=pflash,format=raw,unit=1,file={vars_}",
@@ -72,4 +79,7 @@ for c in args:
 q.kill()
 out = buf.decode(errors="replace").replace("\r", "")
 i = out.find("BusyBox")
-print(out[i-1:] if i >= 0 else out[-3000:])
+if os.environ.get("FULL"):
+    print(out)
+else:
+    print(out[i-1:] if i >= 0 else out[-3000:])

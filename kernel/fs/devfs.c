@@ -19,6 +19,7 @@ static struct vfs_node null_node;
 static struct vfs_node zero_node;
 static struct vfs_node fb_node;
 static struct vfs_node input_node;
+static struct vfs_node random_node;       /* /dev/random and /dev/urandom: same source */
 static struct vfs_node vda_node;          /* first block device; private = its ext2_block_dev */
 static struct vfs_node root_node;
 static struct vfs_dentry root_dentry;
@@ -37,6 +38,8 @@ static struct devfs_entry entries[] = {
     { .name = "zero",    .node = &zero_node },
     { .name = "fb0",     .node = &fb_node },
     { .name = "input",   .node = &input_node },
+    { .name = "random",  .node = &random_node },
+    { .name = "urandom", .node = &random_node },
     { .name = "vda",     .node = &vda_node },
 };
 #define ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))
@@ -63,6 +66,16 @@ static long null_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
 
 static long null_write(struct vfs_node *n, size_t off, const void *buf, size_t count) {
     (void)n; (void)off; (void)buf;
+    return (long)count;
+}
+
+void kernel_random_fill(void *buf, size_t len);
+
+/* /dev/random and /dev/urandom both read the kernel's entropy source (the same one
+ * getrandom(2) uses) and never block. Writes are accepted and ignored. */
+static long random_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
+    (void)n; (void)off;
+    kernel_random_fill(buf, count);
     return (long)count;
 }
 
@@ -140,7 +153,7 @@ static int input_mmap(struct vfs_node *n, size_t offset, size_t length,
 static int device_getattr(struct vfs_node *n, struct vfs_attr *attr) {
     memset(attr, 0, sizeof(*attr));
     attr->ino = n == &console_node ? 2 : n == &null_node ? 3
-              : n == &zero_node ? 4 : n == &fb_node ? 5 : 6;
+              : n == &zero_node ? 4 : n == &fb_node ? 5 : n == &random_node ? 8 : 6;
     attr->type = VFS_NODE_DEVICE;
     attr->mode = 0666;
     attr->nlink = (n == &console_node) ? 2 : 1;
@@ -161,6 +174,12 @@ static const struct vfs_node_ops null_ops = {
 
 static const struct vfs_node_ops zero_ops = {
     .read = zero_read,
+    .write = null_write,
+    .getattr = device_getattr,
+};
+
+static const struct vfs_node_ops random_ops = {
+    .read = random_read,
     .write = null_write,
     .getattr = device_getattr,
 };
@@ -387,6 +406,7 @@ void devfs_init(void) {
     vfs_node_init(&zero_node, &zero_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&fb_node, &fb_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&input_node, &input_ops, NULL, VFS_NODE_DEVICE);
+    vfs_node_init(&random_node, &random_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&vda_node, &blk_ops, blockdev_find("vda"), VFS_NODE_DEVICE);
     vfs_node_init(&root_node, &root_ops, NULL, VFS_NODE_DIRECTORY);
     vfs_dentry_init(&root_dentry, &root_node, NULL, "", NULL);

@@ -29,6 +29,13 @@ long sock_recvmsg(struct proc *p, int fd, void *name, uint32_t *namelen,
 long sock_bytes_available(struct usock *s);
 long sock_opt(struct proc *p, int fd, int set, int level, int name, void *val, uint32_t *len);
 
+/* Copy helpers shared with the INET backend: iov entries are user memory, re-validated
+ * at the moment of the copy. gather: iov -> kernel buffer (after skipping `skip` bytes);
+ * scatter: kernel buffer -> iov. Return bytes copied or -EFAULT. */
+long sock_gather(struct proc *p, const struct sock_iov *iov, int cnt, size_t skip,
+                 void *dst, size_t max);
+long sock_scatter(struct proc *p, const struct sock_iov *iov, int cnt, const void *src, size_t n);
+
 /* Descriptor-layer hooks. */
 long sock_read(struct open_file *f, void *buffer, size_t count);
 long sock_write(struct open_file *f, const void *buffer, size_t count);

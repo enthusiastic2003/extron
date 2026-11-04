@@ -4,10 +4,11 @@
 #include <kernel/blockdev.h>
 #include <kernel/fs/ext2.h>
 
-/* Architectures with a data-disk driver override this (strong definition).
- * It runs after the root filesystem and /dev are up. */
-__attribute__((weak)) void arch_mount_data_disk(void) {}
+/* Architectures with a block-device driver override this (strong definition): it
+ * registers the disks before the root filesystem is chosen. */
 __attribute__((weak)) void arch_probe_block_devices(void) {}
+/* Architectures with a NIC driver start the network stack here (after /dev, /proc). */
+__attribute__((weak)) void arch_probe_network(void) {}
 #include <kernel/panic.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
@@ -148,7 +149,6 @@ void kernel_stage2(uint64_t mb2_addr) {
     /* Root filesystem: an initrd module if the loader passed one (it may carry a
      * /init that mounts the real root), otherwise root=/dev/<disk> from the
      * command line, otherwise the platform's own default. */
-    bool root_from_disk = false;
     extern bool try_ramdisk_mount(uint64_t mb2_addr);
     if (!try_ramdisk_mount(mb2_addr)) {
         char rootdev[32];
@@ -174,7 +174,6 @@ void kernel_stage2(uint64_t mb2_addr) {
             }
             vfs_set_root_source(root_source);
             kprintf("root: ext2 on %s mounted as /\n", rootdev);
-            root_from_disk = true;
         } else {
             extern void emmc_mount_ext2(void);
             emmc_mount_ext2();
@@ -190,8 +189,7 @@ void kernel_stage2(uint64_t mb2_addr) {
      * runtime is immediately runnable. */
     devfs_init();
     procfs_init();
-    if (!root_from_disk)
-        arch_mount_data_disk();      /* legacy: initrd root + data disk at /mnt */
+    arch_probe_network();
     
 
 

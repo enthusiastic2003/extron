@@ -399,3 +399,61 @@ usual options. Controls: arrows move/turn, Ctrl fire, Space use, Shift run, Alt 
 monitor that the game owns the screen, animates and reacts to `sendkey`, that Ctrl-C stops
 it and that the console comes back repainted. The platform layer builds for aarch64 too (it
 uses only POSIX calls) but only x86-64 is verified here.
+
+## Networking
+
+IPv4 over a virtio-net NIC, with the stack inside the kernel.
+
+* **Driver** - `kernel/arch/x86_64/virtio_net.c`: legacy virtio over the I/O-port BAR like the disk
+  driver (`disable-modern=on`), two queues, interrupt-driven receive into 64 fixed buffers, transmit
+  through 32. PCI INTx lines are shared (the disk and the NIC often land on the same IRQ), so
+  `register_irq_handler()` now chains up to four handlers per line.
+* **Stack** - lwIP 2.2.0, vendored unmodified in `third_party/lwip` (BSD) and configured by
+  `kernel/net/include/lwipopts.h`: IPv4, TCP, UDP, ICMP, ARP, DHCP, no OS layer, raw callback API,
+  all memory from static pools. `kernel/net/net.c` is the glue (NIC registration, DHCP, the
+  1 ms timer tick); `kernel/include/kernel/net.h` documents the contract. **One lock,
+  `net_spinlock`, guards every lwIP call and all socket state.** It is an IRQ-safe spinlock, so
+  the receive interrupt and the timer tick, which also enter lwIP, never run in the middle of a
+  socket call; blocking socket calls sleep on it. lwIP callbacks therefore never sleep or
+  allocate (sockets and receive nodes come from static pools).
+* **Sockets** - `kernel/net/inet_sock.c`: `AF_INET` `SOCK_STREAM`, `SOCK_DGRAM` and
+  `SOCK_RAW`/`IPPROTO_ICMP` (what `ping` uses), behind the same descriptor layer as `AF_UNIX`
+  (`kernel/fs/socket.c` forwards when a socket carries an inet backend; kernels without a stack
+  get weak stubs). `bind/listen/accept/connect`, `sendmsg/recvmsg`, `poll`/`epoll`,
+  non-blocking mode, `shutdown`, `getsockname/getpeername`, `FIONREAD`, and the common options
+  (`SO_ERROR`, `SO_REUSEADDR`, `SO_KEEPALIVE`, `SO_BROADCAST`, `SO_RCVTIMEO`/`SO_SNDTIMEO`
+  honoured, `TCP_NODELAY`, `TCP_KEEP*`). Loopback (127.0.0.1) works with no NIC at all.
+* **Configuration** - lwIP's DHCP client runs in the kernel; QEMU's user-mode network gives
+  10.0.2.15/24, gateway 10.0.2.2 (the host), DNS 10.0.2.3. `/proc/net/ipconfig` summarises it and
+  `/proc/net/resolv.conf` is the live nameserver list; `/etc/resolv.conf` is a symlink to it, so
+  mlibc's resolver works without any boot script. `/etc/hosts`, `/etc/services` and
+  `/etc/protocols` are static.
+* **Running** - `make x86-run` attaches the NIC by default (`NET_ARGS`). From the shell:
+  `wget https://host/file`, `nslookup name`, `ping -c 3 10.0.2.2`, `nc host port`, Python's
+  `urllib`/`socket`. BusyBox `wget` does HTTPS with its built-in TLS 1.2 client, which does
+  **not** verify certificates, until a real TLS library (OpenSSL) is ported.
+* **Tests** - `mlibc_net_test` (in `/opt/tests`, so in `check-all`): loopback TCP echo of 512 KiB,
+  half-close, `poll`, non-blocking connect, refused connections, UDP, `MSG_TRUNC`, eight parallel
+  connections, writing to a closed peer, and `fread` on a non-blocking socket. `make check-net`
+  (`tools/x86_net_test.py`) boots with a NIC, runs HTTP and HTTPS servers on the host and checks
+  DHCP, `resolv.conf`, `wget` (6 MiB, SHA-256), a server that trickles its body, Python `urllib`
+  and raw sockets, `nc`, `ping`, the guest listening (host connects through QEMU port
+  forwarding), and, with internet, DNS, HTTPS to a public site, and real source tarballs (GNU
+  make over HTTP, zlib from GitHub over HTTPS with a redirect).
+
+What bringing it up found elsewhere (all fixed):
+* `/dev/urandom` did not exist, so TLS could not even start (it and `/dev/random` now read the
+  kernel's `getrandom` source).
+* mlibc's `fread()` returned **0** when a read failed partway, dropping the bytes it had already
+  copied. BusyBox `wget` reads a non-blocking socket with `fread` and expects a short count with
+  `EAGAIN`; on a distant server (reads run dry mid-call) it silently lost chunks of every download.
+  It never showed on fast local links. A packet capture proved the TCP layer had delivered every
+  byte (`EXTRON_PCAP=file` on `tools/x86_serial_session.py` writes one).
+* `<netinet/ip_icmp.h>` lacked `ICMP_MINLEN` (BusyBox `ping`).
+* A listening socket's lwIP pcb must not have its `recv`/`sent`/`err` callbacks cleared (lwIP
+  asserts), found by the first loopback test run.
+
+Not done: IPv6, `ifconfig`/`route`/`netstat` (they need `SIOCGIF*` ioctls and `/proc/net/dev`),
+certificate validation, `AF_PACKET`, forwarding, more than one NIC, modern (non-legacy)
+virtio-net. mlibc's `res_init` is a stub, so BusyBox `nslookup` without a server argument
+prints `(null)` for the server line (the lookup itself works).

@@ -21,6 +21,7 @@ q = subprocess.Popen(["qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-c
     "-drive", "format=raw,file=fat:rw:build-x86_64/esp",
     "-drive", f"if=none,id=d0,format=raw,file={disk}",
     "-device", "virtio-blk-pci,drive=d0,disable-modern=on",
+    "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0,disable-modern=on",
     "-serial", "stdio", "-monitor", "none", "-no-reboot"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 fcntl.fcntl(q.stdout, fcntl.F_SETFL, os.O_NONBLOCK)

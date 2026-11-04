@@ -348,30 +348,3 @@ void arch_probe_block_devices(void) {
         return;
     blockdev_register("vda", &vblk_dev);
 }
-
-/* Legacy layout (initrd root + data disk): mount the disk at /mnt. */
-void arch_mount_data_disk(void) {
-    struct ext2_block_dev *dev = blockdev_find("vda");
-    if (!dev)
-        return;
-    struct ext2_mount *m = ext2_mount_create(dev, 0);
-    if (!m) {
-        kprintf("virtio-blk: no ext2 filesystem on the disk; leaving it unmounted\n");
-        return;
-    }
-    struct vfs_path root;
-    if (vfs_root_path(&root) < 0)
-        return;
-    struct vfs_cred cred = { 0 };
-    int r = vfs_mkdir(&root, "/mnt", 0755, &cred);
-    if (r != 0 && r != -17)            /* -EEXIST is fine */
-        kprintf("virtio-blk: mkdir /mnt failed (%d)\n", r);
-    extern const struct vfs_fs_ops ext2_fs_ops;
-    r = vfs_mount_at(&root, "/mnt", &ext2_fs_ops, m);
-    vfs_path_release(&root);
-    if (r != 0) {
-        kprintf("virtio-blk: mounting at /mnt failed (%d)\n", r);
-        return;
-    }
-    kprintf("virtio-blk: ext2 mounted at /mnt\n");
-}

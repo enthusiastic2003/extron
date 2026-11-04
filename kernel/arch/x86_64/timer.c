@@ -68,9 +68,12 @@ void timer_set_realtime_ns(int64_t value) {
 
 void timer_set_counter_watch(phys_addr_t a, phys_addr_t b) { (void)a; (void)b; }
 
+extern void net_tick(void);
+
 static void timer_irq_handler(struct arch_frame *f) {
     (void)f;
     tick_count++;
+    net_tick();                             /* lwIP timers and loopback frames */
     thread_wakeup_expired(timer_ticks());
     if (!sched_preempt_disabled())          /* not while a syscall waits for the disk */
         schedule();

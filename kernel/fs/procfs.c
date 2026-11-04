@@ -17,6 +17,7 @@
 #include <kernel/fs/file.h>
 #include <kernel/fs/procfs.h>
 #include <kernel/cmdline.h>
+#include <kernel/net.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
 #include <kernel/mm/kheap.h>
@@ -35,6 +36,7 @@ enum pk {
     PK_ROOT, PK_SELF,
     PK_VERSION, PK_UPTIME, PK_MEMINFO, PK_LOADAVG, PK_STAT, PK_CPUINFO,
     PK_MOUNTS, PK_FILESYSTEMS, PK_CMDLINE,
+    PK_NETDIR, PK_N_RESOLV, PK_N_IPCONFIG,
     PK_PIDDIR,
     PK_P_STAT, PK_P_STATUS, PK_P_CMDLINE, PK_P_COMM, PK_P_STATM, PK_P_ENVIRON, PK_P_MAPS,
     PK_P_EXE, PK_P_CWD, PK_P_ROOT, PK_P_FDDIR, PK_P_FD,
@@ -49,6 +51,12 @@ struct pnode {
 
 struct entry { const char *name; enum pk kind; enum vfs_node_type type; };
 
+static const struct entry net_entries[] = {
+    { "resolv.conf", PK_N_RESOLV,   VFS_NODE_REGULAR },
+    { "ipconfig",    PK_N_IPCONFIG, VFS_NODE_REGULAR },
+};
+#define NET_COUNT (sizeof(net_entries) / sizeof(net_entries[0]))
+
 static const struct entry top_entries[] = {
     { "self",        PK_SELF,        VFS_NODE_SYMLINK },
     { "version",     PK_VERSION,     VFS_NODE_REGULAR },
@@ -60,6 +68,7 @@ static const struct entry top_entries[] = {
     { "mounts",      PK_MOUNTS,      VFS_NODE_REGULAR },
     { "filesystems", PK_FILESYSTEMS, VFS_NODE_REGULAR },
     { "cmdline",     PK_CMDLINE,     VFS_NODE_REGULAR },
+    { "net",         PK_NETDIR,      VFS_NODE_DIRECTORY },
 };
 #define TOP_COUNT (sizeof(top_entries) / sizeof(top_entries[0]))
 
@@ -337,6 +346,47 @@ static struct proc *pn_proc(const struct pnode *pn) {
     return proc_lookup(pn->pid);
 }
 
+static void o_ip4(struct out *o, uint32_t ip) {        /* network byte order */
+    o_u(o, ip & 0xFF); o_chr(o, '.'); o_u(o, (ip >> 8) & 0xFF); o_chr(o, '.');
+    o_u(o, (ip >> 16) & 0xFF); o_chr(o, '.'); o_u(o, ip >> 24);
+}
+
+/* resolv.conf as DHCP set it: /etc/resolv.conf is a symlink to this file. */
+static void gen_resolv(struct out *o) {
+    struct net_config c;
+    if (!net_get_config(&c))
+        return;
+    for (int i = 0; i < 2; i++)
+        if (c.dns[i]) {
+            o_str(o, "nameserver "); o_ip4(o, c.dns[i]); o_nl(o);
+        }
+}
+
+static void gen_ipconfig(struct out *o) {
+    struct net_config c;
+    if (!net_get_config(&c)) {
+        o_str(o, "no network interface\n");
+        return;
+    }
+    static const char hex[] = "0123456789abcdef";
+    o_str(o, c.name); o_str(o, c.up ? ": up" : ": down");
+    o_str(o, " mac="); 
+    for (int i = 0; i < 6; i++) {
+        if (i) o_chr(o, ':');
+        o_chr(o, hex[c.mac[i] >> 4]); o_chr(o, hex[c.mac[i] & 15]);
+    }
+    if (c.have_ip) {
+        o_str(o, " ip="); o_ip4(o, c.ip);
+        o_str(o, " mask="); o_ip4(o, c.mask);
+        o_str(o, " gw="); o_ip4(o, c.gw);
+        for (int i = 0; i < 2; i++)
+            if (c.dns[i]) { o_str(o, " dns="); o_ip4(o, c.dns[i]); }
+    } else {
+        o_str(o, " (no address yet)");
+    }
+    o_nl(o);
+}
+
 static long gen_file(struct pnode *pn, char *buf, size_t cap) {
     struct out o = { buf, cap, 0 };
     struct proc *p = NULL;
@@ -355,6 +405,8 @@ static long gen_file(struct pnode *pn, char *buf, size_t cap) {
         case PK_MOUNTS:      gen_mounts(&o); break;
         case PK_FILESYSTEMS: gen_filesystems(&o); break;
         case PK_CMDLINE:     o_str(&o, cmdline_raw()); o_nl(&o); break;
+        case PK_N_RESOLV:    gen_resolv(&o); break;
+        case PK_N_IPCONFIG:  gen_ipconfig(&o); break;
         case PK_P_STAT:      gen_pid_stat(&o, p); break;
         case PK_P_STATUS:    gen_pid_status(&o, p); break;
         case PK_P_COMM:      o_str(&o, p->comm); o_nl(&o); break;
@@ -504,6 +556,12 @@ static int dir_readdir(struct vfs_node *n, size_t index, struct vfs_dirent *e) {
         put_num(e, pids[i] * 64, VFS_NODE_DIRECTORY, pids[i]);
         return 1;
     }
+    if (pn->kind == PK_NETDIR) {
+        if (index >= NET_COUNT)
+            return 0;
+        put_entry(e, 200 + index, net_entries[index].type, net_entries[index].name);
+        return 1;
+    }
     if (pn->kind == PK_PIDDIR) {
         if (!pn_proc(pn))
             return -ESRCH;
@@ -593,6 +651,13 @@ static int procfs_lookup_child(struct vfs_mount *mount, struct vfs_dentry *paren
             d = make_dentry(parent, name, PK_PIDDIR, VFS_NODE_DIRECTORY, num, -1);
         else
             return -ENOENT;
+    } else if (pp->kind == PK_NETDIR) {
+        for (size_t i = 0; i < NET_COUNT; i++)
+            if (!strcmp(net_entries[i].name, name)) {
+                d = make_dentry(parent, name, net_entries[i].kind, net_entries[i].type, 0, -1);
+                goto done;
+            }
+        return -ENOENT;
     } else if (pp->kind == PK_PIDDIR) {
         if (!proc_lookup(pp->pid))
             return -ENOENT;
