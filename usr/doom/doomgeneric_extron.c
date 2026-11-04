@@ -1,78 +1,119 @@
 /*
- * doomgeneric platform layer for Extron.
+ * doomgeneric platform layer for Extron (x86-64 and aarch64).
  *
- * The five DG_* functions doomgeneric asks a port to supply, and
- * nothing else — no Extron-specific syscalls were added for this.
+ * The five DG_* functions doomgeneric asks a port to supply. The program is an
+ * ordinary user process:
  *
- *   - the framebuffer is a real device, /dev/fb0: opened and mmap()'d
- *     here like any other program would, so DG_DrawFrame is plain
- *     stores to memory with no svc in the frame loop once mapped
- *   - a keystroke ring is still mapped by exec (PROC_MAP_FRAMEBUFFER —
- *     see kernel/proc/exec.c), so DG_GetKey can poll without blocking,
- *     which SYS_READ cannot do
+ *   - the display is /dev/fb0: opened and mmap()'d here. Mapping it is what takes
+ *     the screen from the kernel text console (kernel/drivers/fbown.c) and the
+ *     keyboard from the tty; exiting, being killed or unmapping gives both back.
+ *     Frames are plain stores to memory, with no syscall in the frame loop.
+ *   - input comes from /dev/input, mapped the same way: key *events* with both
+ *     edges when a real keyboard is attached (PS/2 today), or, over a serial
+ *     console, a byte stream whose key releases have to be synthesised.
+ *   - time is clock_gettime(CLOCK_MONOTONIC), sleeping is nanosleep().
  */
 #include "doomkeys.h"
 #include "doomgeneric.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
-#include "../include/extron/syscall.h"
 #include "../include/extron/fb.h"
+
+#define DEFAULT_IWAD "/usr/share/games/doom/doom1.wad"
 
 /* Geometry read once at DG_Init(); base is the mmap()'d pixel pointer. */
 static struct {
-    uint64_t base;
+    uint8_t *base;
     struct extron_fb_geometry geo;
 } fb;
 
-static uint64_t extron_uptime_ms(void) {
-    return (uint64_t)__syscall0(SYS_UPTIME_MS);
+static uint32_t extron_uptime_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
 }
 
-/* Where DOOM's 640x400 image sits inside whatever the display actually
- * is. Computed from the reported geometry, not assumed. */
-static uint32_t origin_x, origin_y;
-
-/* DOOM always composes pixels as 0xAARRGGBB. If the firmware handed us a
- * framebuffer in the other byte order, DG_DrawFrame has to exchange red
- * and blue itself rather than memcpy. fb.c asks for the matching order,
- * so this should stay 0 — but "should" is not a reason to render
- * garbage if it doesn't. */
+/* Integer scale (DOOM's image is 640x400; a 1280x800 display gets exactly 2x) and
+ * the top-left corner that centres the scaled image. */
+static uint32_t scale = 1, origin_x, origin_y;
+/* The display's byte order is the opposite of DOOM's 0xAARRGGBB: exchange red and
+ * blue while copying. */
 static int swap_rb;
+static uint32_t *rowbuf;       /* one scaled output row */
 
-#define KEYQUEUE_SIZE 32
+/* ------------------------------------------------------------------------ */
+/* Input                                                                     */
+/* ------------------------------------------------------------------------ */
+
+#define KEYQUEUE_SIZE 64
 static uint16_t key_queue[KEYQUEUE_SIZE];
 static unsigned key_write, key_read;
 
+static void queue_key(int pressed, unsigned char key) {
+    if (!key) {
+        return;
+    }
+    unsigned next = (key_write + 1) % KEYQUEUE_SIZE;
+    if (next == key_read) {
+        return;                    /* full: drop */
+    }
+    key_queue[key_write] = (uint16_t)((pressed << 8) | key);
+    key_write = next;
+}
+
+/* PS/2 set-1 make code (bit 7 = E0-prefixed) -> DOOM key. */
+static unsigned char event_to_doom_key(unsigned code) {
+    static const char row_q[]  = "qwertyuiop";      /* 0x10..0x19 */
+    static const char row_a[]  = "asdfghjkl";       /* 0x1E..0x26 */
+    static const char row_z[]  = "zxcvbnm";         /* 0x2C..0x32 */
+    switch (code) {
+        case 0x01: return KEY_ESCAPE;
+        case 0x1C: case 0x9C: return KEY_ENTER;
+        case 0x0E: return KEY_BACKSPACE;
+        case 0x0F: return KEY_TAB;
+        case 0x39: return KEY_USE;                   /* space */
+        case 0x1D: case 0x9D: return KEY_FIRE;       /* Ctrl */
+        case 0x2A: case 0x36: return KEY_RSHIFT;     /* run */
+        case 0x38: case 0xB8: return KEY_RALT;       /* strafe */
+        case 0xC8: return KEY_UPARROW;
+        case 0xD0: return KEY_DOWNARROW;
+        case 0xCB: return KEY_LEFTARROW;
+        case 0xCD: return KEY_RIGHTARROW;
+        case 0x33: return KEY_STRAFE_L;              /* , */
+        case 0x34: return KEY_STRAFE_R;              /* . */
+        case 0x0C: return KEY_MINUS;
+        case 0x0D: return KEY_EQUALS;
+        case 0x3A: return KEY_CAPSLOCK;
+        case 0x1A: return '['; case 0x1B: return ']';
+        case 0x27: return ';'; case 0x28: return '\'';
+        case 0x29: return '`'; case 0x2B: return '\\'; case 0x35: return '/';
+        case 0x57: return KEY_F11;
+        case 0x58: return KEY_F12;
+        default: break;
+    }
+    if (code >= 0x02 && code <= 0x0A) return (unsigned char)('1' + (code - 0x02));
+    if (code == 0x0B) return '0';
+    if (code >= 0x3B && code <= 0x44) return (unsigned char)(KEY_F1 + (code - 0x3B));
+    if (code >= 0x10 && code <= 0x19) return (unsigned char)row_q[code - 0x10];
+    if (code >= 0x1E && code <= 0x26) return (unsigned char)row_a[code - 0x1E];
+    if (code >= 0x2C && code <= 0x32) return (unsigned char)row_z[code - 0x2C];
+    return 0;
+}
+
 /*
- * A serial terminal sends a byte when a key is pressed and NOTHING when
- * it is released — but DOOM needs both edges, or a movement key sticks
- * down forever and the player walks into a wall until the heat death of
- * the universe.
- *
- * So releases are synthesised: a key is marked down when its byte
- * arrives and released once no further byte for it has appeared for
- * KEY_HOLD_MS. Terminals auto-repeat a held key, so holding produces a
- * stream of bytes that keeps pushing the deadline out, and letting go
- * lets it expire. The threshold has to sit above the terminal's repeat
- * interval (typically ~30ms after an initial ~500ms delay) and below
- * anything a player would notice, which is a wide target.
- */
-/*
- * Two thresholds, because a terminal's auto-repeat has two phases: a
- * long initial delay (commonly ~500ms) and then a fast stream (~30ms).
- *
- * A single threshold cannot serve both. Set it short and a genuinely
- * held key is released during the initial delay and re-pressed when the
- * repeats start, which stutters. Set it long and every tap lingers.
- * So the first byte for a key arms the long deadline, and the first
- * repeat — proof the key is actually being held — switches it to the
- * short one.
+ * Serial fallback. A terminal sends a byte when a key goes down and NOTHING when
+ * it comes up, but DOOM needs both edges. Releases are synthesised: a key counts
+ * as held until no further byte for it has arrived for a while. A terminal's
+ * auto-repeat has a long initial delay then a fast stream, so the first byte arms
+ * a long deadline and the first repeat switches to a short one.
  */
 #define KEY_INITIAL_HOLD_MS 600
 #define KEY_REPEAT_HOLD_MS  120
@@ -81,23 +122,12 @@ static unsigned key_write, key_read;
 static struct {
     unsigned char key;
     uint32_t      last_ms;
-    int           repeating;   /* seen a second byte for this key */
+    int           repeating;
 } held[MAX_HELD];
 
-static void queue_key(int pressed, unsigned char key) {
-    if (!key) {
-        return;
-    }
-    key_queue[key_write] = (uint16_t)((pressed << 8) | key);
-    key_write = (key_write + 1) % KEYQUEUE_SIZE;
-}
-
-/* Serial gives us ASCII, not scancodes — so this maps characters rather
- * than the scancode tables the other doomgeneric ports use. Arrow keys
- * arrive as ANSI escape sequences (ESC [ A) which would need a parser,
- * so WASD is offered alongside; ESC itself is passed through when it is
- * not the start of a sequence. */
-static unsigned char to_doom_key(int c) {
+/* Serial gives ASCII, not scancodes. Arrow keys arrive as escape sequences, so
+ * WASD is offered alongside. */
+static unsigned char byte_to_doom_key(int c) {
     switch (c) {
         case '\r': case '\n': return KEY_ENTER;
         case 27:              return KEY_ESCAPE;
@@ -110,9 +140,8 @@ static unsigned char to_doom_key(int c) {
         case '\t':            return KEY_TAB;
         case 'y': case 'Y':   return 'y';
         case 'n': case 'N':   return 'n';
-        case '1': return '1'; case '2': return '2'; case '3': return '3';
-        case '4': return '4'; case '5': return '5'; case '6': return '6';
-        case '7': return '7';
+        case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+            return (unsigned char)c;
         case 127: case 8:     return KEY_BACKSPACE;
         default:              return 0;
     }
@@ -121,8 +150,6 @@ static unsigned char to_doom_key(int c) {
 static void note_press(unsigned char key, uint32_t now) {
     for (int i = 0; i < MAX_HELD; i++) {
         if (held[i].key == key) {
-            /* A repeat: the key is genuinely down, so the short deadline
-             * applies from here on. */
             held[i].last_ms   = now;
             held[i].repeating = 1;
             return;
@@ -141,8 +168,7 @@ static void note_press(unsigned char key, uint32_t now) {
 
 static void expire_holds(uint32_t now) {
     for (int i = 0; i < MAX_HELD; i++) {
-        uint32_t limit = held[i].repeating ? KEY_REPEAT_HOLD_MS
-                                           : KEY_INITIAL_HOLD_MS;
+        uint32_t limit = held[i].repeating ? KEY_REPEAT_HOLD_MS : KEY_INITIAL_HOLD_MS;
         if (held[i].key && (now - held[i].last_ms) > limit) {
             queue_key(0, held[i].key);
             held[i].key = 0;
@@ -151,18 +177,28 @@ static void expire_holds(uint32_t now) {
 }
 
 static struct extron_input_ring *input_ring;
+static int have_key_events;       /* a real keyboard has produced events */
 
 static void poll_input(void) {
     if (!input_ring) return;
-    uint32_t now = (uint32_t)extron_uptime_ms();
+    int pressed;
+    unsigned code;
+    while (extron_input_getkey(input_ring, &pressed, &code)) {
+        have_key_events = 1;
+        queue_key(pressed, event_to_doom_key(code));
+    }
+    uint32_t now = extron_uptime_ms();
     int c;
     while ((c = extron_input_getc(input_ring)) >= 0) {
-        unsigned char key = to_doom_key(c);
+        if (have_key_events)
+            continue;             /* the keyboard's bytes duplicate its events */
+        unsigned char key = byte_to_doom_key(c);
         if (key) {
             note_press(key, now);
         }
     }
-    expire_holds(now);
+    if (!have_key_events)
+        expire_holds(now);
 }
 
 static void init_input_ring(void) {
@@ -181,6 +217,10 @@ static void init_input_ring(void) {
     input_ring = mapped;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Display                                                                   */
+/* ------------------------------------------------------------------------ */
+
 void DG_Init(void) {
     init_input_ring();
 
@@ -191,93 +231,75 @@ void DG_Init(void) {
     }
     if (read(fd, &fb.geo, sizeof(fb.geo)) != (long)sizeof(fb.geo)
             || !fb.geo.width || !fb.geo.pitch) {
-        printf("DOOM: no framebuffer mapped\n");
+        printf("DOOM: no framebuffer\n");
         close(fd);
         return;
     }
-    void *mapped = mmap(NULL, fb.geo.size, PROT_READ | PROT_WRITE,
-                        MAP_SHARED, fd, 0);
-    close(fd); /* the mapping outlives the fd, same as any other mmap() */
+    /* Mapping the display takes it from the text console; it is ours until this
+     * process exits. */
+    void *mapped = mmap(NULL, fb.geo.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);                        /* the mapping outlives the fd */
     if (mapped == MAP_FAILED) {
-        printf("DOOM: failed to mmap %s\n", EXTRON_FB_PATH);
-        fb.geo.pitch = 0; /* sentinel DG_DrawFrame checks below */
+        printf("DOOM: cannot take over the display (is another program using it?)\n");
+        fb.geo.pitch = 0;             /* sentinel DG_DrawFrame checks */
         return;
     }
-    fb.base = (uint64_t)mapped;
+    fb.base = mapped;
 
-    /* Centre DOOM's image on whatever the display turned out to be. It
-     * is 640x400 against a 640x480 panel here, but neither number is
-     * assumed — a smaller display just gets clipped by DG_DrawFrame. */
-    origin_x = fb.geo.width  > DOOMGENERIC_RESX ? (fb.geo.width  - DOOMGENERIC_RESX) / 2 : 0;
-    origin_y = fb.geo.height > DOOMGENERIC_RESY ? (fb.geo.height - DOOMGENERIC_RESY) / 2 : 0;
-
-    /* rgb_order == 1 means byte 0 is red, i.e. 0xAABBGGRR — the opposite
-     * of what DOOM writes. */
+    uint32_t sx = fb.geo.width / DOOMGENERIC_RESX, sy = fb.geo.height / DOOMGENERIC_RESY;
+    scale = sx < sy ? sx : sy;
+    if (scale < 1) scale = 1;
+    uint32_t w = DOOMGENERIC_RESX * scale, h = DOOMGENERIC_RESY * scale;
+    origin_x = fb.geo.width  > w ? (fb.geo.width  - w) / 2 : 0;
+    origin_y = fb.geo.height > h ? (fb.geo.height - h) / 2 : 0;
     swap_rb = (fb.geo.rgb_order != 0);
+    rowbuf = malloc((size_t)DOOMGENERIC_RESX * scale * 4);
 
-    /* Black the whole panel once, so the letterbox around the image
-     * isn't left showing whatever was on screen before. */
-    for (uint32_t y = 0; y < fb.geo.height; y++) {
-        volatile uint32_t *row =
-            (volatile uint32_t *)(fb.base + (uint64_t)y * fb.geo.pitch);
-        for (uint32_t x = 0; x < fb.geo.width; x++) {
-            row[x] = 0xFF000000u;
-        }
-    }
+    /* Black the whole screen once, so the letterbox shows nothing of the console. */
+    for (uint32_t y = 0; y < fb.geo.height; y++)
+        memset(fb.base + (size_t)y * fb.geo.pitch, 0, (size_t)fb.geo.width * 4);
 
-    printf("DOOM: %ux%u display, %ux%u image at +%u+%u%s\n",
-           fb.geo.width, fb.geo.height, DOOMGENERIC_RESX, DOOMGENERIC_RESY,
+    printf("DOOM: %ux%u display, %ux%u image scaled %ux at +%u+%u%s\n",
+           fb.geo.width, fb.geo.height, DOOMGENERIC_RESX, DOOMGENERIC_RESY, scale,
            origin_x, origin_y, swap_rb ? " (swapping R/B)" : "");
 }
 
 void DG_DrawFrame(void) {
-    if (!fb.geo.pitch) {
-        return;
-    }
-
-    uint32_t rows = DOOMGENERIC_RESY;
-    if (origin_y + rows > fb.geo.height) {
-        rows = fb.geo.height - origin_y;
-    }
-    uint32_t cols = DOOMGENERIC_RESX;
-    if (origin_x + cols > fb.geo.width) {
-        cols = fb.geo.width - origin_x;
-    }
-
-    for (uint32_t y = 0; y < rows; y++) {
-        /* Stride by pitch, never by width*4 — see struct
-         * extron_fb_geometry. The framebuffer is mapped Normal-NC
-         * precisely so this memcpy is legal; Device memory would fault
-         * on its unaligned accesses. */
-        void *dst = (void *)(fb.base + (uint64_t)(origin_y + y) * fb.geo.pitch
-                                      + (uint64_t)origin_x * 4);
-        const uint32_t *src = DG_ScreenBuffer + (size_t)y * DOOMGENERIC_RESX;
-
-        if (swap_rb) {
-            /* Fallback only: the firmware didn't give the byte order we
-             * asked for, so red and blue must be exchanged per pixel.
-             * Correct but much slower than the memcpy below, which is
-             * why fb.c requests the matching order up front. */
-            volatile uint32_t *d = (volatile uint32_t *)dst;
-            for (uint32_t x = 0; x < cols; x++) {
+    if (fb.geo.pitch && rowbuf) {
+        uint32_t cols = DOOMGENERIC_RESX * scale;
+        if (origin_x + cols > fb.geo.width) cols = fb.geo.width - origin_x;
+        for (uint32_t y = 0; y < DOOMGENERIC_RESY; y++) {
+            const uint32_t *src = DG_ScreenBuffer + (size_t)y * DOOMGENERIC_RESX;
+            /* One output row: scale horizontally (and exchange R/B if needed). */
+            uint32_t *out = rowbuf;
+            for (uint32_t x = 0; x < DOOMGENERIC_RESX; x++) {
                 uint32_t px = src[x];
-                d[x] = (px & 0xFF00FF00u) | ((px & 0x00FF0000u) >> 16)
-                                          | ((px & 0x000000FFu) << 16);
+                if (swap_rb)
+                    px = (px & 0xFF00FF00u) | ((px & 0x00FF0000u) >> 16)
+                                            | ((px & 0x000000FFu) << 16);
+                for (uint32_t k = 0; k < scale; k++)
+                    *out++ = px;
             }
-        } else {
-            memcpy(dst, src, cols * 4);
+            /* ...then store it `scale` times, striding by pitch (never width*4:
+             * the firmware pads rows). */
+            for (uint32_t k = 0; k < scale; k++) {
+                uint32_t dy = origin_y + y * scale + k;
+                if (dy >= fb.geo.height) break;
+                memcpy(fb.base + (size_t)dy * fb.geo.pitch + (size_t)origin_x * 4,
+                       rowbuf, (size_t)cols * 4);
+            }
         }
     }
-
     poll_input();
 }
 
 void DG_SleepMs(uint32_t ms) {
-    __syscall2(SYS_SLEEP, ms / 1000, (long)(ms % 1000) * 1000000L);
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
 }
 
 uint32_t DG_GetTicksMs(void) {
-    return (uint32_t)extron_uptime_ms();
+    return extron_uptime_ms();
 }
 
 int DG_GetKey(int *pressed, unsigned char *key) {
@@ -296,19 +318,23 @@ void DG_SetWindowTitle(const char *title) {
 }
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    /* doom [doomgeneric options]: -iwad defaults to the installed shareware WAD. */
+    int have_iwad = 0;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "-iwad"))
+            have_iwad = 1;
 
-    /* The kernel now supplies a real SysV argc/argv stack for mlibc, but
-     * there is still no shell to provide Doom's command line. Supply the
-     * fixed arguments here. -iwad avoids unnecessary directory discovery
-     * and names the WAD exposed through the ramfs directly. */
-    static char arg0[] = "doom";
-    static char arg1[] = "-iwad";
-    static char arg2[] = "doom1.wad";
-    static char *args[] = { arg0, arg1, arg2, NULL };
+    char *args[64];
+    int n = 0;
+    for (int i = 0; i < argc && n < 60; i++)
+        args[n++] = argv[i];
+    if (!have_iwad) {
+        args[n++] = (char *)"-iwad";
+        args[n++] = (char *)DEFAULT_IWAD;
+    }
+    args[n] = NULL;
 
-    doomgeneric_Create(3, args);
+    doomgeneric_Create(n, args);
     for (;;) {
         doomgeneric_Tick();
     }

@@ -1,4 +1,5 @@
 #include <kernel/proc/proc.h>
+#include <kernel/drivers/fbown.h>
 #include <kernel/errno.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/futex.h>
@@ -738,6 +739,7 @@ void proc_exit_current(int status) {
     p->exit_status = status;
     file_table_close_all(p);
     proc_mark_exited(p);
+    fbown_check();                  /* an exiting display owner gives the console back */
     thread_set_exited(self);
     signal_notify_parent(p, status < 0 ? 2 : 1,
                          status < 0 ? -status : status);

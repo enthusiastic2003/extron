@@ -55,6 +55,9 @@ struct vm_space {
 
 struct vm_space *vm_space_create(phys_addr_t ttbr0);
 
+/* True if any VMA of `mm` carries VM_* flag bit(s) `flag`. */
+bool vm_has_flag(struct vm_space *mm, int flag);
+
 /* Demand growth of the main thread's stack: a not-present user fault at `addr`
  * just below the mapped stack (within `max_bytes` of its top and near `sp`)
  * maps zeroed pages down to it. Returns 0 if the fault was resolved. */

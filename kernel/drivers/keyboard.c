@@ -1,4 +1,5 @@
 #include <kernel/drivers/keyboard.h>
+#include <kernel/drivers/fbown.h>
 #include <kernel/drivers/tty.h>
 #include <kernel/drivers/serial.h>
 #include <kernel/proc/proc.h>
@@ -71,9 +72,28 @@ static void ring_push(uint8_t c) {
     ring->head = next;
 }
 
+void kbd_inject_event(uint8_t keycode, int pressed) {
+    if (!ring)
+        return;
+    uint32_t head = ring->ev_head;
+    uint32_t next = (head + 1) % KBD_RING_SIZE;
+    if (next == (ring->ev_tail % KBD_RING_SIZE))
+        return;                              /* full: drop, like the byte ring */
+    ring->ev[head] = (uint16_t)(((pressed ? 1 : 0) << 8) | keycode);
+    arch_memory_barrier_store();
+    ring->ev_head = next;
+}
+
 /* One input byte from any source (serial RX, PS/2 keyboard) into the
  * console tty and the shared polling ring. */
 void kbd_inject_byte(uint8_t c) {
+    /* A program that owns the display gets the keyboard to itself, except that
+     * Ctrl-C and Ctrl-\ still reach the tty (SIGINT/SIGQUIT to the foreground
+     * job), so a full-screen program can always be stopped. */
+    if (fbown_active() && c != 0x03 && c != 0x1C) {
+        ring_push(c);
+        return;
+    }
     if (!tty_handle_input_byte(&tty_table[0], c)) {
         tty_push_input(&tty_table[0], (char)c);
     }

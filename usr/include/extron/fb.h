@@ -54,7 +54,21 @@ struct extron_input_ring {
     volatile uint32_t head;
     volatile uint32_t tail;
     volatile unsigned char buf[EXTRON_INPUT_SIZE];
+    /* Key events with both edges (a keyboard driver knows when a key goes up; a
+     * byte stream does not): (pressed << 8) | keycode, keycode being the PS/2
+     * set-1 make code with bit 7 set for E0-prefixed keys (Right Ctrl 0x9D, Up
+     * 0xC8, Down 0xD0, Left 0xCB, Right 0xCD). Only keyboards produce them;
+     * serial input appears in `buf` alone. Must match struct kbd_ring. */
+    volatile uint32_t ev_head;
+    volatile uint32_t ev_tail;
+    volatile uint16_t ev[EXTRON_INPUT_SIZE];
 };
+
+#if defined(__aarch64__)
+#define EXTRON_INPUT_BARRIER() __asm__ volatile ("dmb ish" ::: "memory")
+#else
+#define EXTRON_INPUT_BARRIER() __asm__ volatile ("" ::: "memory")   /* x86 stores stay ordered */
+#endif
 
 /* Next input byte from an mmap()'d ring, or -1 if none is waiting.
  * Never blocks. `r` is the pointer mmap(EXTRON_INPUT_PATH's fd) returned. */
@@ -66,9 +80,25 @@ static inline int extron_input_getc(struct extron_input_ring *r) {
     unsigned char c = r->buf[tail];
     /* Consume the byte before advertising the slot as free, so the ISR
      * cannot overwrite it in the window between the two. */
-    __asm__ volatile ("dmb ish" ::: "memory");
+    EXTRON_INPUT_BARRIER();
     r->tail = (tail + 1) % EXTRON_INPUT_SIZE;
     return (int)c;
+}
+
+/* Next key event, or 0 if none is waiting. On 1, *pressed is 1 for a press and 0
+ * for a release and *keycode is the key (see struct extron_input_ring). */
+static inline int extron_input_getkey(struct extron_input_ring *r, int *pressed,
+                                      unsigned *keycode) {
+    uint32_t tail = r->ev_tail % EXTRON_INPUT_SIZE;
+    if (r->ev_head == tail) {
+        return 0;
+    }
+    uint16_t e = r->ev[tail];
+    EXTRON_INPUT_BARRIER();
+    r->ev_tail = (tail + 1) % EXTRON_INPUT_SIZE;
+    *pressed = e >> 8;
+    *keycode = e & 0xFF;
+    return 1;
 }
 
 #endif

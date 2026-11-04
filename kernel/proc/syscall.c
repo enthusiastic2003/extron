@@ -22,6 +22,7 @@
 #include <kernel/fs/devfs.h>
 #include <kernel/fs/procfs.h>
 #include <kernel/blockdev.h>
+#include <kernel/drivers/fbown.h>
 #include <kernel/errno.h>
 #include <kernel/klibc/string.h>
 #include <arch/irq_spinlock.h>
@@ -1449,6 +1450,7 @@ static uint64_t sys_anon_free(uint64_t addr, uint64_t size, uint64_t arg3,
     (void)f;
     struct proc *p = my_proc();
     vm_free_region(p->mm, addr, size);
+    fbown_check();                   /* unmapping /dev/fb0 gives the display back */
     return 0;
 }
 
@@ -1630,6 +1632,7 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
     uint64_t phys;
     size_t mapped_size;
     bool cacheable = true;
+    bool is_fb = devfs_is_fb(node);
     result = node->ops->mmap(node, (size_t)req.offset, (size_t)req.size,
                              &phys, &mapped_size, &cacheable);
     vfs_node_release(node);
@@ -1637,9 +1640,13 @@ static uint64_t sys_mmap(uint64_t request_addr, uint64_t b, uint64_t c,
         return (uint64_t)result;
     if (!cacheable)
         vm_flags |= VM_NOCACHE;
+    if (is_fb)
+        vm_flags |= VM_FBOWNER;      /* the mapping is what keeps the display owned */
     virt_addr_t va = fixed
         ? vm_map_region_at(p->mm, (virt_addr_t)req.hint, (phys_addr_t)phys, mapped_size, vm_flags)
         : vm_map_region(p->mm, (phys_addr_t)phys, mapped_size, vm_flags);
+    if (!va && is_fb)
+        fbown_check();               /* nothing got mapped: hand the display back */
     return va ? (uint64_t)va : (uint64_t)-ENOMEM;
 }
 

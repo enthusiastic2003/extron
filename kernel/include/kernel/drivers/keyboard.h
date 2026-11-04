@@ -49,7 +49,20 @@ struct kbd_ring {
     volatile uint32_t head;   /* kernel writes */
     volatile uint32_t tail;   /* process writes */
     volatile uint8_t  buf[KBD_RING_SIZE];
+    /* Key events (press AND release), for programs that need both edges. A
+     * terminal-style byte stream cannot say when a key goes up; a keyboard
+     * driver can. Each entry is (pressed << 8) | keycode, where keycode is the
+     * PS/2 set-1 make code with bit 7 set for E0-prefixed ("extended") keys
+     * (so Right Ctrl = 0x9D, Up = 0xC8). Same single-producer/single-consumer
+     * rules as the byte ring. Serial input produces no events. */
+    volatile uint32_t ev_head;   /* kernel writes */
+    volatile uint32_t ev_tail;   /* process writes */
+    volatile uint16_t ev[KBD_RING_SIZE];
 };
+_Static_assert(sizeof(struct kbd_ring) <= 4096, "the input ring must fit in one page");
+
+/* One key press/release (see struct kbd_ring). */
+void kbd_inject_event(uint8_t keycode, int pressed);
 
 /* Physical address of the shared ring page, or 0 if it couldn't be
  * allocated. Set up by init_kbd(). */

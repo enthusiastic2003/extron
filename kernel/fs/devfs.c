@@ -9,6 +9,9 @@
 #include <kernel/klibc/string.h>
 #include <kernel/errno.h>
 #include <kernel/blockdev.h>
+#include <kernel/drivers/fbown.h>
+#include <kernel/proc/proc.h>
+#include <kernel/proc/sched.h>
 
 static struct vfs_node console_node;
 static struct vfs_node ptmx_node;
@@ -94,6 +97,8 @@ static long fb_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
     return (long)count;
 }
 
+bool devfs_is_fb(struct vfs_node *node) { return node == &fb_node; }
+
 static int fb_mmap(struct vfs_node *n, size_t offset, size_t length,
                    uint64_t *out_phys, size_t *out_size, bool *out_cacheable) {
     (void)n;
@@ -101,6 +106,9 @@ static int fb_mmap(struct vfs_node *n, size_t offset, size_t length,
     if (!fb) return -ENODEV;
     if (offset > fb->size || length > fb->size - offset)
         return -EINVAL;
+    /* Mapping the display takes it from the text console (see fbown.h). */
+    int owned = fbown_acquire(my_proc());
+    if (owned < 0) return owned;
     *out_phys = (uint64_t)fb->phys + offset;
     *out_size = length;
     /* The GPU scans this memory out continuously — see VM_NOCACHE's own

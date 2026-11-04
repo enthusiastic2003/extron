@@ -232,8 +232,10 @@ static void erase_cursor(void) {
     cursor_drawn = 0;
 }
 
+static int suspended;
+
 void fbcon_flush(void) {
-    if (!active) return;
+    if (!active || suspended) return;
     erase_cursor();
 
     if (scroll_pending) {
@@ -257,6 +259,22 @@ void fbcon_flush(void) {
         draw_cell(cy, cx, 1);
         drawn_cx = cx; drawn_cy = cy; cursor_drawn = 1;
     }
+}
+
+void fbcon_suspend(void) {
+    if (!active || suspended) return;
+    erase_cursor();
+    suspended = 1;
+}
+
+void fbcon_resume(void) {
+    if (!active || !suspended) return;
+    suspended = 0;
+    cursor_drawn = 0;
+    scroll_pending = 0;
+    fb_fill(palette[0]);                       /* whatever the program left behind */
+    for (unsigned r = 0; r < rows; r++) dirty[r] = 1;
+    fbcon_flush();
 }
 
 int fbcon_active(void) { return active; }

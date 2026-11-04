@@ -362,3 +362,40 @@ What bash found missing in mlibc/the port (all fixed):
 * `getresuid`/`getresgid` sysdeps (bash printed "I have no name!"); `mktemp()` (FIFO names).
 * `strtoimax`/`strtoumax` were a hand-written stub that rejected `+`, mishandled `-` and
   panicked above base 10; they now share `strtol`'s conversion (`printf %d -1`).
+
+## Display ownership, keyboard events and DOOM
+
+**Any program can take the screen** by mapping `/dev/fb0` (`open`, `read` the
+`struct extron_fb_geometry`, `mmap` the pixels; `usr/include/extron/fb.h`). Mapping is the
+whole API, and there is no release call to forget:
+
+* While a process holds a `VM_FBOWNER` mapping the kernel text console stops painting
+  (`fbcon_suspend()`; the cell grid keeps tracking output, so `fbcon_resume()` repaints
+  everything, history included) and the keyboard is diverted from the console tty to the
+  program's input rings. Ctrl-C and Ctrl-\ still reach the tty, so SIGINT/SIGQUIT stay an
+  escape hatch. Serial output carries on as usual.
+* Only one live process owns the display: a second `mmap` of `/dev/fb0` fails with `EBUSY`.
+  The same process may map it again.
+* Ownership ends when the owner exits, is killed, `munmap()`s every mapping or `exec`s. The
+  kernel checks lazily (`kernel/drivers/fbown.c`: on exit, `munmap` and every console write),
+  so the console returns as soon as anything touches it. `mlibc_fbown_test` covers
+  EBUSY, munmap, exit and kill.
+
+**Key events.** `/dev/input` is an mmap'd page with two single-producer/single-consumer
+rings (`struct extron_input_ring`): the original byte ring (serial and PS/2 keyboard bytes,
+as a terminal would send them) and a new event ring with **press and release** edges,
+`(pressed << 8) | keycode`, keycode being the PS/2 set-1 make code with bit 7 set for
+E0-prefixed keys. The PS/2 driver feeds both; serial feeds only bytes. A program that needs
+both edges (a game) reads events, and falls back to synthesising releases from bytes when
+there is no keyboard (`extron_input_getkey()` / `extron_input_getc()`).
+
+**DOOM** (`make doom`, `tools/build_x86_doom.sh`): doomgeneric at a pinned commit plus
+`usr/doom/doomgeneric_extron.c`, the platform layer (POSIX time and sleep, integer-scaled
+output centred on the display, 2x on a 1280x800 GOP framebuffer, key events with a serial
+fallback). The shareware WAD (`doom1.wad`, sha256 pinned) is fetched once and installed as
+`/usr/share/games/doom/doom1.wad`; the program is `/usr/bin/doom` and takes doomgeneric's
+usual options. Controls: arrows move/turn, Ctrl fire, Space use, Shift run, Alt strafe,
+`,` `.` strafe, Esc menu. `make check-doom` boots, runs `doom`, checks through the QEMU
+monitor that the game owns the screen, animates and reacts to `sendkey`, that Ctrl-C stops
+it and that the console comes back repainted. The platform layer builds for aarch64 too (it
+uses only POSIX calls) but only x86-64 is verified here.

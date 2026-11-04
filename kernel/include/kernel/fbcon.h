@@ -20,5 +20,9 @@ int  fbcon_active(void);
 void fbcon_putc(char c);        /* '\n' is a bare line feed; '\r' returns the column */
 void fbcon_write(const char *buf, size_t len);
 void fbcon_flush(void);
+/* A program took the display (kernel/drivers/fbown.c): stop painting. The cell grid
+ * keeps tracking output so fbcon_resume() can repaint the whole screen. */
+void fbcon_suspend(void);
+void fbcon_resume(void);
 
 #endif

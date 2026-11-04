@@ -72,6 +72,13 @@ fi
 # ---- Python ------------------------------------------------------------------
 [ -d build-x86_64/python/rootfs/usr ] && cp -a build-x86_64/python/rootfs/usr/. "$ROOT/usr/"
 
+# ---- DOOM (tools/build_x86_doom.sh) ---------------------------------------------
+if [ -x build-x86_64/doom/doom ]; then
+    install -m 755 build-x86_64/doom/doom "$ROOT/usr/bin/doom"
+    mkdir -p "$ROOT/usr/share/games/doom"
+    cp build-x86_64/extlibs/dl/doom1.wad "$ROOT/usr/share/games/doom/doom1.wad"
+fi
+
 # ---- regression tests ---------------------------------------------------------
 if [ -d "$UL/out/tests" ]; then
     cp "$UL"/out/tests/* "$ROOT/opt/tests/"

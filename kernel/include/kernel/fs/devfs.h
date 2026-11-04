@@ -10,6 +10,8 @@
  * /dev/console for the console descriptors). */
 void devfs_init(void);
 int devfs_mount(const struct vfs_path *cwd, const char *path);
+/* True if `node` is /dev/fb0 (mmap() of it takes over the display). */
+bool devfs_is_fb(struct vfs_node *node);
 
 /* True if `node` is the console/tty device — the one file_is_tty() and
  * sys_ioctl()'s termios/pgrp calls key off. */

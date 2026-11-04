@@ -59,6 +59,10 @@
  * actually reaching memory is invisible to that watching until an
  * unrelated eviction happens to flush it. */
 #define VM_NOCACHE (1 << 4)
+/* Marks a mapping of /dev/fb0: while any such VMA exists in its owner's address
+ * space, that process owns the display (kernel/drivers/fbown.c). Not a hardware
+ * attribute: arch_translate_vm_flags() ignores it. */
+#define VM_FBOWNER (1 << 5)
 
 #include <stdint.h>
 

@@ -33,6 +33,10 @@ static void handle_scancode(uint8_t sc) {
     uint8_t code = sc & 0x7F;
     int was_ext = ext; ext = 0;
 
+    /* Every edge goes to the event ring (extended keys get bit 7), before the
+     * ASCII translation below swallows modifiers and releases. */
+    kbd_inject_event((uint8_t)(code | (was_ext ? 0x80 : 0)), !release);
+
     if (code == 0x2A || code == 0x36) { shift = !release; return; }
     if (code == 0x1D) { ctrl = !release; return; }
     if (release) return;

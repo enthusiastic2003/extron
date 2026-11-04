@@ -133,7 +133,7 @@ disk-clean:
 # modify their disk; the real one is never touched).
 ROOTFS_INPUTS := $(wildcard $(BUILD)/userland/out/busybox $(BUILD)/userland/out/tests/* \
                  $(BUILD)/userland/sysroot/usr/lib/libc.so $(BUILD)/coreutils/rootfs/usr/bin/coreutils \
-                 $(BUILD)/bash/rootfs/usr/bin/bash $(BUILD)/python/rootfs/usr/bin/python3.14 \
+                 $(BUILD)/bash/rootfs/usr/bin/bash $(BUILD)/doom/doom $(BUILD)/python/rootfs/usr/bin/python3.14 \
                  $(BUILD)/extlibs/prefix/lib/*.so.* usr/x86_64/tests/* usr/hello.txt)
 $(TEST_DISK): $(ROOTFS_INPUTS) tools/build_x86_rootfs.sh
 	tools/build_x86_rootfs.sh $@ 256
@@ -161,6 +161,10 @@ coreutils:
 bash:
 	tools/build_x86_bash.sh
 
+# DOOM (doomgeneric + the shareware WAD; /usr/bin/doom; needs the userland first).
+doom:
+	tools/build_x86_doom.sh
+
 # CPython 3.14 (installed under /usr; needs the userland first; a few minutes).
 python:
 	tools/build_x86_python.sh
@@ -168,6 +172,11 @@ python:
 # Hung-disk timeout/recovery and RTC write-back (one boot, ~20 s).
 check-disk: esp $(TEST_DISK)
 	python3 tools/x86_disk_timeout_test.py
+
+# DOOM on the framebuffer: takes the display, animates, reacts to PS/2 keys, Ctrl-C
+# brings the text console back (needs `make doom`; ~40 s).
+check-doom: esp $(TEST_DISK)
+	python3 tools/x86_doom_test.py
 
 # Boot flow AND the full regression suite in one boot (one QEMU, one login).
 check-all: esp $(TEST_DISK)
@@ -211,5 +220,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash doom check-boot check-disk check-all check-doom
 -include $(DEPS)

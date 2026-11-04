@@ -155,6 +155,17 @@ struct vm_space *vm_space_create(phys_addr_t ttbr0) {
     return mm;
 }
 
+bool vm_has_flag(struct vm_space *mm, int flag) {
+    bool found = false;
+    if (!mm)
+        return false;
+    irq_spin_lock(&mm->lock);
+    for (struct vma *v = mm->vmas; v; v = v->next)
+        if (v->flags & flag) { found = true; break; }
+    irq_spin_unlock(&mm->lock);
+    return found;
+}
+
 static void drop_page(struct vm_space *mm, virt_addr_t va) {
     phys_addr_t phys = virt_to_phys(mm->ttbr0, va);
     unmap_page(mm->ttbr0, va);
