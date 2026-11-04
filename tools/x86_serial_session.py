@@ -8,7 +8,7 @@ args = sys.argv[1:]; limit = 40
 if args[:1] == ["-t"]: limit = float(args[1]); args = args[2:]
 tmp = tempfile.mkdtemp(); vars_ = os.path.join(tmp, "vars.fd")
 open(vars_, "wb").write(open("/usr/share/OVMF/OVMF_VARS_4M.fd", "rb").read())
-# EXTRON_DISK=<raw image>: attach it as a legacy virtio-blk data disk (/mnt).
+# EXTRON_DISK=<raw image>: attach it as the legacy virtio-blk disk /dev/vda (the root filesystem).
 disk_args = []
 if os.environ.get("EXTRON_DISK"):
     disk_args = ["-drive", f"if=none,id=data0,format=raw,file={os.environ['EXTRON_DISK']}",

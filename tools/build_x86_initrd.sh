@@ -1,166 +1,50 @@
 #!/bin/bash
-# Build a minimal ext2 root for the x86-64 bring-up: /bin/sh is the freestanding
-# smoke-test payload from usr/x86_64/init.c. Output: initrd.ext2 (or $1).
+# Build the x86-64 initramfs (an ext2 image the loader hands to the kernel).
+#
+#   normal:  a tiny initramfs. /init (usr/x86_64/initramfs_init.c) mounts the real
+#            root filesystem named by root= on the kernel command line, switches
+#            to it and runs its init. It holds nothing else the system needs: a
+#            BusyBox with libc and the dynamic linker (for the emergency shell if
+#            the root cannot be mounted) and empty mount points. No libraries,
+#            tools or configuration: those live on the root disk
+#            (tools/build_x86_rootfs.sh).
+#   AUTOEXIT=1 (`make check`) or no userland built: the freestanding smoke-test
+#            payload from usr/x86_64/init.c as /bin/sh, no disk involved.
+#
+# Output: initrd.ext2 (or $1).
 set -euo pipefail
 OUT="${1:-initrd.ext2}"
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
-mkdir -p "$ROOT"/{bin,dev,tmp,etc,root,lib,proc}
-gcc -static -nostdlib -ffreestanding -fno-pic -no-pie -fno-stack-protector \
-    -fno-asynchronous-unwind-tables -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
-    -O1 -Wall -o "$ROOT/bin/smoke" usr/x86_64/init.c
-# /bin/sh is what the kernel launches. Default: the libc-free smoke test (which
-# is also a tiny shell). With AUTOEXIT unset and BusyBox built, /bin/sh becomes
-# BusyBox ash instead; the smoke test stays available as /bin/smoke.
-cp "$ROOT/bin/smoke" "$ROOT/bin/sh"
-echo "extron x86-64" > "$ROOT/etc/hostname"
-ln -sf /proc/mounts "$ROOT/etc/mtab"
-printf 'root:x:0:0:root:/root:/bin/sh\n' > "$ROOT/etc/passwd"
-printf 'root:x:0:\n' > "$ROOT/etc/group"
-# Optional mlibc userland (see docs/X86_64_UEFI_PORT.md): if a built sysroot and
-# test programs exist, ship the runtime linker, libc and the programs.
 UL="${EXTRON_USERLAND:-$(pwd)/build-x86_64/userland}"
-if [ -f "$UL/sysroot/usr/lib/ld.so" ]; then
-    cp "$UL/sysroot/usr/lib/ld.so" "$UL/sysroot/usr/lib/libc.so" "$ROOT/lib/"
-    # Shared libraries for Python's modules (and anything else that links them):
-    # ordinary system libraries in /lib, found by ld.so's default search path.
-    EXTL="$(pwd)/build-x86_64/extlibs/prefix/lib"
-    if [ -d "$EXTL" ]; then
-        for f in "$EXTL"/*.so.*; do
-            case "$f" in *.old) continue;; esac
-            [ -e "$f" ] || continue
-            cp -a "$f" "$ROOT/lib/"
-            [ -L "$f" ] || strip --strip-unneeded "$ROOT/lib/$(basename "$f")" 2>/dev/null || true
-        done
-    fi
-    # GNU coreutils (tools/build_x86_coreutils.sh): one multi-call binary plus
-    # applet symlinks in /usr/gnu/bin, ahead of BusyBox's on a login shell's PATH.
-    CU=build-x86_64/coreutils/rootfs/usr
-    if [ -x "$CU/bin/coreutils" ]; then
-        mkdir -p "$ROOT/usr/gnu" "$ROOT/usr/libexec"
-        cp -a "$CU/bin" "$ROOT/usr/gnu/bin"
-        [ -d "$CU/libexec/coreutils" ] && cp -a "$CU/libexec/coreutils" "$ROOT/usr/libexec/"
-    fi
-    # GNU bash (tools/build_x86_bash.sh): /bin/bash, the login shell when present.
-    if [ -x build-x86_64/bash/rootfs/usr/bin/bash ]; then
-        install -m 755 build-x86_64/bash/rootfs/usr/bin/bash "$ROOT/bin/bash"
-        HAVE_BASH=1
-    fi
-    for f in "$UL"/out/*; do [ -f "$f" ] && install -m 755 "$f" "$ROOT/bin/$(basename "$f")"; done
-    # mlibc regression programs (usr/mlibc_tests) live on the data disk
-    # (tools/build_x86_disk.sh), mounted at /mnt; /opt/tests resolves there.
-    if [ -d "$UL/out/tests" ]; then
-        ln -s /mnt/opt "$ROOT/opt"
-        cp usr/hello.txt "$ROOT/hello.txt"
-        cat > "$ROOT/bin/runtests" <<'RT'
-#!/bin/sh
-# Run every program in /opt/tests, report per-test status.
-for t in /opt/tests/*.elf; do
-    case "$t" in */mlibc_syscall_test.elf) continue;; esac   # interactive (reads the keyboard)
-    echo "=== $t"
-    "$t" || echo "[exit status $?]"
-done
-for t in /opt/tests/*.sh; do
-    echo "=== $t"
-    sh "$t" || echo "[exit status $?]"
-done
-# bash programs run only when /bin/bash is installed.
-if [ -x /bin/bash ]; then
-    for t in /opt/tests/*.bash; do
-        echo "=== $t"
-        /bin/bash "$t" || echo "[exit status $?]"
-    done
-fi
-# Python programs run only when the data disk carries CPython.
-if [ -x /mnt/python/bin/python3 ]; then
-    for t in /opt/tests/*.py; do
-        echo "=== $t"
-        /mnt/python/bin/python3 "$t" || echo "[exit status $?]"
-    done
-fi
-echo "RUNTESTS DONE"
-RT
-        chmod 755 "$ROOT/bin/runtests"
-    fi
-    if [ -x "$ROOT/bin/busybox" ] && [ "${AUTOEXIT:-0}" != 1 ] && [ "${SMOKE_SHELL:-0}" != 1 ]; then
-        rm -f "$ROOT/bin/sh"; ln -s busybox "$ROOT/bin/sh"
-        # One symlink per applet (init, getty, login, sync, gzip, ... are all
-        # exec'd by path, e.g. inittab's /bin/sync and tar's `gzip`).
-        if [ -f "$UL/busybox.links" ]; then
-            while IFS= read -r link; do
-                [ -n "$link" ] || continue
-                mkdir -p "$ROOT$(dirname "$link")"
-                ln -sf /bin/busybox "$ROOT$link"
-            done < "$UL/busybox.links"
-        fi
-        # python3 lives on the data disk (/mnt/python, see build_x86_python.sh).
-        if [ -d build-x86_64/python/rootfs/python ]; then
-            mkdir -p "$ROOT/usr/bin"
-            ln -sf /mnt/python/bin/python3 "$ROOT/usr/bin/python3"
-            ln -sf /mnt/python/bin/python3 "$ROOT/bin/python3"
-        fi
-        mkdir -p "$ROOT/sbin" "$ROOT/root" "$ROOT/home/user" "$ROOT/etc/init.d" "$ROOT/run" "$ROOT/var/log"
-        chmod 700 "$ROOT/root"; chmod 1777 "$ROOT/tmp"
+mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp,etc,root,lib,newroot}
 
-        # The system the kernel boots into: init -> getty -> login -> sh.
-        cat > "$ROOT/etc/inittab" <<'IT'
-::sysinit:/etc/init.d/rcS
-::respawn:/sbin/getty -L 115200 console vt100
-::ctrlaltdel:/sbin/reboot
-::shutdown:/bin/sync
-::restart:/sbin/init
-IT
-        cat > "$ROOT/etc/init.d/rcS" <<'RC'
-#!/bin/sh
-# Early system setup, run once by init before the login prompt appears.
-hostname -F /etc/hostname 2>/dev/null
-mkdir -p /tmp /run /var/log
-chmod 1777 /tmp
-RC
-        chmod 755 "$ROOT/etc/init.d/rcS"
-        printf 'Welcome to Extron.\n\n' > "$ROOT/etc/issue"
-        printf '\nExtron OS - a hobby POSIX kernel. Type "poweroff" to shut down.\n\n' > "$ROOT/etc/motd"
-        cat > "$ROOT/etc/profile" <<'PF'
-export PATH=/usr/gnu/bin:/sbin:/usr/sbin:/bin:/usr/bin:/opt/tests
-export PAGER=less
-# login(1) leaves the identity variables for the shell to derive; export them
-# so children (and bash -c) see them.
-: ${USER:=$(id -un 2>/dev/null)}
-export HOME USER LOGNAME=${LOGNAME:-$USER}
-alias ll='ls -l'
-if [ -n "$BASH_VERSION" ]; then
-    export SHELL=/bin/bash INPUTRC=/etc/inputrc
-    PS1='\w \$ '      # same shape as BusyBox's ("/ # "), which the test harnesses wait for
-    HISTFILE=$HOME/.bash_history
-    [ -r /etc/bash.bashrc ] && . /etc/bash.bashrc
-fi
-PF
-        printf '/bin/sh\n/bin/ash\n/bin/bash\n' > "$ROOT/etc/shells"
-        # readline: no bracketed paste (its escape codes just clutter a serial console).
-        printf 'set enable-bracketed-paste off\n' > "$ROOT/etc/inputrc"
-        ln -sf /proc/mounts "$ROOT/etc/mtab"
-        LOGIN_SH=/bin/sh; [ "${HAVE_BASH:-0}" = 1 ] && LOGIN_SH=/bin/bash
-        printf 'root:x:0:0:root:/root:%s\nuser:x:1000:1000:Extron user:/home/user:%s\n' "$LOGIN_SH" "$LOGIN_SH" > "$ROOT/etc/passwd"
-        printf 'root:x:0:\nuser:x:1000:\n' > "$ROOT/etc/group"
-        # root has no password (development system); `user` has the password "user".
-        USERHASH=$(openssl passwd -1 user 2>/dev/null || echo '*')
-        printf 'root::19000:0:99999:7:::\nuser:%s:19000:0:99999:7:::\n' "$USERHASH" > "$ROOT/etc/shadow"
-        chmod 600 "$ROOT/etc/shadow"
-        printf '/bin/sh\n' > "$ROOT/etc/shells"
-        chown_user=1
-    fi
-fi
-# AUTOEXIT=1 (used by `make check`): smoke test resets the VM when done instead of
-# dropping into the interactive mini shell.
-[ "${AUTOEXIT:-0}" = 1 ] && touch "$ROOT/etc/autoexit"
-rm -f "$OUT"
-dd if=/dev/zero of="$OUT" bs=1M count=${IMG_MB:-32} status=none
-if [ "${chown_user:-0}" = 1 ] && command -v fakeroot >/dev/null; then
-    # Record real ownership (root everywhere, uid 1000 for the user's home)
-    # without needing root on the build host.
-    fakeroot sh -c "chown -R 0:0 '$ROOT' && chown 1000:1000 '$ROOT/home/user' && \
-        mkfs.ext2 -q -E revision=0 -b 1024 -d '$ROOT' '$OUT'"
+if [ "${AUTOEXIT:-0}" != 1 ] && [ "${SMOKE_SHELL:-0}" != 1 ] \
+        && [ -f "$UL/sysroot/usr/lib/ld.so" ] && [ -x "$UL/out/initramfs-init" ] \
+        && [ -x "$UL/out/busybox" ]; then
+    # ---- initramfs --------------------------------------------------------------
+    install -m 755 "$UL/out/initramfs-init" "$ROOT/init"
+    install -m 755 "$UL/out/busybox" "$ROOT/bin/busybox"
+    ln -s busybox "$ROOT/bin/sh"
+    cp "$UL/sysroot/usr/lib/ld.so" "$UL/sysroot/usr/lib/libc.so" "$ROOT/lib/"
+    printf 'root:x:0:0:root:/:/bin/sh\n' > "$ROOT/etc/passwd"
+    IMG_MB_DEFAULT=8
 else
-    mkfs.ext2 -q -E revision=0 -b 1024 -d "$ROOT" "$OUT"
+    # ---- bring-up / smoke-test image ----------------------------------------------
+    gcc -static -nostdlib -ffreestanding -fno-pic -no-pie -fno-stack-protector \
+        -fno-asynchronous-unwind-tables -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
+        -O1 -Wall -o "$ROOT/bin/smoke" usr/x86_64/init.c
+    cp "$ROOT/bin/smoke" "$ROOT/bin/sh"
+    echo "extron x86-64" > "$ROOT/etc/hostname"
+    printf 'root:x:0:0:root:/root:/bin/sh\n' > "$ROOT/etc/passwd"
+    printf 'root:x:0:\n' > "$ROOT/etc/group"
+    # AUTOEXIT=1 (used by `make check`): the smoke test resets the VM when done
+    # instead of dropping into its interactive mini shell.
+    [ "${AUTOEXIT:-0}" = 1 ] && touch "$ROOT/etc/autoexit"
+    IMG_MB_DEFAULT=4
 fi
+
+rm -f "$OUT"
+dd if=/dev/zero of="$OUT" bs=1M count=${IMG_MB:-$IMG_MB_DEFAULT} status=none
+mkfs.ext2 -q -E revision=0 -b 1024 -d "$ROOT" "$OUT"
 echo "built $OUT"

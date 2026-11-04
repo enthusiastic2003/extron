@@ -16,7 +16,7 @@ vars_ = os.path.join(tmp, "vars.fd")
 open(vars_, "wb").write(open("/usr/share/OVMF/OVMF_VARS_4M.fd", "rb").read())
 disk = os.path.join(tmp, "disk.img")
 mon_path = os.path.join(tmp, "mon.sock")
-subprocess.check_call(["tools/build_x86_disk.sh", disk, "32"])
+subprocess.check_call(["cp", "--sparse=always", "build-x86_64/rootfs-test.img", disk])
 # No -no-reboot: the VM reboot in step 3 must not end QEMU.
 q = subprocess.Popen(["qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-cpu", "max", "-display", "none",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
@@ -81,7 +81,7 @@ def login():
     return wait(b"# ", 30, mark)
 
 check("boot and log in", login())
-out = run("cat /mnt/opt/tests/mlibc_file_test.elf > /dev/null; echo rc=$?")
+out = run("cat /opt/tests/mlibc_file_test.elf > /dev/null; echo rc=$?")
 check("a cold read works normally", "rc=0" in out, out)
 
 # --- hung disk ---------------------------------------------------------------
@@ -89,7 +89,9 @@ mon = monitor("block_set_io_throttle d0 1 0 0 0 0 0")
 check("monitor accepted the throttle", "rror" not in mon, mon)
 mark = len(buf)
 t0 = time.time()
-out = run("cat /mnt/opt/tests/mlibc_dynamic_test.elf > /dev/null; echo rc=$?", 60)
+# A shell builtin does the read: the root is on this disk, so any external program
+# (even cat) would have to be loaded from it first and fail in exec instead.
+out = run("{ read -r x; echo rc=$?; } < /opt/tests/mlibc_dynamic_test.elf", 60)
 dt = time.time() - t0
 text = buf[mark:].decode(errors="replace")
 check("the read fails instead of hanging forever", "rc=1" in out or "rc=0" not in out and "rc=" in out, out)
@@ -100,7 +102,7 @@ check("the kernel logged the timeout and the reset",
 
 monitor("block_set_io_throttle d0 0 0 0 0 0 0")
 time.sleep(1)
-out = run("cat /mnt/opt/tests/hello.txt; echo rc=$?", 30)
+out = run("cat /opt/tests/hello.txt; echo rc=$?", 30)
 check("the disk works again after the reset", "rc=0" in out and "hello" in out.lower(), out)
 out = run("echo post-reset > /mnt/after-reset.txt; sync; cat /mnt/after-reset.txt", 30)
 check("writes work again too", "post-reset" in out, out)
@@ -126,7 +128,7 @@ check("poweroff ends QEMU", q.poll() is not None)
 if q.poll() is None: q.kill()
 fsck = subprocess.run(["e2fsck", "-fn", disk], capture_output=True, text=True)
 check("host e2fsck: the disk is clean", fsck.returncode == 0, fsck.stdout)
-data = subprocess.run(["debugfs", "-R", "cat /after-reset.txt", disk], capture_output=True, text=True).stdout
+data = subprocess.run(["debugfs", "-R", "cat /mnt/after-reset.txt", disk], capture_output=True, text=True).stdout
 check("data written after the reset reached the disk", "post-reset" in data, data)
 print("[disk] ALL PASSED" if not failures else f"[disk] {len(failures)} FAILED")
 sys.exit(1 if failures else 0)

@@ -95,6 +95,8 @@
 #define SYS_SIGTIMEDWAIT  119  /* (set*, info*, timeout_ns or -1) */
 #define SYS_GETSID        120
 #define SYS_SYSINFO       121
+#define SYS_MOUNT         122  /* mount(struct extron_mount_request *) */
+#define SYS_SWITCH_ROOT   123  /* switch_root(path): make the mount at path the root */
 #define SYS_MREMAP        97  /* mremap(old, old_size, new_size, flags) */
 #define SYS_FLOCK         98
 #define SYS_SOCKET        99

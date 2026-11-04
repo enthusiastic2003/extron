@@ -9,6 +9,7 @@
  * has mounted root, and before any process is created (proc_init() opens
  * /dev/console for the console descriptors). */
 void devfs_init(void);
+int devfs_mount(const struct vfs_path *cwd, const char *path);
 
 /* True if `node` is the console/tty device — the one file_is_tty() and
  * sys_ioctl()'s termios/pgrp calls key off. */

@@ -96,6 +96,7 @@ for f in "$REPO"/usr/x86_64/tests/*.c; do
     "$CC" -O2 "$f" -o "$OUT/$n"
 done
 "$CC" -O2 "$REPO/usr/ldd.c" -o "$OUT/ldd"      # ldd: list shared-library dependencies
+"$CC" -O2 -static "$REPO/usr/x86_64/initramfs_init.c" -o "$OUT/initramfs-init"   # /init of the initramfs
 "$CC" -O2 -static "$REPO/usr/x86_64/tests/hello.c" -o "$OUT/hello-static"
 
 T="$REPO/usr/mlibc_tests"; D="$UL/dso"; mkdir -p "$D"

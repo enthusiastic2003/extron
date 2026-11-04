@@ -18,6 +18,7 @@
 
 static struct vfs_mount mounts[VFS_MAX_MOUNTS];
 static size_t mount_count;
+static struct vfs_mount *root_mount;     /* the mount at "/" (mounts[0] until a switch_root) */
 
 #define VFS_DCACHE_BUCKETS 256
 #define VFS_ICACHE_BUCKETS 256
@@ -258,14 +259,15 @@ int vfs_mount_root(const struct vfs_fs_ops *ops, void *private) {
         return result < 0 ? result : -EINVAL;
     mount->root->owner_mount = mount;
     mount_count = 1;
+    root_mount = mount;
     return 0;
 }
 
 int vfs_root_path(struct vfs_path *out) {
     if (!out || !mount_count)
         return -ENOENT;
-    out->mount = &mounts[0];
-    out->dentry = mounts[0].root;
+    out->mount = root_mount;
+    out->dentry = root_mount->root;
     vfs_dentry_retain(out->dentry);
     return 0;
 }
@@ -540,6 +542,11 @@ int vfs_lookup_path_nofollow(const struct vfs_path *cwd, const char *path,
 
 int vfs_mount_at(const struct vfs_path *cwd, const char *path,
                  const struct vfs_fs_ops *ops, void *private) {
+    return vfs_mount_at_src(cwd, path, ops, private, NULL);
+}
+
+int vfs_mount_at_src(const struct vfs_path *cwd, const char *path,
+                     const struct vfs_fs_ops *ops, void *private, const char *source) {
     if (!ops || !ops->root || mount_count >= VFS_MAX_MOUNTS)
         return -ENOSPC;
     struct vfs_path covered;
@@ -562,6 +569,9 @@ int vfs_mount_at(const struct vfs_path *cwd, const char *path,
     mount->private = private;
     mount->covered = covered;
     mount->has_covered = 1;
+    if (source)
+        for (size_t i = 0; source[i] && i < sizeof(mount->source) - 1; i++)
+            mount->source[i] = source[i];
     result = ops->root(mount, &mount->root);
     if (result < 0 || !mount->root) {
         vfs_path_release(&mount->covered);
@@ -573,18 +583,38 @@ int vfs_mount_at(const struct vfs_path *cwd, const char *path,
     return 0;
 }
 
+static const char *root_source = "rootfs";
+void vfs_set_root_source(const char *source) { root_source = source; }
+
+/* The index'th reachable mount: the root first, then the others in mount order. */
+static struct vfs_mount *nth_reachable_mount(size_t index) {
+    if (!root_mount)
+        return NULL;
+    if (index == 0)
+        return root_mount;
+    size_t seen = 0;
+    for (size_t i = 0; i < mount_count; i++) {
+        struct vfs_mount *m = &mounts[i];
+        if (m == root_mount || m->detached)
+            continue;
+        if (++seen == index)
+            return m;
+    }
+    return NULL;
+}
+
 int vfs_mount_info(size_t index, struct vfs_mount_info *out) {
-    if (index >= mount_count)
+    struct vfs_mount *m = nth_reachable_mount(index);
+    if (!m)
         return -ENOENT;
-    struct vfs_mount *m = &mounts[index];
     memset(out, 0, sizeof(*out));
     out->fstype = m->ops && m->ops->fstype ? m->ops->fstype : "unknown";
-    /* Device column of /proc/mounts: the block device for ext2 (the only disk
-     * filesystem, on the first virtio disk), otherwise the filesystem name. */
-    out->source = index == 0 ? "rootfs"
-                : (m->ops && m->ops->fstype && !strcmp(m->ops->fstype, "ext2")) ? "/dev/vda"
+    /* Device column of /proc/mounts: what the mounter named, else the root's
+     * recorded device, else the filesystem name. */
+    out->source = m->source[0] ? m->source
+                : m == root_mount ? root_source
                 : out->fstype;
-    if (index == 0 || !m->has_covered) {
+    if (m == root_mount || !m->has_covered) {
         out->path[0] = '/';
     } else if (vfs_get_path(&m->covered, out->path, sizeof(out->path)) < 0) {
         out->path[0] = '?';
@@ -592,6 +622,31 @@ int vfs_mount_info(size_t index, struct vfs_mount_info *out) {
     struct vfs_fs_info info;
     if (m->ops && m->ops->statfs && m->ops->statfs(m, &info) == 0)
         out->readonly = !!(info.flags & VFS_FS_RDONLY);
+    return 0;
+}
+
+int vfs_switch_root(const struct vfs_path *newroot) {
+    if (!newroot || !newroot->mount || !root_mount)
+        return -EINVAL;
+    struct vfs_mount *nm = newroot->mount;
+    if (nm == root_mount || !nm->has_covered || newroot->dentry != nm->root)
+        return -EINVAL;
+    struct vfs_mount *old = root_mount;
+    old->detached = 1;
+    /* Everything (transitively) mounted on the old tree goes with it. */
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t i = 0; i < mount_count; i++) {
+            struct vfs_mount *m = &mounts[i];
+            if (m != nm && !m->detached && m->has_covered && m->covered.mount->detached) {
+                m->detached = 1;
+                changed = 1;
+            }
+        }
+    }
+    vfs_path_release(&nm->covered);
+    nm->has_covered = 0;
+    root_mount = nm;
     return 0;
 }
 
@@ -603,7 +658,7 @@ int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size) {
     struct vfs_mount *mount = path->mount;
     struct vfs_dentry *dentry = path->dentry;
 
-    while (!(mount == &mounts[0] && dentry == mounts[0].root)) {
+    while (!(mount == root_mount && dentry == root_mount->root)) {
         if (!dentry->linked)
             return -ENOENT;
         if (dentry == mount->root && mount->has_covered) {
@@ -618,7 +673,7 @@ int vfs_get_path(const struct vfs_path *path, char *out, size_t out_size) {
         reverse[--begin] = '/';
         if (dentry->parent)
             dentry = dentry->parent;
-        else if (!(mount == &mounts[0] && dentry == mounts[0].root))
+        else if (!(mount == root_mount && dentry == root_mount->root))
             return -ENOENT;
     }
 

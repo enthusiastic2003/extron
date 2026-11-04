@@ -28,6 +28,7 @@
 #include <arch/exceptions.h>
 #include <arch/irq.h>
 #include <kernel/fs/ext2.h>
+#include <kernel/blockdev.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
 #include <kernel/mm/paging.h>
@@ -333,8 +334,9 @@ static bool vblk_init(struct pci_loc loc) {
     return true;
 }
 
-/* Called from kernel_main after the root filesystem and /dev are mounted. */
-void arch_mount_data_disk(void) {
+/* Find the virtio disk and register it as "vda" (before the root filesystem
+ * is chosen, so root=/dev/vda can name it). */
+void arch_probe_block_devices(void) {
     struct pci_loc loc;
     if (!pci_find(VIRTIO_VENDOR, VIRTIO_BLK_LEGACY, VIRTIO_BLK_LEGACY, &loc)) {
         if (pci_find(VIRTIO_VENDOR, VIRTIO_BLK_MODERN, VIRTIO_BLK_MODERN, &loc))
@@ -344,8 +346,15 @@ void arch_mount_data_disk(void) {
     }
     if (!vblk_init(loc))
         return;
+    blockdev_register("vda", &vblk_dev);
+}
 
-    struct ext2_mount *m = ext2_mount_create(&vblk_dev, 0);
+/* Legacy layout (initrd root + data disk): mount the disk at /mnt. */
+void arch_mount_data_disk(void) {
+    struct ext2_block_dev *dev = blockdev_find("vda");
+    if (!dev)
+        return;
+    struct ext2_mount *m = ext2_mount_create(dev, 0);
     if (!m) {
         kprintf("virtio-blk: no ext2 filesystem on the disk; leaving it unmounted\n");
         return;

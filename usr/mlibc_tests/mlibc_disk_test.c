@@ -68,8 +68,8 @@ static off_t size_of(const char *path) {
 int main(void) {
     struct stat st;
     setvbuf(stdout, NULL, _IONBF, 0);   /* progress stays visible if the run wedges */
-    if (stat("/mnt/lost+found", &st) != 0) {
-        printf("[disk_test] SKIP: no data disk mounted at /mnt\n");
+    if (stat("/lost+found", &st) != 0) {
+        printf("[disk_test] SKIP: no ext2 disk with lost+found\n");
         return 0;
     }
 

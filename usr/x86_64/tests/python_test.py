@@ -1,4 +1,4 @@
-#!/mnt/python/bin/python3
+#!/usr/bin/python3
 """CPython on Extron: the interpreter itself and the kernel/libc features the
 standard library leans on. Prints "[python] <what> PASS|FAIL" like the C tests."""
 import sys
@@ -67,7 +67,7 @@ def t_time_and_clock():
 
 def t_files():
     import os, tempfile, shutil, pathlib, glob, stat
-    d = tempfile.mkdtemp(dir="/mnt")
+    d = tempfile.mkdtemp(dir="/var/tmp")
     try:
         p = pathlib.Path(d)
         (p / "a").mkdir(); (p / "a" / "b.txt").write_text("héllo\n", encoding="utf-8")
@@ -229,7 +229,7 @@ def t_io_multiplexing():
 
 def t_misc_os():
     import os, mmap, fcntl, tempfile, resource, pwd, grp, sys
-    with tempfile.TemporaryFile(dir="/mnt") as f:
+    with tempfile.TemporaryFile(dir="/var/tmp") as f:
         f.write(b"\0" * 8192); f.flush()
         m = mmap.mmap(f.fileno(), 8192)
         m[0:5] = b"hello"; m.flush()
@@ -247,8 +247,8 @@ def t_misc_os():
     check("os.cpu_count", os.cpu_count() == 1)
     check("os.environ", os.environ.get("PATH") is not None)
     check("os.get_terminal_size on a non-tty raises OSError", True)
-    r = os.statvfs("/mnt"); check("os.statvfs", r.f_bsize > 0 and r.f_blocks > 0)
-    check("os.scandir", any(e.name == "python" for e in os.scandir("/mnt")))
+    r = os.statvfs("/"); check("os.statvfs", r.f_bsize > 0 and r.f_blocks > 0)
+    check("os.scandir", any(e.name == "usr" for e in os.scandir("/")))
     check("sys.path has the stdlib", any(p.endswith("python3.14") for p in sys.path))
 
 def t_asyncio():
@@ -332,7 +332,7 @@ def t_compression():
         check("zstd round trip", zstd.decompress(zstd.compress(data)) == data)
     except ImportError as e:
         check("zstd round trip", False, e)
-    d = tempfile.mkdtemp(dir="/mnt")
+    d = tempfile.mkdtemp(dir="/var/tmp")
     try:
         with tarfile.open(d + "/a.tar.gz", "w:gz") as t:
             info = tarfile.TarInfo("f.txt"); info.size = len(data); t.addfile(info, io.BytesIO(data))
@@ -385,7 +385,7 @@ def t_sqlite():
     check("sqlite in-memory insert/select", rows == [("a", 1.5), ("b", 2.5), ("é", 3.5)])
     check("sqlite aggregates", db.execute("select count(*), sum(v), max(name) from t").fetchone() == (3, 7.5, "é"))
     check("sqlite version is 3.50", sqlite3.sqlite_version.startswith("3.50"))
-    d = tempfile.mkdtemp(dir="/mnt")
+    d = tempfile.mkdtemp(dir="/var/tmp")
     try:
         path = d + "/test.db"
         c = sqlite3.connect(path)

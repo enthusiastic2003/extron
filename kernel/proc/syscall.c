@@ -19,6 +19,9 @@
 #include <kernel/mm/kheap.h>
 #include <kernel/fs/evfd.h>
 #include <kernel/fs/vfs.h>
+#include <kernel/fs/devfs.h>
+#include <kernel/fs/procfs.h>
+#include <kernel/blockdev.h>
 #include <kernel/errno.h>
 #include <kernel/klibc/string.h>
 #include <arch/irq_spinlock.h>
@@ -3439,6 +3442,101 @@ static uint64_t sys_pathconf(uint64_t request_address, uint64_t b, uint64_t c,
     return 0;
 }
 
+/* mount(2), as one request structure: only root may mount. Filesystem types:
+ * "ext2" (source names a registered block device, e.g. /dev/vda), "proc" and
+ * "devtmpfs"/"devfs" (source ignored). */
+struct user_mount_request {
+    uint64_t source;      /* char * (may be 0) */
+    uint64_t target;      /* char * */
+    uint64_t fstype;      /* char * */
+    uint64_t flags;
+};
+
+static uint64_t sys_mount(uint64_t request_address, uint64_t b, uint64_t c,
+                          struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (!user_buffer_ok(p, request_address, sizeof(struct user_mount_request)))
+        return (uint64_t)-EFAULT;
+    struct user_mount_request req = *(const struct user_mount_request *)request_address;
+    if (p->euid != 0)
+        return (uint64_t)-EPERM;
+
+    char source[64] = "", target[VFS_PATH_MAX + 1], fstype[16];
+    long n;
+    if (req.source && (n = copy_user_string(p, req.source, source, sizeof(source))) < 0)
+        return (uint64_t)n;
+    if ((n = copy_user_string(p, req.target, target, sizeof(target))) < 0)
+        return (uint64_t)n;
+    if ((n = copy_user_string(p, req.fstype, fstype, sizeof(fstype))) < 0)
+        return (uint64_t)n;
+
+    struct vfs_path cwd;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return (uint64_t)-EIO;
+    int result;
+    if (!strcmp(fstype, "ext2")) {
+        struct ext2_block_dev *dev = blockdev_find(source);
+        if (!dev) {
+            result = -ENODEV;
+        } else if (!blockdev_claim(dev)) {
+            result = -EBUSY;
+        } else {
+            struct ext2_mount *m = ext2_mount_create(dev, 0);
+            if (!m) {
+                blockdev_release(dev);
+                result = -EINVAL;
+            } else {
+                extern const struct vfs_fs_ops ext2_fs_ops;
+                result = vfs_mount_at_src(&cwd, target, &ext2_fs_ops, m, source);
+                if (result < 0)
+                    blockdev_release(dev);
+            }
+        }
+    } else if (!strcmp(fstype, "proc")) {
+        result = procfs_mount(&cwd, target);
+    } else if (!strcmp(fstype, "devtmpfs") || !strcmp(fstype, "devfs")) {
+        result = devfs_mount(&cwd, target);
+    } else {
+        result = -ENODEV;
+    }
+    vfs_path_release(&cwd);
+    return (uint64_t)(int64_t)result;
+}
+
+/* switch_root(path): the filesystem mounted at `path` becomes "/". The caller's
+ * working directory moves to the new root too; other processes keep whatever
+ * they hold in the old tree. */
+static uint64_t sys_switch_root(uint64_t path_address, uint64_t b, uint64_t c,
+                                struct arch_frame *f) {
+    (void)b; (void)c; (void)f;
+    struct proc *p = my_proc();
+    if (p->euid != 0)
+        return (uint64_t)-EPERM;
+    char path[VFS_PATH_MAX + 1];
+    long n = copy_user_string(p, path_address, path, sizeof(path));
+    if (n < 0)
+        return (uint64_t)n;
+    struct vfs_path cwd, target;
+    if (proc_cwd_snapshot(p, &cwd) < 0)
+        return (uint64_t)-EIO;
+    int result = vfs_lookup_path(&cwd, path, &target);
+    vfs_path_release(&cwd);
+    if (result < 0)
+        return (uint64_t)(int64_t)result;
+    result = vfs_switch_root(&target);
+    vfs_path_release(&target);
+    if (result == 0) {
+        struct vfs_path root;
+        if (vfs_root_path(&root) == 0) {
+            proc_cwd_set(p, &root);
+            vfs_path_release(&root);
+        }
+    }
+    return (uint64_t)(int64_t)result;
+}
+
+
 static const syscall_fn syscall_table[] = {
     [SYS_READ]       = sys_read,
     [SYS_WRITE]      = sys_write,
@@ -3561,6 +3659,8 @@ static const syscall_fn syscall_table[] = {
     [SYS_TIMERFD_SETTIME] = sys_timerfd_settime,
     [SYS_TIMERFD_GETTIME] = sys_timerfd_gettime,
     [SYS_SIGNALFD] = sys_signalfd,
+    [SYS_MOUNT] = sys_mount,
+    [SYS_SWITCH_ROOT] = sys_switch_root,
 };
 
 #define SYSCALL_COUNT (sizeof(syscall_table) / sizeof(syscall_table[0]))

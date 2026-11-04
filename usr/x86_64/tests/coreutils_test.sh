@@ -39,7 +39,7 @@ $G/split -b 1000000 big pt_
 eq "split + cat + cmp"   "same"                "$($G/cat pt_* | cmp - big && echo same)"
 $G/truncate -s 10 big
 eq "truncate"            "10"                  "$($G/stat -c %s big)"
-eq "df lists /mnt"       "/mnt"                "$($G/df -P /mnt | tail -1 | $G/tr -s ' ' | cut -d' ' -f6)"
+eq "df lists the root"    "/dev/vda /"          "$($G/df -P / | tail -1 | $G/tr -s ' ' | cut -d' ' -f1,6)"
 eq "nproc"               "1"                   "$($G/nproc)"
 eq "timeout kills"       "124"                 "$($G/timeout 1 $G/sleep 5 2>/dev/null; echo $?)"
 eq "mktemp"              "yes"                 "$(f=$($G/mktemp) && [ -f "$f" ] && rm -f "$f" && echo yes)"

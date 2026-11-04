@@ -8,7 +8,7 @@
 
 #define VFS_NAME_MAX 255
 #define VFS_PATH_MAX 4096
-#define VFS_MAX_MOUNTS 8
+#define VFS_MAX_MOUNTS 16
 #define VFS_SYMLINK_MAX 40
 #define VFS_GROUP_MAX 16
 
@@ -182,6 +182,8 @@ struct vfs_mount {
     struct vfs_dentry *root;
     struct vfs_path covered;
     int has_covered;
+    int detached;                       /* unreachable since a switch_root */
+    char source[32];                    /* device shown in /proc/mounts ("" = fstype) */
 };
 
 void vfs_node_init(struct vfs_node *node, const struct vfs_node_ops *ops,
@@ -204,7 +206,16 @@ void vfs_init(void);
 int vfs_mount_root(const struct vfs_fs_ops *ops, void *private);
 int vfs_mount_at(const struct vfs_path *cwd, const char *path,
                  const struct vfs_fs_ops *ops, void *private);
+/* Same, recording the backing device name for /proc/mounts. */
+int vfs_mount_at_src(const struct vfs_path *cwd, const char *path,
+                     const struct vfs_fs_ops *ops, void *private, const char *source);
+/* switch_root: make the filesystem mounted at `newroot` (the root dentry of a
+ * mount) the root of the whole tree. The old root and everything mounted on it
+ * become unreachable (processes still holding paths into it keep working). */
+int vfs_switch_root(const struct vfs_path *newroot);
 int vfs_root_path(struct vfs_path *out);
+/* Device name /proc/mounts shows for the root (default "rootfs"). */
+void vfs_set_root_source(const char *source);
 
 /* Mount table, for /proc/mounts. Index 0 is the root. Returns 0, or -ENOENT
  * past the end. `source` names the backing device when known. */

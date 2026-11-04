@@ -18,15 +18,38 @@ and `mkfs.ext2 -d`.
 
 1. OVMF runs `EFI/BOOT/BOOTX64.EFI` (`boot/uefi/loader.c`, a freestanding PE
    app, no gnu-efi dependency).
-2. The loader reads `\extron\kernel.elf` and `\extron\initrd.ext2`, places the
-   kernel's PT_LOAD segments at their physical addresses (`KERNEL_LMA` =
-   64 MiB, see `linker.ld`), builds a multiboot2-shaped info block (MMAP +
-   MODULE tags — the format `pmm.c`/`ramdisk.c` already consume), calls
-   `ExitBootServices` and jumps to `_start` with `rdi` = info block.
+2. The loader reads `\extron\kernel.elf`, the optional `\extron\initrd.ext2` and the
+   optional `\extron\cmdline.txt`, places the kernel's PT_LOAD segments at their physical
+   addresses (`KERNEL_LMA` = 64 MiB, see `linker.ld`), builds a multiboot2-shaped info
+   block (MMAP, MODULE and CMDLINE tags), calls `ExitBootServices` and jumps to
+   `_start` with `rdi` = info block.
 3. `boot.S` builds bootstrap tables (identity 0-4 GiB + kernel at
    `0xFFFFFFFF80000000`), `gdt_early_init`, then `kernel_x86_64_main` →
    the shared `kernel_stage1` → `arch_kernel_jump_to_stage2` → timer/IRQs →
-   shared `kernel_stage2` (VFS, initrd ext2 root, `/bin/sh`).
+   shared `kernel_stage2`.
+4. `kernel_stage2` parses the command line (`kernel/cmdline.c`), probes the disk
+   (`arch_probe_block_devices()` registers `vda` in the block-device registry,
+   `kernel/drivers/blockdev.c`) and picks the root filesystem: the initrd module if
+   there is one, else `root=/dev/<disk>` mounted directly. It mounts `/dev` and `/proc`,
+   then starts `init=` (default: the first of `/sbin/init`, `/init`, `/bin/sh`).
+5. **Normal boot: initramfs, then the disk.** The initramfs (`tools/build_x86_initrd.sh`,
+   8 MB image, a few hundred KB of content) holds only `/init`
+   (`usr/x86_64/initramfs_init.c`, a static program), a BusyBox with libc and
+   `ld.so` for the emergency shell, and empty mount points. `/init` reads `root=` from
+   `/proc/cmdline`, calls `mount("/dev/vda", "/newroot", "ext2")`, then
+   `switch_root("/newroot")`, mounts the new root's own `/proc` and `/dev`, and executes
+   its `/sbin/init` (BusyBox init: `inittab`, `getty`, `login`). If the root cannot be
+   mounted, the initramfs shell starts instead.
+   With `USE_INITRD=0` there is no initramfs and the kernel mounts `root=` itself.
+6. `make check` (the libc-free smoke test) still uses a bare initrd as root with no
+   command line and no disk.
+
+Kernel interface added for this: `mount(2)` (`SYS_MOUNT`, one request structure; ext2 from a
+registered block device, `proc`, `devtmpfs`; root only; a device holds one filesystem at a
+time), `SYS_SWITCH_ROOT` (the mount at a path becomes `/`; the old root and all mounted on
+it are detached and drop out of `/proc/mounts`), `/proc/cmdline` showing the real command
+line, and a `/dev/vda` node (raw byte-offset reads and writes) that appears when a disk is
+found. There is no `umount` yet and no per-process root (`chroot`).
 
 The loader requires kernel + initrd + 2 MiB slack to sit contiguously below
 1 GiB; the PMM bitmap lands in that slack (it goes above the highest of
@@ -100,8 +123,8 @@ built the same way with `patches/busybox/` and `usr/busybox/extron.config`.
 
 ```
 make -f Makefile.x86_64 userland     # = tools/build_x86_userland.sh (needs network once)
-tools/build_x86_initrd.sh            # ext2 root: ld.so, libc.so, BusyBox, tests
-make -f Makefile.x86_64 run          # or: check, check-userland, soak
+make -f Makefile.x86_64 libs python coreutils bash   # optional: libraries, Python, GNU tools, bash
+make -f Makefile.x86_64 run          # builds the root disk and initramfs on first use
 ```
 
 `build_x86_userland.sh` clones the mlibc fork (`MLIBC_REPO`/`MLIBC_REF`, default
@@ -110,8 +133,7 @@ sha256-verifies BusyBox, applies `patches/busybox` + `usr/busybox/extron.config`
 and builds the test programs; everything lands in `build-x86_64/userland/`.
 `tools/x86_64-extron-gcc` is the compiler driver it uses (host GCC + sysroot).
 
-The initrd then has `/lib/ld.so`, `/lib/libc.so`, `/bin/busybox` (`/bin/sh` ->
-busybox) and the mlibc regression programs in `/opt/tests`.
+`tools/build_x86_rootfs.sh` then assembles the root disk (see "Root filesystem layout").
 
 ### Tests
 
@@ -136,8 +158,8 @@ busybox) and the mlibc regression programs in `/opt/tests`.
 
 ## Persistent storage (virtio-blk + ext2)
 
-A raw ext2 image attached to QEMU as a virtio-blk disk is mounted at `/mnt`
-and survives reboots.
+A raw ext2 image attached to QEMU as a virtio-blk disk is the root filesystem
+(`/dev/vda`, `root=/dev/vda`) and survives reboots.
 
 * **Driver** — `kernel/arch/x86_64/virtio_blk.c` (+ `pci.c`): PCI bus walk,
   **legacy** virtio interface (I/O-port BAR0), polled, one request in flight,
@@ -148,16 +170,17 @@ and survives reboots.
   driver detects and reports but does not drive). Modern virtio (capability
   parsing, MMIO BAR, possibly above the 4 GiB identity map) and interrupts are
   future work.
-* **Mounting** — `arch_mount_data_disk()` runs after the root fs and `/dev`
-  are up, creates `/mnt` if needed and mounts the disk if it holds ext2. No
-  disk, or no filesystem on it, is not an error.
+* **Mounting** — the driver only registers the disk (`arch_probe_block_devices()`);
+  the filesystem is mounted as the root by the initramfs (or by the kernel for
+  `USE_INITRD=0`), or elsewhere with `mount(2)`.
 * **Durability** — ext2 writes dirty cached sectors back after each mutating
   operation. `fsync(2)`/`sync(2)`/`reboot(2)` additionally call
   `ext2_sync_all()`, which writes back everything and issues a virtio flush.
   `fsync(-1)` is the kernel's "sync everything" entry point.
-* **Disk image** — `make -f Makefile.x86_64 disk` creates
-  `build-x86_64/disk.img` (64 MiB, `mke2fs -E revision=0 -b 1024`) once;
-  `make run` attaches it automatically. `make disk-clean` removes it.
+* **Disk image** — `build-x86_64/rootfs.img` (512 MB sparse, `mke2fs -E revision=0
+  -b 1024`) is built on first use by `tools/build_x86_rootfs.sh`; `make run` attaches it.
+  `make rootfs` rebuilds the system part and keeps `/root`, `/home` and `/mnt`;
+  `make disk-tests` refreshes only `/opt/tests`; `make disk-clean` removes the image.
 * **Tests** — `make check-persist` writes files (including a 1.4 MB one that
   needs double-indirect blocks), kills QEMU without a clean shutdown, runs
   `e2fsck -fn` on the image from the host, then boots again and verifies the
@@ -217,22 +240,42 @@ limits further means growing the fixed, eagerly mapped stack (`EXEC_USER_STACK_B
   (`timer_sync_rtc`), so it survives a reboot. There is no timezone support: the
   RTC is assumed to hold UTC.
 
+## Root filesystem layout
+
+`tools/build_x86_rootfs.sh` builds `build-x86_64/rootfs.img` like a normal Linux system:
+
+```
+/bin -> usr/bin   /sbin -> usr/sbin   /lib -> usr/lib        (merged /usr)
+/usr/bin      coreutils (one binary, GNU names), bash, BusyBox + its applet links,
+              python3, ldd, memfree, runtests, ...
+/usr/sbin     BusyBox's init, getty, reboot, ...
+/usr/lib      ld.so, libc.so, libncursesw, libreadline, libz, libsqlite3, ... and
+              python3.14/ (standard library, lib-dynload)
+/etc          inittab, init.d/rcS, profile, passwd, group, shadow, fstab, inputrc, ...
+/opt/tests    the regression programs and scripts;  /root /home/user /var /tmp /run
+/dev /proc /sys   mount points;   /mnt   an ordinary empty directory for the user
+```
+
+GNU coreutils and bash take precedence over the BusyBox applet links of the same names
+(the script installs BusyBox's links first, then overwrites those GNU provides).
+Everything on this image was on the initrd or on the old `/mnt` data disk before:
+Python moved from `/mnt/python` to the `/usr` prefix, and no library or tool lives in
+the initramfs any more. `/etc/fstab` documents the layout; nothing parses it yet.
+
 ## Python
 
 `make x86-python` (tools/build_x86_python.sh) cross-builds CPython 3.14.4 against the
-mlibc sysroot and stages a pruned tree in `build-x86_64/python/rootfs/python`
-(about 34 MB with bytecode). `build_x86_disk.sh` copies it to `/python` on the
-data disk (bumping the image to 128 MB) and `make disk-tests` installs it on an
-existing disk the first time; the interpreter is `/mnt/python/bin/python3`, with
-`/bin/python3` and `/usr/bin/python3` symlinks in the initrd. The disk must be
-mounted for `python3` to work.
+mlibc sysroot with prefix `/usr` and stages a pruned tree in
+`build-x86_64/python/rootfs/usr` (about 34 MB with bytecode), which `build_x86_rootfs.sh`
+merges into the root disk: `/usr/bin/python3`, `/usr/lib/python3.14`. Its extension
+modules find their shared libraries in `/usr/lib` like any other program.
 
 * Built: every standard module except those needing outside libraries (zlib, bz2,
   lzma, ssl/hashlib's OpenSSL parts, ctypes/libffi, sqlite3, readline, curses, tkinter,
   uuid, dbm). `_socket` is built, but only AF_UNIX works; `multiprocessing`,
   `asyncio`, `subprocess`, `threading`, `select`/`epoll`, `mmap`, `fcntl` locks and
   `shared_memory` are exercised by `usr/x86_64/tests/python_test.py` (run by
-  `runtests` when the disk carries Python; about 96 checks).
+  `runtests` when Python is installed; 128 checks).
 * AVX is compiled out (`ax_cv_check_cflags__Werror__mavx2=no`): CPython selects its
   256-bit BLAKE2 path from the CPUID bit alone, but this kernel does not enable AVX.
 * Kernel/libc work this needed: futexes keyed by physical address in shared mappings
@@ -256,8 +299,8 @@ open_file` locking reworked first.
 `tools/build_x86_libs.sh` (`make x86-libs`, run automatically by the Python build) builds
 zlib, bzip2, xz (liblzma), zstd, libffi, ncurses (wide, terminal descriptions
 compiled in with `--with-fallbacks`, so no terminfo database is needed), readline and
-sqlite as shared objects in `build-x86_64/extlibs/prefix`. The initrd ships the `.so`
-files in `/lib` (the default ld.so search path); Python's extension modules list them
+sqlite as shared objects in `build-x86_64/extlibs/prefix`. The root disk carries the `.so`
+files in `/usr/lib` (the default ld.so search path, also reachable as `/lib`); Python's extension modules list them
 as DT_NEEDED and mlibc's rtld loads them when the module is imported. With them Python
 gains `zlib`, `gzip`, `bz2`, `lzma`, `compression.zstd`, `ctypes`, `curses`, `readline` and
 `sqlite3` (`tarfile`/`zipfile` compression included). Still absent: `_ssl`/`_hashlib`
@@ -278,8 +321,8 @@ Gotchas found on the way:
 
 `tools/build_x86_coreutils.sh` (`make -f Makefile.x86_64 coreutils`) cross-builds coreutils
 9.12 as one multi-call binary (`--enable-single-binary=symlinks`, no NLS/ACL/xattr/GMP). The
-initrd carries it in `/usr/gnu/bin` (103 applets as symlinks), and a login shell's `PATH`
-lists `/usr/gnu/bin` first. BusyBox stays in `/bin` for init and as a fallback. BusyBox's
+root disk carries it in `/usr/bin` (103 applets as symlinks over BusyBox's links of the same
+names). BusyBox provides everything GNU does not, and init. BusyBox's
 `FEATURE_PREFER_APPLETS`/`SH_STANDALONE`/`SH_NOFORK` are off so its shell honours `PATH`
 (otherwise `ls` would silently run the applet). `/etc/mtab` links to `/proc/mounts` for `df`.
 `usr/x86_64/tests/coreutils_test.sh` (30 checks) calls the GNU tools by full path.
@@ -299,8 +342,8 @@ What porting it needed:
 ## GNU bash
 
 `tools/build_x86_bash.sh` (`make -f Makefile.x86_64 bash`) cross-builds bash 5.3 with its own
-readline and the shared `libncursesw` from `build_x86_libs.sh`; `/bin/bash` goes into the
-initrd and becomes the login shell for root and `user` (`/etc/passwd`, `/etc/shells`).
+readline and the shared `libncursesw` from `build_x86_libs.sh`; `/usr/bin/bash` (`/bin/bash`) goes onto the
+root disk and becomes the login shell for root and `user` (`/etc/passwd`, `/etc/shells`).
 BusyBox `sh` is still `/bin/sh` and runs init and the rc scripts. `/etc/profile` sets
 `PATH`, exports `HOME/USER/LOGNAME/SHELL` (login leaves them to the shell), and for bash
 sets `PS1='\w \$ '` (same shape as BusyBox's `/ # `, which the test harnesses wait for) and

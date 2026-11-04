@@ -1,9 +1,13 @@
 #include <kernel/drivers/pty.h>
 #include <kernel/console.h>
+#include <kernel/cmdline.h>
+#include <kernel/blockdev.h>
+#include <kernel/fs/ext2.h>
 
 /* Architectures with a data-disk driver override this (strong definition).
  * It runs after the root filesystem and /dev are up. */
 __attribute__((weak)) void arch_mount_data_disk(void) {}
+__attribute__((weak)) void arch_probe_block_devices(void) {}
 #include <kernel/panic.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vmm.h>
@@ -137,11 +141,44 @@ void kernel_stage2(uint64_t mb2_addr) {
      * fdt_get_initrd_region() (aarch64-specific) -> a real or synthesized
      * multiboot2 MODULE tag -> tar_init(). */
     vfs_init();
+    cmdline_init(mb2_addr);
+    kprintf("cmdline: %s\n", cmdline_raw()[0] ? cmdline_raw() : "(none)");
+    arch_probe_block_devices();
 
+    /* Root filesystem: an initrd module if the loader passed one (it may carry a
+     * /init that mounts the real root), otherwise root=/dev/<disk> from the
+     * command line, otherwise the platform's own default. */
+    bool root_from_disk = false;
     extern bool try_ramdisk_mount(uint64_t mb2_addr);
     if (!try_ramdisk_mount(mb2_addr)) {
-        extern void emmc_mount_ext2(void);
-        emmc_mount_ext2();
+        char rootdev[32];
+        extern const struct vfs_fs_ops ext2_fs_ops;
+        if (cmdline_get("root", rootdev, sizeof(rootdev))) {
+            struct ext2_block_dev *dev = blockdev_find(rootdev);
+            struct ext2_mount *m = dev ? ext2_mount_create(dev, 0) : NULL;
+            if (!dev)
+                panic("root=%s: no such block device", rootdev);
+            blockdev_claim(dev);
+            if (!m)
+                panic("root=%s: not an ext2 filesystem", rootdev);
+            if (vfs_mount_root(&ext2_fs_ops, m) != 0)
+                panic("root=%s: mounting the root filesystem failed", rootdev);
+            static char root_source[40];
+            {
+                unsigned n = 0;
+                if (rootdev[0] != '/')
+                    for (const char *p = "/dev/"; *p; p++) root_source[n++] = *p;
+                for (const char *p = rootdev; *p && n < sizeof(root_source) - 1; p++)
+                    root_source[n++] = *p;
+                root_source[n] = 0;
+            }
+            vfs_set_root_source(root_source);
+            kprintf("root: ext2 on %s mounted as /\n", rootdev);
+            root_from_disk = true;
+        } else {
+            extern void emmc_mount_ext2(void);
+            emmc_mount_ext2();
+        }
     }
 
     /* Conventional top-level layout. /dev must exist as a plain ramfs
@@ -153,7 +190,8 @@ void kernel_stage2(uint64_t mb2_addr) {
      * runtime is immediately runnable. */
     devfs_init();
     procfs_init();
-    arch_mount_data_disk();
+    if (!root_from_disk)
+        arch_mount_data_disk();      /* legacy: initrd root + data disk at /mnt */
     
 
 
@@ -251,13 +289,24 @@ void kernel_stage2(uint64_t mb2_addr) {
      * writable working tree while retaining initrd files as COW views. */
     /* Prefer a real init (BusyBox init: inittab, getty, login) when the root
      * filesystem has one; otherwise fall back to a bare shell as before. */
+    /* init=<path> on the command line, else the first of /sbin/init, /init,
+     * /bin/sh that exists. */
+    static char init_buf[64];
     const char *init_path = "/bin/sh";
     {
         struct vfs_path root, found;
         if (vfs_root_path(&root) == 0) {
-            if (vfs_lookup_path(&root, "/sbin/init", &found) == 0) {
-                init_path = "/sbin/init";
-                vfs_path_release(&found);
+            static const char *const candidates[] = { "/sbin/init", "/init" };
+            if (cmdline_get("init", init_buf, sizeof(init_buf))) {
+                init_path = init_buf;
+            } else {
+                for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+                    if (vfs_lookup_path(&root, candidates[i], &found) == 0) {
+                        init_path = candidates[i];
+                        vfs_path_release(&found);
+                        break;
+                    }
+                }
             }
             vfs_path_release(&root);
         }

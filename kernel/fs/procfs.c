@@ -16,6 +16,7 @@
 #include <kernel/errno.h>
 #include <kernel/fs/file.h>
 #include <kernel/fs/procfs.h>
+#include <kernel/cmdline.h>
 #include <kernel/fs/vfs.h>
 #include <kernel/klibc/string.h>
 #include <kernel/mm/kheap.h>
@@ -353,7 +354,7 @@ static long gen_file(struct pnode *pn, char *buf, size_t cap) {
         case PK_CPUINFO:     gen_cpuinfo(&o); break;
         case PK_MOUNTS:      gen_mounts(&o); break;
         case PK_FILESYSTEMS: gen_filesystems(&o); break;
-        case PK_CMDLINE:     o_str(&o, "extron\n"); break;
+        case PK_CMDLINE:     o_str(&o, cmdline_raw()); o_nl(&o); break;
         case PK_P_STAT:      gen_pid_stat(&o, p); break;
         case PK_P_STATUS:    gen_pid_status(&o, p); break;
         case PK_P_COMM:      o_str(&o, p->comm); o_nl(&o); break;
@@ -690,6 +691,10 @@ static const struct vfs_fs_ops procfs_fs_ops = {
     .destroy_dentry = procfs_destroy_dentry,
     .revalidate = procfs_revalidate,
 };
+
+int procfs_mount(const struct vfs_path *cwd, const char *path) {
+    return vfs_mount_at_src(cwd, path, &procfs_fs_ops, NULL, "proc");
+}
 
 void procfs_init(void) {
     static struct pnode root_pn;

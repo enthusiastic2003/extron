@@ -65,6 +65,17 @@ static EFI_FILE *open_file(const CHAR16 *path, uint64_t *size) {
     return f;
 }
 
+/* Like open_file(), but a missing file is not an error: returns NULL. */
+static EFI_FILE *try_open_file(const CHAR16 *path, uint64_t *size) {
+    EFI_FILE *f;
+    if (EFI_ERROR(root->Open(root, &f, path, EFI_FILE_MODE_READ, 0))) { *size = 0; return NULL; }
+    EFI_STATUS s = f->SetPosition(f, ~0ULL);
+    if (!EFI_ERROR(s)) s = f->GetPosition(f, size);
+    if (!EFI_ERROR(s)) s = f->SetPosition(f, 0);
+    if (EFI_ERROR(s)) fail(L"cannot size file", s);
+    return f;
+}
+
 static void read_all(EFI_FILE *f, void *dst, uint64_t size) {
     uint8_t *p = dst;
     while (size) {
@@ -129,8 +140,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     hi = (hi + PAGE - 1) & ~(PAGE - 1);
 
     /* ---- initrd ---- */
+    /* The initrd is optional: with none, the kernel mounts root= from a disk. */
     uint64_t isize;
-    EFI_FILE *rf = open_file(L"\\extron\\initrd.ext2", &isize);
+    EFI_FILE *rf = try_open_file(L"\\extron\\initrd.ext2", &isize);
+
+    /* Kernel command line: \extron\cmdline.txt (optional, first line, <= 511 bytes). */
+    static char cmdline[512];
+    uint64_t csize;
+    EFI_FILE *cf = try_open_file(L"\\extron\\cmdline.txt", &csize);
+    if (cf) {
+        if (csize > sizeof(cmdline) - 1) csize = sizeof(cmdline) - 1;
+        read_all(cf, cmdline, csize);
+        cf->Close(cf);
+        cmdline[csize] = 0;
+        for (uint64_t i = 0; i < csize; i++)
+            if (cmdline[i] == '\n' || cmdline[i] == '\r') { cmdline[i] = 0; break; }
+    }
 
     /* kernel image, then [initrd | info | slack] right behind it, one block */
     uint64_t initrd_off = hi;
@@ -163,12 +188,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     }
     uint64_t entry_phys = eh->e_entry - KERNEL_VMA;
 
-    read_all(rf, (void *)initrd_off, isize);
-    rf->Close(rf);
+    if (rf) {
+        read_all(rf, (void *)initrd_off, isize);
+        rf->Close(rf);
+    }
     BS->FreePool(kbuf);
 
     print(L"kernel entry "); print_hex(entry_phys);
-    print(L"  initrd "); print_hex(initrd_off); print(L" +"); print_hex(isize);
+    if (rf) { print(L"  initrd "); print_hex(initrd_off); print(L" +"); print_hex(isize); }
     print(L"\r\nexiting boot services\r\n");
 
     /* ---- graphics: keep the firmware's current GOP mode (no mode switch) ---- */
@@ -231,14 +258,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     uint32_t mmap_aligned = (mmap_size + 7) & ~7u;
 
     uint8_t *mod = mmap_tag + mmap_aligned;
-    put32(mod, MB2_TAG_MODULE);
-    put32(mod + 4, 16 + 7);                    /* header + "initrd\0" */
-    put32(mod + 8, (uint32_t)initrd_off);
-    put32(mod + 12, (uint32_t)(initrd_off + isize));
-    memcpy(mod + 16, "initrd", 7);
-    uint32_t mod_aligned = (16 + 7 + 7) & ~7u;
-
-    uint8_t *tagp = mod + mod_aligned;
+    uint8_t *tagp = mod;
+    if (rf) {
+        put32(mod, MB2_TAG_MODULE);
+        put32(mod + 4, 16 + 7);                    /* header + "initrd\0" */
+        put32(mod + 8, (uint32_t)initrd_off);
+        put32(mod + 12, (uint32_t)(initrd_off + isize));
+        memcpy(mod + 16, "initrd", 7);
+        tagp = mod + ((16 + 7 + 7) & ~7u);
+    }
+    if (cmdline[0]) {
+        uint32_t clen = 0;
+        while (cmdline[clen]) clen++;
+        put32(tagp, 1);                            /* MULTIBOOT_TAG_TYPE_CMDLINE */
+        put32(tagp + 4, 8 + clen + 1);
+        memcpy(tagp + 8, cmdline, clen + 1);
+        tagp += (8 + clen + 1 + 7) & ~7u;
+    }
     if (gfx.ok) {
         /* multiboot2 framebuffer tag (type 8), RGB direct-colour layout */
         put32(tagp, MB2_TAG_FB);

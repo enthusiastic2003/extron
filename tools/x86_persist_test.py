@@ -25,7 +25,7 @@ def check(what, ok):
     if not ok: failures.append(what)
 
 if os.path.exists(DISK): os.remove(DISK)
-subprocess.check_call(["tools/build_x86_disk.sh", DISK, "32"])
+subprocess.check_call(["cp", "--sparse=always", "build-x86_64/rootfs-test.img", DISK])
 
 out = guest("echo persist-marker-4242 > /mnt/marker.txt",
             "cp /bin/busybox /mnt/bb",
@@ -45,10 +45,10 @@ fsck = subprocess.run(["e2fsck", "-fn", DISK], capture_output=True, text=True)
 check("host e2fsck: image is clean", fsck.returncode == 0)
 if fsck.returncode:
     print(fsck.stdout, fsck.stderr)
-dbg = subprocess.run(["debugfs", "-R", "cat /marker.txt", DISK], capture_output=True, text=True)
+dbg = subprocess.run(["debugfs", "-R", "cat /mnt/marker.txt", DISK], capture_output=True, text=True)
 check("host debugfs reads marker.txt", "persist-marker-4242" in dbg.stdout)
-keep = subprocess.run(["debugfs", "-R", "stat /dt/keep", DISK], capture_output=True, text=True)
-check("host sees the shrunk /dt/keep (78853 bytes)", "Size: 78853" in keep.stdout)
+keep = subprocess.run(["debugfs", "-R", "stat /mnt/dt/keep", DISK], capture_output=True, text=True)
+check("host sees the shrunk /mnt/dt/keep (78853 bytes)", "Size: 78853" in keep.stdout)
 
 out = guest("cat /mnt/marker.txt",
             "cat /mnt/dir/n.txt",

@@ -8,6 +8,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/klibc/string.h>
 #include <kernel/errno.h>
+#include <kernel/blockdev.h>
 
 static struct vfs_node console_node;
 static struct vfs_node ptmx_node;
@@ -15,6 +16,7 @@ static struct vfs_node null_node;
 static struct vfs_node zero_node;
 static struct vfs_node fb_node;
 static struct vfs_node input_node;
+static struct vfs_node vda_node;          /* first block device; private = its ext2_block_dev */
 static struct vfs_node root_node;
 static struct vfs_dentry root_dentry;
 
@@ -32,8 +34,14 @@ static struct devfs_entry entries[] = {
     { .name = "zero",    .node = &zero_node },
     { .name = "fb0",     .node = &fb_node },
     { .name = "input",   .node = &input_node },
+    { .name = "vda",     .node = &vda_node },
 };
 #define ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))
+
+/* /dev/vda exists only when a disk was found. */
+static bool entry_present(size_t i) {
+    return entries[i].node != &vda_node || vda_node.private != NULL;
+}
 
 static long console_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
     (void)n; (void)off;
@@ -160,6 +168,54 @@ static const struct vfs_node_ops input_ops = {
     .getattr = device_getattr,
 };
 
+/* Raw access to a block device by byte offset (a bounce buffer per sector). */
+static long blk_rw(struct vfs_node *n, size_t off, void *rbuf, const void *wbuf, size_t count) {
+    struct ext2_block_dev *dev = n->private;
+    if (!dev) return -ENODEV;
+    uint64_t size = dev->sector_count * dev->sector_size;
+    if (off >= size) return 0;
+    if (count > size - off) count = size - off;
+    uint8_t *bounce = kmalloc(dev->sector_size);
+    if (!bounce) return -ENOMEM;
+    size_t done = 0;
+    while (done < count) {
+        uint64_t pos = off + done, lba = pos / dev->sector_size;
+        size_t in = (size_t)(pos % dev->sector_size), chunk = dev->sector_size - in;
+        if (chunk > count - done) chunk = count - done;
+        if (dev->read_sectors(dev, lba, 1, bounce) != 0) { done = done ? done : (size_t)-EIO; break; }
+        if (wbuf) {
+            memcpy(bounce + in, (const uint8_t *)wbuf + done, chunk);
+            if (dev->write_sectors(dev, lba, 1, bounce) != 0) { done = done ? done : (size_t)-EIO; break; }
+        } else {
+            memcpy((uint8_t *)rbuf + done, bounce + in, chunk);
+        }
+        done += chunk;
+    }
+    kfree(bounce);
+    return (long)done;
+}
+static long blk_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
+    return blk_rw(n, off, buf, NULL, count);
+}
+static long blk_write(struct vfs_node *n, size_t off, const void *buf, size_t count) {
+    return blk_rw(n, off, NULL, buf, count);
+}
+static int blk_getattr(struct vfs_node *n, struct vfs_attr *attr) {
+    struct ext2_block_dev *dev = n->private;
+    memset(attr, 0, sizeof(*attr));
+    attr->ino = 7;
+    attr->type = VFS_NODE_DEVICE;
+    attr->mode = 0660;
+    attr->nlink = 1;
+    attr->size = dev ? dev->sector_count * dev->sector_size : 0;
+    return 0;
+}
+static const struct vfs_node_ops blk_ops = {
+    .read = blk_read,
+    .write = blk_write,
+    .getattr = blk_getattr,
+};
+
 static long root_read(struct vfs_node *n, size_t off, void *buf, size_t count) {
     (void)n; (void)off; (void)buf; (void)count;
     return -EISDIR;
@@ -177,13 +233,21 @@ static int root_getattr(struct vfs_node *n, struct vfs_attr *attr) {
 
 static int root_readdir(struct vfs_node *n, size_t index, struct vfs_dirent *entry) {
     (void)n;
-    if (index >= ENTRY_COUNT)
+    /* `index` counts present entries only. */
+    size_t i = 0, seen = 0;
+    for (; i < ENTRY_COUNT; i++) {
+        if (!entry_present(i))
+            continue;
+        if (seen++ == index)
+            break;
+    }
+    if (i >= ENTRY_COUNT)
         return 0;
     struct vfs_attr attr;
-    entries[index].node->ops->getattr(entries[index].node, &attr);
+    entries[i].node->ops->getattr(entries[i].node, &attr);
     entry->ino = attr.ino;
-    entry->type = entries[index].node->type;
-    memcpy(entry->name, entries[index].name, strlen(entries[index].name) + 1);
+    entry->type = entries[i].node->type;
+    memcpy(entry->name, entries[i].name, strlen(entries[i].name) + 1);
     return 1;
 }
 
@@ -224,7 +288,7 @@ static int devfs_lookup_child(struct vfs_mount *mount, struct vfs_dentry *parent
         }
     }
     for (size_t i = 0; i < ENTRY_COUNT; i++)
-        if (strcmp(entries[i].name, name) == 0) {
+        if (entry_present(i) && strcmp(entries[i].name, name) == 0) {
             vfs_dentry_retain(&entries[i].dentry);
             *out = &entries[i].dentry; 
             return 0;
@@ -302,6 +366,12 @@ bool devfs_is_ptmx(struct vfs_node *node) {
     return node == &ptmx_node;
 }
 
+/* Mount the (already initialised) device filesystem somewhere else, e.g. on the
+ * new root's /dev after a switch_root. */
+int devfs_mount(const struct vfs_path *cwd, const char *path) {
+    return vfs_mount_at_src(cwd, path, &devfs_fs_ops, NULL, "devtmpfs");
+}
+
 void devfs_init(void) {
     vfs_node_init(&console_node, &console_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&ptmx_node, &null_ops, NULL, VFS_NODE_DEVICE);
@@ -309,6 +379,7 @@ void devfs_init(void) {
     vfs_node_init(&zero_node, &zero_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&fb_node, &fb_ops, NULL, VFS_NODE_DEVICE);
     vfs_node_init(&input_node, &input_ops, NULL, VFS_NODE_DEVICE);
+    vfs_node_init(&vda_node, &blk_ops, blockdev_find("vda"), VFS_NODE_DEVICE);
     vfs_node_init(&root_node, &root_ops, NULL, VFS_NODE_DIRECTORY);
     vfs_dentry_init(&root_dentry, &root_node, NULL, "", NULL);
     for (size_t i = 0; i < ENTRY_COUNT; i++)

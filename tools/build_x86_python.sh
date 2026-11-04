@@ -1,9 +1,9 @@
 #!/bin/bash
 # Cross-build CPython for Extron (x86-64, mlibc) with the host GCC and the
 # userland sysroot from tools/build_x86_userland.sh. Output:
-#     build-x86_64/python/rootfs/python/   the tree that goes on the data disk
-# (mounted at /mnt, so the interpreter lives at /mnt/python/bin/python3 and its
-# standard library at /mnt/python/lib/python3.14).
+#     build-x86_64/python/rootfs/usr/   merged into the root filesystem by
+# tools/build_x86_rootfs.sh (interpreter /usr/bin/python3, standard library
+# /usr/lib/python3.14, extension modules in /usr/lib/python3.14/lib-dynload).
 #
 # Needs: the userland sysroot, curl, and a host python3 of the SAME minor version
 # (cross builds run the build python to freeze modules and compile bytecode).
@@ -73,7 +73,7 @@ SITE
      LIBSQLITE3_CFLAGS="-I$EXT/include" LIBSQLITE3_LIBS="-lsqlite3" \
      LIBREADLINE_CFLAGS="-I$EXT/include" LIBREADLINE_LIBS="-lreadline -lncursesw" \
         ../src/configure --build=x86_64-pc-linux-gnu --host=x86_64-unknown-linux-gnu \
-        --prefix=/mnt/python --with-build-python="$BUILD_PY" --disable-ipv6 \
+        --prefix=/usr --with-build-python="$BUILD_PY" --disable-ipv6 \
         --without-ensurepip --disable-test-modules --with-readline=readline \
         >"$PYDIR/configure.log" 2>&1) || { tail -20 "$PYDIR/configure.log"; exit 1; }
 fi
@@ -89,8 +89,8 @@ rm -rf "$PYDIR/stage" "$PYDIR/rootfs"
 make -C "$PYDIR/build" install DESTDIR="$PYDIR/stage" "${MAKEARGS[@]}" >"$PYDIR/install.log" 2>&1 \
     || { tail -20 "$PYDIR/install.log"; exit 1; }
 mkdir -p "$PYDIR/rootfs"
-cp -a "$PYDIR/stage/mnt/python" "$PYDIR/rootfs/python"
-P="$PYDIR/rootfs/python"
+cp -a "$PYDIR/stage/usr" "$PYDIR/rootfs/usr"
+P="$PYDIR/rootfs/usr"
 rm -rf "$P/include" "$P/share" "$P/lib/pkgconfig" "$P/lib/libpython$MM.a" "$P/bin/idle3"* "$P/bin/"*-config
 (cd "$P/lib/python$MM" && rm -rf config-"$MM"* idlelib turtledemo tkinter ensurepip test)
 find "$P/lib" -type d \( -name test -o -name tests \) -prune -exec rm -rf {} +

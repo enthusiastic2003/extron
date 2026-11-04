@@ -52,14 +52,22 @@ QEMU      ?= qemu-system-x86_64
 QEMU_MEM  ?= 512M
 QEMU_DISPLAY ?= none
 
-# Persistent data disk: a raw ext2 image attached as a legacy virtio-blk
-# device, mounted by the kernel at /mnt. Created on first use, never
-# overwritten (use `make disk-clean` to start over).
-DISK      ?= $(BUILD)/disk.img
-DISK_MB   ?= 64
+# Root disk: a raw ext2 image attached as a legacy virtio-blk device (/dev/vda);
+# the kernel boots from it (root=/dev/vda on the command line the ESP carries).
+# Created on first use, never overwritten (`make rootfs` rebuilds the system part
+# and keeps /root, /home and /mnt; `make disk-clean` starts over).
+DISK      ?= $(BUILD)/rootfs.img
+DISK_MB   ?= 512
 DISK_QEMU  = -drive if=none,id=data0,format=raw,file=$(DISK) \
              -device virtio-blk-pci,drive=data0,disable-modern=on
 DISK_ARGS  = $(if $(wildcard $(DISK)),$(DISK_QEMU))
+
+# What the ESP carries. Default: a tiny initramfs whose /init mounts root=/dev/vda
+# and switches to it (USE_INITRD=0: no initramfs, the kernel mounts root= itself).
+# `make check` (the libc-free smoke test) uses an initrd as root, no command line.
+USE_INITRD ?= 1
+CMDLINE    ?= root=/dev/vda rw
+TEST_DISK  := $(BUILD)/rootfs-test.img
 
 all: $(KERNEL_ELF) $(LOADER) esp
 
@@ -82,11 +90,14 @@ $(LOADER): $(BUILD)/loader.o
 	$(LD) -m i386pep --subsystem 10 -e efi_main --image-base 0x100000 -s -o $@ $<
 
 # FAT ESP tree (QEMU serves it directly with -drive file=fat:rw:...).
-esp: $(KERNEL_ELF) $(LOADER) $(INITRD)
+esp: $(KERNEL_ELF) $(LOADER) $(if $(filter 1,$(USE_INITRD)),$(INITRD))
 	@mkdir -p $(ESP)/EFI/BOOT $(ESP)/extron
 	cp $(LOADER) $(ESP)/EFI/BOOT/BOOTX64.EFI
 	cp $(KERNEL_ELF) $(ESP)/extron/kernel.elf
-	cp $(INITRD) $(ESP)/extron/initrd.ext2
+	@if [ "$(USE_INITRD)" = 1 ]; then cp $(INITRD) $(ESP)/extron/initrd.ext2; \
+	 else rm -f $(ESP)/extron/initrd.ext2; fi
+	@if [ -n "$(CMDLINE)" ]; then printf '%s\n' "$(CMDLINE)" > $(ESP)/extron/cmdline.txt; \
+	 else rm -f $(ESP)/extron/cmdline.txt; fi
 
 $(BUILD)/OVMF_VARS.fd: $(OVMF_VARS)
 	@mkdir -p $(BUILD)
@@ -99,29 +110,42 @@ QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -cpu max -display $(QEMU_DISPLAY) \
             $(DISK_ARGS) \
             -serial stdio -no-reboot
 
+# The root filesystem image, built on first use from the userland, libraries,
+# coreutils, bash and Python (whichever are built).
 $(DISK):
-	tools/build_x86_disk.sh $@ $(DISK_MB)
+	tools/build_x86_rootfs.sh $@ $(DISK_MB)
 
 disk: $(DISK)
 
-# Refresh the test programs on the existing disk, keeping everything else on it.
+# Rebuild the system part of the root disk (new binaries, libraries, config) and
+# keep the user's /root, /home and /mnt.
+rootfs:
+	KEEP=1 tools/build_x86_rootfs.sh $(DISK) $(DISK_MB)
+
+# Refresh only the test programs on the existing disk, keeping everything else.
 disk-tests: $(DISK)
 	tools/refresh_disk_tests.sh $(DISK)
-
-# Replace /python on the existing disk with the current build (keeps other files).
-disk-python: $(DISK)
-	REFRESH_PYTHON=1 tools/refresh_disk_tests.sh $(DISK)
 
 disk-clean:
 	rm -f $(DISK)
 
+# A pristine copy of the system the check-* targets copy for each boot (they
+# modify their disk; the real one is never touched).
+ROOTFS_INPUTS := $(wildcard $(BUILD)/userland/out/busybox $(BUILD)/userland/out/tests/* \
+                 $(BUILD)/userland/sysroot/usr/lib/libc.so $(BUILD)/coreutils/rootfs/usr/bin/coreutils \
+                 $(BUILD)/bash/rootfs/usr/bin/bash $(BUILD)/python/rootfs/usr/bin/python3.14 \
+                 $(BUILD)/extlibs/prefix/lib/*.so.* usr/x86_64/tests/* usr/hello.txt)
+$(TEST_DISK): $(ROOTFS_INPUTS) tools/build_x86_rootfs.sh
+	tools/build_x86_rootfs.sh $@ 256
+rootfs-test: $(TEST_DISK)
+
 # Boot, write files to the data disk, kill QEMU, boot again, verify them,
 # and fsck the image on the host.
-check-persist: esp
+check-persist: esp $(TEST_DISK)
 	python3 tools/x86_persist_test.py
 
 # Boot through init/getty/login: accounts, permissions, respawn, poweroff.
-check-boot: esp
+check-boot: esp $(TEST_DISK)
 	python3 tools/x86_boot_test.py
 
 # C libraries behind Python's optional modules (zlib, bzip2, xz, zstd, libffi,
@@ -129,7 +153,7 @@ check-boot: esp
 libs:
 	tools/build_x86_libs.sh
 
-# GNU coreutils (multi-call binary in the initrd's /usr/gnu/bin; needs the userland first).
+# GNU coreutils (multi-call binary, installed in /usr/bin; needs the userland first).
 coreutils:
 	tools/build_x86_coreutils.sh
 
@@ -137,25 +161,25 @@ coreutils:
 bash:
 	tools/build_x86_bash.sh
 
-# CPython 3.14 for the data disk (needs the userland first; ~1 minute).
+# CPython 3.14 (installed under /usr; needs the userland first; a few minutes).
 python:
 	tools/build_x86_python.sh
 
 # Hung-disk timeout/recovery and RTC write-back (one boot, ~20 s).
-check-disk: esp
+check-disk: esp $(TEST_DISK)
 	python3 tools/x86_disk_timeout_test.py
 
 # Boot flow AND the full regression suite in one boot (one QEMU, one login).
-check-all: esp
+check-all: esp $(TEST_DISK)
 	python3 tools/x86_boot_test.py --runtests
 
 run: QEMU_DISPLAY = gtk
-run: esp $(BUILD)/OVMF_VARS.fd disk-tests
+run: esp $(BUILD)/OVMF_VARS.fd $(DISK) disk-tests
 	$(QEMU) $(QEMU_ARGS)
 
 # Headless boot under OVMF; passes iff the smoke test reports success.
 check: $(BUILD)/OVMF_VARS.fd
-	@$(MAKE) -f Makefile.x86_64 --no-print-directory INITRD=initrd-check.ext2 AUTOEXIT=1 esp >/dev/null
+	@$(MAKE) -f Makefile.x86_64 --no-print-directory INITRD=initrd-check.ext2 AUTOEXIT=1 USE_INITRD=1 CMDLINE= esp >/dev/null
 	@rm -f $(BUILD)/serial.log
 	@timeout 60 $(QEMU) $(subst -serial stdio,-serial file:$(BUILD)/serial.log,$(QEMU_ARGS)) || true
 	@grep -q 'SMOKE TEST PASSED' $(BUILD)/serial.log \
@@ -163,7 +187,8 @@ check: $(BUILD)/OVMF_VARS.fd
 	    || { echo "x86-64 UEFI boot + smoke test: FAIL (see $(BUILD)/serial.log)"; tail -30 $(BUILD)/serial.log; exit 1; }
 
 # Build the bring-up initrd (freestanding smoke-test payload as /bin/sh).
-$(INITRD): tools/build_x86_initrd.sh usr/x86_64/init.c $(wildcard $(BUILD)/userland/out/busybox)
+$(INITRD): tools/build_x86_initrd.sh usr/x86_64/init.c usr/x86_64/initramfs_init.c \
+           $(wildcard $(BUILD)/userland/out/busybox $(BUILD)/userland/out/initramfs-init)
 	AUTOEXIT=$(AUTOEXIT) tools/build_x86_initrd.sh $@
 
 # Build mlibc + BusyBox + test programs into build-x86_64/userland (network needed).
@@ -171,12 +196,12 @@ userland:
 	tools/build_x86_userland.sh
 
 # Boot the BusyBox image and run the whole mlibc regression suite in the guest.
-check-userland: esp
+check-userland: esp $(TEST_DISK)
 	python3 tools/x86_run_tests.py -n 1
 
 # Repeat the suite N times (default 10) to shake out races, leaks and hangs.
 SOAK ?= 10
-soak: esp
+soak: esp $(TEST_DISK)
 	python3 tools/x86_run_tests.py -n $(SOAK) --log $(BUILD)/soak.log
 
 # compile_commands.json for IDE navigation (IntelliJ/CLion, clangd).
@@ -186,5 +211,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-python disk-clean check-persist libs python coreutils bash check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash check-boot check-disk check-all
 -include $(DEPS)

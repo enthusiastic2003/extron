@@ -14,7 +14,7 @@ tmp = tempfile.mkdtemp()
 vars_ = os.path.join(tmp, "vars.fd")
 open(vars_, "wb").write(open("/usr/share/OVMF/OVMF_VARS_4M.fd", "rb").read())
 disk = os.path.join(tmp, "disk.img")
-subprocess.check_call(["tools/build_x86_disk.sh", disk, "32"])
+subprocess.check_call(["cp", "--sparse=always", "build-x86_64/rootfs-test.img", disk])
 q = subprocess.Popen(["qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-cpu", "max", "-display", "none",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive", f"if=pflash,format=raw,unit=1,file={vars_}",
@@ -138,7 +138,7 @@ check("root logs in again", login("root", have_prompt=True))
 
 if RUN_TESTS:
     # The whole regression suite, in this same boot (init + getty + login are
-    # up and the data disk is mounted at /mnt).
+    # up and the root disk is mounted).
     run("cd /")
     before = run("memfree")
     mark = len(buf)
@@ -166,7 +166,7 @@ while q.poll() is None and time.time() - t0 < 30:
     time.sleep(0.05)
 check("poweroff makes QEMU exit", q.poll() is not None)
 if q.poll() is None: q.kill()
-data = subprocess.run(["debugfs", "-R", "cat /boot-test-marker", disk],
+data = subprocess.run(["debugfs", "-R", "cat /mnt/boot-test-marker", disk],
                       capture_output=True, text=True).stdout
 check("data written before poweroff reached the disk", "survives-poweroff" in data)
 fsck = subprocess.run(["e2fsck", "-fn", disk], capture_output=True, text=True)
