@@ -91,7 +91,8 @@ _Static_assert(offsetof(struct ext2_disk_inode, i_blocks) == 28, "");
  * reads (superblock, inodes).
  */
 
-static int ext2_sec_cache_get(struct ext2_mount *m, uint64_t lba, int *idx)
+/* `overwrite`: the caller replaces the whole sector, so a miss need not read it. */
+static int ext2_sec_cache_get2(struct ext2_mount *m, uint64_t lba, int *idx, bool overwrite)
 {
     int oldest = 0;
     uint32_t oldest_tick = 0xFFFFFFFF;
@@ -120,13 +121,18 @@ static int ext2_sec_cache_get(struct ext2_mount *m, uint64_t lba, int *idx)
     m->sec_cache[oldest].dirty = false;
     m->sec_cache[oldest].tick = ++m->sec_cache_tick;
     
-    int ret = m->dev->read_sectors(m->dev, lba, 1, m->sec_cache[oldest].data);
+    int ret = overwrite ? 0 : m->dev->read_sectors(m->dev, lba, 1, m->sec_cache[oldest].data);
     if (ret < 0) {
         m->sec_cache[oldest].valid = false;
         return ret;
     }
     *idx = oldest;
     return 0;
+}
+
+static int ext2_sec_cache_get(struct ext2_mount *m, uint64_t lba, int *idx)
+{
+    return ext2_sec_cache_get2(m, lba, idx, false);
 }
 
 /* Wall-clock seconds for inode timestamps (0 before the RTC is read). */
@@ -152,14 +158,77 @@ void ext2_sync_all(void)
     }
 }
 
+/* Write back every dirty cached sector, merging neighbouring sectors into one
+ * device request (one per run instead of one per sector). */
+static uint8_t sync_run_buf[128 * 512];
+
 static void ext2_sync_cache(struct ext2_mount *m)
 {
+    int order[128], n = 0;
+    for (int i = 0; i < 128; i++)
+        if (m->sec_cache[i].valid && m->sec_cache[i].dirty)
+            order[n++] = i;
+    for (int a = 1; a < n; a++) {                 /* insertion sort by LBA */
+        int v = order[a], b = a - 1;
+        while (b >= 0 && m->sec_cache[order[b]].lba > m->sec_cache[v].lba) {
+            order[b + 1] = order[b];
+            b--;
+        }
+        order[b + 1] = v;
+    }
+    for (int a = 0; a < n;) {
+        int e = a + 1;
+        while (e < n && e - a < 128
+               && m->sec_cache[order[e]].lba == m->sec_cache[order[e - 1]].lba + 1)
+            e++;
+        for (int k = a; k < e; k++)
+            memcpy(sync_run_buf + (size_t)(k - a) * 512, m->sec_cache[order[k]].data, 512);
+        m->dev->write_sectors(m->dev, m->sec_cache[order[a]].lba, (size_t)(e - a), sync_run_buf);
+        for (int k = a; k < e; k++)
+            m->sec_cache[order[k]].dirty = false;
+        a = e;
+    }
+}
+
+/* Direct multi-block transfers for file data (bypassing the small sector cache).
+ * `lba` is partition-relative like read_bytes(); dirty cached sectors in the range
+ * are written back first (reads) or dropped (writes replace them entirely). */
+#define EXT2_RUN_MAX 32          /* blocks per transfer: 32 KiB with 1 KiB blocks. Writes
+                                  * zero-fill each fresh block through the 128-sector cache
+                                  * first; 32 blocks (64 sectors) fit, so the zeros are
+                                  * dropped by write_run() instead of evicted to disk. */
+
+static void ext2_cache_range(struct ext2_mount *m, uint64_t lba, uint64_t n, bool drop)
+{
     for (int i = 0; i < 128; i++) {
-        if (m->sec_cache[i].valid && m->sec_cache[i].dirty) {
+        if (!m->sec_cache[i].valid || m->sec_cache[i].lba < lba || m->sec_cache[i].lba >= lba + n)
+            continue;
+        if (drop) {
+            m->sec_cache[i].valid = false;
+            m->sec_cache[i].dirty = false;
+        } else if (m->sec_cache[i].dirty) {
             m->dev->write_sectors(m->dev, m->sec_cache[i].lba, 1, m->sec_cache[i].data);
             m->sec_cache[i].dirty = false;
         }
     }
+}
+
+static int read_run(struct ext2_mount *m, uint32_t block_no, uint32_t nblocks, void *dst)
+{
+    if (m->dev->sector_size != 512) return -ENOSYS;
+    uint64_t lba = m->part_lba + (uint64_t)block_no * m->block_size / 512;
+    uint64_t n = (uint64_t)nblocks * m->block_size / 512;
+    ext2_cache_range(m, lba, n, false);
+    return m->dev->read_sectors(m->dev, lba, (size_t)n, dst) < 0 ? -EIO : 0;
+}
+
+static int write_run(struct ext2_mount *m, uint32_t block_no, uint32_t nblocks, const void *src)
+{
+    if (m->dev->sector_size != 512) return -ENOSYS;
+    uint64_t lba = m->part_lba + (uint64_t)block_no * m->block_size / 512;
+    uint64_t n = (uint64_t)nblocks * m->block_size / 512;
+    ext2_cache_range(m, lba, n, true);
+    return m->dev->write_sectors(m->dev, lba, (size_t)n, src) < 0 ? -EIO : 0;
 }
 
 static int read_bytes(struct ext2_mount *m, uint64_t byte_offset,
@@ -196,9 +265,9 @@ static int write_bytes(struct ext2_mount *m, uint64_t byte_offset,
 
     while (count > 0) {
         int idx;
-        if (ext2_sec_cache_get(m, sec_start, &idx) < 0) return -EIO;
         size_t chunk = ss - sec_off;
         if (chunk > count) chunk = count;
+        if (ext2_sec_cache_get2(m, sec_start, &idx, chunk == ss) < 0) return -EIO;
         memcpy(m->sec_cache[idx].data + sec_off, src, chunk);
         m->sec_cache[idx].dirty = true;
         src += chunk;
@@ -761,6 +830,11 @@ long ext2_write_data(struct ext2_mount *m, struct ext2_inode_info *info,
     size_t total_written = 0;
     bool inode_dirty = false;
 
+    /* An allocated block that did not extend the previous run is remembered so the
+     * next iteration does not allocate (and leak) another one for the same offset. */
+    bool carry_valid = false;
+    uint32_t carry_fb = 0, carry_db = 0;
+
     while (count > 0) {
         uint32_t file_block = off / m->block_size;
         size_t   block_off  = off % m->block_size;
@@ -768,10 +842,44 @@ long ext2_write_data(struct ext2_mount *m, struct ext2_inode_info *info,
         if (chunk > count) chunk = count;
 
         uint32_t disk_block;
-        int ret = inode_bmap_alloc(m, info, file_block, &disk_block, &inode_dirty);
+        int ret;
+        if (carry_valid && carry_fb == file_block) {
+            disk_block = carry_db;
+            carry_valid = false;
+            ret = 0;
+        } else {
+            ret = inode_bmap_alloc(m, info, file_block, &disk_block, &inode_dirty);
+        }
         if (ret < 0) {
             if (total_written > 0) break;
             return ret;
+        }
+
+        /* Whole blocks that land on consecutive disk blocks: one request. */
+        if (block_off == 0 && chunk == m->block_size && count >= 2 * (size_t)m->block_size) {
+            uint32_t run = 1;
+            size_t after = count - chunk;
+            while (run < EXT2_RUN_MAX && after >= m->block_size) {
+                uint32_t nb;
+                if (inode_bmap_alloc(m, info, file_block + run, &nb, &inode_dirty) < 0)
+                    break;
+                if (nb != disk_block + run) {
+                    carry_valid = true; carry_fb = file_block + run; carry_db = nb;
+                    break;
+                }
+                run++;
+                after -= m->block_size;
+            }
+            if (run > 1) {
+                ret = write_run(m, disk_block, run, src);
+                if (ret < 0) {
+                    if (total_written > 0) break;
+                    return ret;
+                }
+                size_t bytes = (size_t)run * m->block_size;
+                src += bytes; off += bytes; count -= bytes; total_written += bytes;
+                continue;
+            }
         }
 
         if (chunk == m->block_size) {
@@ -844,6 +952,29 @@ long ext2_read_data(struct ext2_mount *m, struct ext2_inode_info *info,
         int ret = inode_bmap(m, &info->disk, file_block, &disk_block);
         if (ret < 0)
             return ret;
+
+        /* A run of whole, physically consecutive blocks goes to the device as
+         * one request straight into the caller's buffer. */
+        if (disk_block != 0 && block_off == 0 && chunk == m->block_size) {
+            uint32_t run = 1;
+            size_t after = count - chunk;
+            while (run < EXT2_RUN_MAX && after >= m->block_size) {
+                uint32_t nb;
+                if (inode_bmap(m, &info->disk, file_block + run, &nb) < 0
+                        || nb != disk_block + run)
+                    break;
+                run++;
+                after -= m->block_size;
+            }
+            if (run > 1) {
+                ret = read_run(m, disk_block, run, dst);
+                if (ret < 0)
+                    return ret;
+                size_t bytes = (size_t)run * m->block_size;
+                dst += bytes; off += bytes; count -= bytes; total_read += bytes;
+                continue;
+            }
+        }
 
         if (disk_block == 0) {
             /* Hole in a sparse file — read as zeros. */
