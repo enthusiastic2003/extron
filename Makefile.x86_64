@@ -129,6 +129,10 @@ check-boot: esp
 libs:
 	tools/build_x86_libs.sh
 
+# GNU coreutils (multi-call binary in the initrd's /usr/gnu/bin; needs the userland first).
+coreutils:
+	tools/build_x86_coreutils.sh
+
 # CPython 3.14 for the data disk (needs the userland first; ~1 minute).
 python:
 	tools/build_x86_python.sh
@@ -178,5 +182,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-python disk-clean check-persist libs python check-boot check-disk check-all
+.PHONY: all esp run check clean compdb userland check-userland soak disk disk-tests disk-python disk-clean check-persist libs python coreutils check-boot check-disk check-all
 -include $(DEPS)

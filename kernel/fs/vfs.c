@@ -579,7 +579,11 @@ int vfs_mount_info(size_t index, struct vfs_mount_info *out) {
     struct vfs_mount *m = &mounts[index];
     memset(out, 0, sizeof(*out));
     out->fstype = m->ops && m->ops->fstype ? m->ops->fstype : "unknown";
-    out->source = index == 0 ? "rootfs" : "none";
+    /* Device column of /proc/mounts: the block device for ext2 (the only disk
+     * filesystem, on the first virtio disk), otherwise the filesystem name. */
+    out->source = index == 0 ? "rootfs"
+                : (m->ops && m->ops->fstype && !strcmp(m->ops->fstype, "ext2")) ? "/dev/vda"
+                : out->fstype;
     if (index == 0 || !m->has_covered) {
         out->path[0] = '/';
     } else if (vfs_get_path(&m->covered, out->path, sizeof(out->path)) < 0) {

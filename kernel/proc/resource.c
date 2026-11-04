@@ -26,8 +26,8 @@ void resource_process_init(struct proc *p) {
     }
     p->resource_limits[PROC_RLIMIT_NOFILE].current = PROC_MAX_FDS;
     p->resource_limits[PROC_RLIMIT_NOFILE].maximum = PROC_MAX_FDS;
-    p->resource_limits[PROC_RLIMIT_STACK].current = EXEC_USER_STACK_BYTES;
-    p->resource_limits[PROC_RLIMIT_STACK].maximum = EXEC_USER_STACK_BYTES;
+    p->resource_limits[PROC_RLIMIT_STACK].current = USER_STACK_MAX_BYTES;
+    p->resource_limits[PROC_RLIMIT_STACK].maximum = USER_STACK_MAX_BYTES;
     p->resource_limits[PROC_RLIMIT_CORE].current = 0;
     p->resource_limits[PROC_RLIMIT_CORE].maximum = 0;
     p->cpu_user_ns = 0;

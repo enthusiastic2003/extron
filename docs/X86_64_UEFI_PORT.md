@@ -273,3 +273,25 @@ Gotchas found on the way:
 * libreadline.a does not carry its ncurses dependency: configure needs
   `LIBREADLINE_LIBS="-lreadline -lncursesw"`.
 * Shared-object links get `-lgcc` (128-bit division in `_decimal`).
+
+## GNU coreutils
+
+`tools/build_x86_coreutils.sh` (`make -f Makefile.x86_64 coreutils`) cross-builds coreutils
+9.12 as one multi-call binary (`--enable-single-binary=symlinks`, no NLS/ACL/xattr/GMP). The
+initrd carries it in `/usr/gnu/bin` (103 applets as symlinks), and a login shell's `PATH`
+lists `/usr/gnu/bin` first. BusyBox stays in `/bin` for init and as a fallback. BusyBox's
+`FEATURE_PREFER_APPLETS`/`SH_STANDALONE`/`SH_NOFORK` are off so its shell honours `PATH`
+(otherwise `ls` would silently run the applet). `/etc/mtab` links to `/proc/mounts` for `df`.
+`usr/x86_64/tests/coreutils_test.sh` (30 checks) calls the GNU tools by full path.
+
+What porting it needed:
+* gnulib's `getlocalename_l-unsafe.c` has no branch for mlibc: the script patches in one
+  that reports the C locale.
+* Main-thread stack growth: the stack was a fixed 128 KB; GNU tools probe bigger frames.
+  A not-present user fault just below it now maps zeroed pages down to an 8 MiB cap
+  (`vm_grow_stack`, `RLIMIT_STACK` reports 8 MiB).
+* mlibc: `sys_prctl` (the multi-call binary names itself with `PR_SET_NAME`),
+  `sched_getaffinity` (one CPU), `fwrite` now reports `errno`/`ferror` on write errors
+  (`sort | head` printed a stale ENOSYS), `fstatat(fd, "", AT_EMPTY_PATH)` (`ls -R`),
+  quiet `ENOSYS` for `vmsplice`/`splice`/`timer_create`, no `uselocale`/`fadvise` nags.
+* Not in coreutils proper: `cmp`, `diff`, `find`, `grep`, `sed`, `awk` stay BusyBox's.

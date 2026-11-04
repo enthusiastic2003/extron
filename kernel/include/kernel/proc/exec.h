@@ -42,6 +42,13 @@ long exec_read_head(struct proc *requester, const char *path, void *buf, size_t 
  * from what exec actually constructs. */
 #define EXEC_USER_STACK_BYTES (128UL * 1024UL)
 
+/* ...but the main thread's stack grows on demand (vm_grow_stack) up to this. */
+#if defined(__x86_64__)
+#define USER_STACK_MAX_BYTES (8UL * 1024UL * 1024UL)
+#else
+#define USER_STACK_MAX_BYTES EXEC_USER_STACK_BYTES   /* no growth on this arch yet */
+#endif
+
 /* A fully built, not-yet-installed user address space. execve()'s whole
  * safety argument is that this can be constructed and thrown away
  * without the caller's own address space ever being touched. */

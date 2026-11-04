@@ -53,6 +53,20 @@ static int exec_limit_mode(const char *expected_text) {
         && limit.rlim_cur == expected ? 0 : 90;
 }
 
+#if defined(__x86_64__)
+/* The main stack starts at 128 KiB and grows on a fault just below it. */
+static int touch_stack(int depth) {
+    volatile char frame[64 * 1024];
+    frame[0] = (char)depth; frame[sizeof frame - 1] = (char)depth;
+    return depth ? touch_stack(depth - 1) + frame[0] : frame[sizeof frame - 1];
+}
+
+static void test_stack_growth(void) {
+    check("stack grows on demand past the initial 128 KiB (~2 MiB deep)",
+          touch_stack(32) == 528);
+}
+#endif
+
 static void test_limit_reporting(void) {
     struct rlimit files, stack, core;
     struct rusage invalid_usage;
@@ -61,9 +75,14 @@ static void test_limit_reporting(void) {
           && files.rlim_cur == 32 && files.rlim_max == 32);
     check("sysconf(_SC_OPEN_MAX) matches RLIMIT_NOFILE",
           sysconf(_SC_OPEN_MAX) == (long)files.rlim_cur);
-    check("fixed 128 KiB process stack is reported truthfully",
+#if defined(__x86_64__)
+    const rlim_t stack_limit = 8 * 1024 * 1024;     /* grows on demand */
+#else
+    const rlim_t stack_limit = 128 * 1024;          /* fixed */
+#endif
+    check("process stack limit is reported truthfully",
           getrlimit(RLIMIT_STACK, &stack) == 0
-          && stack.rlim_cur == 128 * 1024 && stack.rlim_max == 128 * 1024);
+          && stack.rlim_cur == stack_limit && stack.rlim_max == stack_limit);
     check("absence of core dumps is reported as a zero limit",
           getrlimit(RLIMIT_CORE, &core) == 0
           && core.rlim_cur == 0 && core.rlim_max == 0);
@@ -229,6 +248,9 @@ int main(int argc, char **argv) {
 
     puts("[resource_test] resource limits and accounting");
     test_limit_reporting();
+#if defined(__x86_64__)
+    test_stack_growth();
+#endif
     test_descriptor_enforcement();
     test_inheritance_and_permissions(argv[0]);
     test_usage_accounting();

@@ -151,7 +151,53 @@ struct vm_space *vm_space_create(phys_addr_t ttbr0) {
     mm->heap_start = USER_HEAP_START;
     mm->heap_end   = USER_HEAP_START + USER_HEAP_SIZE;
     mm->vmas       = NULL;
+    mm->stack_low  = 0;
     return mm;
+}
+
+static void drop_page(struct vm_space *mm, virt_addr_t va) {
+    phys_addr_t phys = virt_to_phys(mm->ttbr0, va);
+    unmap_page(mm->ttbr0, va);
+    if (phys)
+        pmm_free_page((void *)phys);
+}
+
+int vm_grow_stack(struct vm_space *mm, virt_addr_t addr, virt_addr_t sp,
+                  virt_addr_t stack_top, size_t max_bytes) {
+    if (!mm || !mm->stack_low)
+        return -1;
+    virt_addr_t low = mm->stack_low;
+    if (addr >= low || addr < stack_top - max_bytes)
+        return -1;
+    /* Like Linux: an access far below the stack pointer is a wild pointer,
+     * not stack use (frames are probed at or just under SP). */
+    if (addr + 0x10100 < sp)
+        return -1;
+    virt_addr_t new_low = align_down(addr, PAGE_SIZE);
+    size_t npages = (low - new_low) / PAGE_SIZE;
+    for (size_t i = 0; i < npages; i++) {
+        phys_addr_t phys = (phys_addr_t)pmm_alloc_page();
+        if (!phys) {
+            for (size_t j = 0; j < i; j++)
+                drop_page(mm, low - (j + 1) * PAGE_SIZE);
+            return -1;
+        }
+        memset(phys_to_virt_hhdm(phys), 0, PAGE_SIZE);
+        virt_addr_t va = low - (i + 1) * PAGE_SIZE;
+        if (map_page(mm->ttbr0, va, phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER | PAGE_NX) != 0) {
+            pmm_free_page((void *)phys);
+            for (size_t j = 0; j < i; j++)
+                drop_page(mm, low - (j + 1) * PAGE_SIZE);
+            return -1;
+        }
+    }
+    if (vm_insert_region(mm, new_low, low - new_low, true) != 0) {
+        for (size_t j = 0; j < npages; j++)
+            drop_page(mm, low - (j + 1) * PAGE_SIZE);
+        return -1;
+    }
+    mm->stack_low = new_low;
+    return 0;
 }
 
 void vm_space_destroy(struct vm_space *mm) {
@@ -1182,6 +1228,7 @@ struct vm_space *vm_space_clone(struct vm_space *parent) {
     }
     child->heap_start = parent->heap_start;
     child->heap_end   = parent->heap_end;
+    child->stack_low  = parent->stack_low;
 
     irq_spin_lock(&parent->lock);
 

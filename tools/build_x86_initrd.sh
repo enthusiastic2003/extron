@@ -14,6 +14,7 @@ gcc -static -nostdlib -ffreestanding -fno-pic -no-pie -fno-stack-protector \
 # BusyBox ash instead; the smoke test stays available as /bin/smoke.
 cp "$ROOT/bin/smoke" "$ROOT/bin/sh"
 echo "extron x86-64" > "$ROOT/etc/hostname"
+ln -sf /proc/mounts "$ROOT/etc/mtab"
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$ROOT/etc/passwd"
 printf 'root:x:0:\n' > "$ROOT/etc/group"
 # Optional mlibc userland (see docs/X86_64_UEFI_PORT.md): if a built sysroot and
@@ -31,6 +32,14 @@ if [ -f "$UL/sysroot/usr/lib/ld.so" ]; then
             cp -a "$f" "$ROOT/lib/"
             [ -L "$f" ] || strip --strip-unneeded "$ROOT/lib/$(basename "$f")" 2>/dev/null || true
         done
+    fi
+    # GNU coreutils (tools/build_x86_coreutils.sh): one multi-call binary plus
+    # applet symlinks in /usr/gnu/bin, ahead of BusyBox's on a login shell's PATH.
+    CU=build-x86_64/coreutils/rootfs/usr
+    if [ -x "$CU/bin/coreutils" ]; then
+        mkdir -p "$ROOT/usr/gnu" "$ROOT/usr/libexec"
+        cp -a "$CU/bin" "$ROOT/usr/gnu/bin"
+        [ -d "$CU/libexec/coreutils" ] && cp -a "$CU/libexec/coreutils" "$ROOT/usr/libexec/"
     fi
     for f in "$UL"/out/*; do [ -f "$f" ] && install -m 755 "$f" "$ROOT/bin/$(basename "$f")"; done
     # mlibc regression programs (usr/mlibc_tests) live on the data disk
@@ -100,10 +109,11 @@ RC
         printf 'Welcome to Extron.\n\n' > "$ROOT/etc/issue"
         printf '\nExtron OS - a hobby POSIX kernel. Type "poweroff" to shut down.\n\n' > "$ROOT/etc/motd"
         cat > "$ROOT/etc/profile" <<'PF'
-export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/opt/tests
+export PATH=/usr/gnu/bin:/sbin:/usr/sbin:/bin:/usr/bin:/opt/tests
 export PAGER=less
 alias ll='ls -l'
 PF
+        ln -sf /proc/mounts "$ROOT/etc/mtab"
         printf 'root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000:Extron user:/home/user:/bin/sh\n' > "$ROOT/etc/passwd"
         printf 'root:x:0:\nuser:x:1000:\n' > "$ROOT/etc/group"
         # root has no password (development system); `user` has the password "user".

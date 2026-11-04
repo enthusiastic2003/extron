@@ -6,6 +6,9 @@
 #include <kernel/proc/syscall.h>
 #include <kernel/proc/sched.h>
 #include <kernel/proc/resource.h>
+#include <kernel/proc/exec.h>
+#include <kernel/mm/uvm.h>
+#include <arch/vma.h>
 #include <kernel/klibc/string.h>
 #include <stdbool.h>
 
@@ -220,6 +223,14 @@ void exception_dispatch(struct arch_frame *f) {
     struct proc *cur = my_proc();
     struct thread *thread = my_thread();
     if (FRAME_FROM_USER(f) && cur && thread) {
+        /* Not-present fault just below the main stack: grow it (RLIMIT-style
+         * 8 MiB cap), as Linux does, instead of killing the process. */
+        if (f->vector == 14 && !(f->error_code & 1) && cur->mm &&
+            vm_grow_stack(cur->mm, f->cr2, f->rsp, ARCH_USER_STACK_TOP,
+                          USER_STACK_MAX_BYTES) == 0) {
+            resource_account_exception_leave(f);
+            return;
+        }
         int signal = fault_signal(f->vector);
         if (signal_deliver_sync(f, signal)) {
             resource_account_exception_leave(f);

@@ -50,9 +50,16 @@ struct vm_space {
     virt_addr_t  heap_start;
     virt_addr_t  heap_end;   /* exclusive: managed range is [heap_start, heap_end) */
     struct vma   *vmas;      /* allocated regions, sorted; gaps between = free space */
+    virt_addr_t  stack_low;  /* lowest mapped address of the main stack (0 = no growable stack) */
 };
 
 struct vm_space *vm_space_create(phys_addr_t ttbr0);
+
+/* Demand growth of the main thread's stack: a not-present user fault at `addr`
+ * just below the mapped stack (within `max_bytes` of its top and near `sp`)
+ * maps zeroed pages down to it. Returns 0 if the fault was resolved. */
+int vm_grow_stack(struct vm_space *mm, virt_addr_t addr, virt_addr_t sp,
+                  virt_addr_t stack_top, size_t max_bytes);
 
 /* Unmaps and frees everything the process owned, frees the page tables
  * themselves, then the vm_space. Must not run on the address space

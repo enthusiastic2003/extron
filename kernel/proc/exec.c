@@ -461,6 +461,7 @@ static int exec_image_build(struct proc *requester, const char *binary_path,
     if (vm_insert_region(mm, USER_STACK_VA,
                          USER_STACK_PAGES * PAGE_SIZE, true) != 0)
         goto fail;
+    mm->stack_low = USER_STACK_VA;      /* may grow down on demand (vm_grow_stack) */
 
     /* Same "NULL means kernel-initiated boot spawn, resolves as root"
      * convention load_binary_bytes() above already uses. execve()
