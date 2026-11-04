@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bring the regression programs on an EXISTING data disk up to date without
-# touching anything else on it: rewrites /opt/tests and /hello.txt in place.
+# touching anything else on it: rewrites /opt/tests in place (and seeds /hello.txt if missing).
 # (build_x86_disk.sh makes a fresh image; this keeps the user's files.)
 #   refresh_disk_tests.sh DISK
 set -euo pipefail
@@ -23,7 +23,9 @@ isdir() { debugfs -R "stat $1" "$DISK" 2>/dev/null | grep -q "Type: directory"; 
     for f in "$UL"/out/tests/*; do [ -f "$f" ] && put "$f" "opt/tests/$(basename "$f")" 755; done
     for s in usr/x86_64/tests/*.sh usr/x86_64/tests/*.py; do [ -f "$s" ] && put "$s" "opt/tests/$(basename "$s")" 755; done
     put usr/hello.txt opt/tests/hello.txt 644
-    put usr/hello.txt hello.txt 644
+    # /hello.txt is the user's sample file: seed it once, never overwrite edits.
+    debugfs -R "stat hello.txt" "$DISK" 2>/dev/null | grep -q "Type: regular" \
+        || put usr/hello.txt hello.txt 644
 } > "$CMDS"
 debugfs -w -f "$CMDS" "$DISK" >/dev/null 2>&1 || true
 
