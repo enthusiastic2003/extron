@@ -83,6 +83,24 @@ ck "sync"             sync
 ck "kill -0 self"     kill -0 $$
 eq "pipeline rc"      "ok"            "$(true | false; true | true && echo ok)"
 
+# Archives made by the host's tar/zip (fixtures in /opt/tests/data): tar must detect the
+# compression by itself, since most source releases are .tar.xz or .tar.bz2.
+DD=/opt/tests/data
+mkdir ar && cd ar
+two() { cat sample/a.txt sample/sub/b.txt | tr '\n' ' ' | sed 's/ $//'; }
+tar xf $DD/sample.tar.xz;  eq "tar xf autodetects .tar.xz"  "alpha beta" "$(two)"; rm -rf sample
+tar xJf $DD/sample.tar.xz; eq "tar xJf"                     "alpha beta" "$(two)"; rm -rf sample
+tar xf $DD/sample.tar.bz2; eq "tar xf autodetects .tar.bz2" "alpha beta" "$(two)"; rm -rf sample
+tar xjf $DD/sample.tar.bz2; eq "tar xjf"                    "alpha beta" "$(two)"; rm -rf sample
+eq "xzcat | tar t"  "sample/ sample/a.txt sample/sub/ sample/sub/b.txt" \
+   "$(xzcat $DD/sample.tar.xz | tar tf - | sort | tr '\n' ' ' | sed 's/ $//')"
+eq "bzcat | tar t"  "sample/ sample/a.txt sample/sub/ sample/sub/b.txt" \
+   "$(bzcat $DD/sample.tar.bz2 | tar tf - | sort | tr '\n' ' ' | sed 's/ $//')"
+eq "unzip -p"       "alpha"         "$(unzip -p $DD/sample.zip sample/a.txt | tr -d '\n')"
+eq "tar reads old v7 format (no ustar magic)" "alpha" "$(tar xOf $DD/sample-v7.tar sample/a.txt)"
+eq "bzip2 | bzcat round trip" "round-trip" "$(printf round-trip | bzip2 | bzcat)"
+cd ..
+
 cd /; rm -rf "$D"
 ck "rm -rf cleanup"   sh -c "[ ! -e $D ]"
 echo "[applets] done"
