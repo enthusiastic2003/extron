@@ -457,3 +457,46 @@ Not done: IPv6, `ifconfig`/`route`/`netstat` (they need `SIOCGIF*` ioctls and `/
 certificate validation, `AF_PACKET`, forwarding, more than one NIC, modern (non-legacy)
 virtio-net. mlibc's `res_init` is a stub, so BusyBox `nslookup` without a server argument
 prints `(null)` for the server line (the lookup itself works).
+
+## A C toolchain on Extron: make, tcc, ar
+
+`make` (GNU make 4.4.1) and `tcc` (the Tiny C Compiler, a pinned snapshot of its development
+branch) run on Extron, so source code can be downloaded and built on the machine
+(`wget`, `tar`, `./configure`, `make`). `cc` is `tcc`; `ar` is `tcc -ar`; `ranlib` is a no-op
+(`tcc -ar` writes the index). The root disk also carries the development files: the C headers
+(mlibc's plus the Linux UAPI ones, `/usr/include`), `crt1.o` and the link libraries in
+`/usr/lib`, and tcc's own `/usr/lib/tcc` (`libtcc1.a` and its freestanding headers).
+
+* **Build** - `make -f Makefile.x86_64 gnumake tcc` (`tools/build_x86_make.sh`,
+  `tools/build_x86_tcc.sh`), then `make rootfs`. tcc's own `./configure` is not run (it would
+  execute the cross-compiled compiler on the build machine): the script writes the two files it
+  generates, builds the host-side helper with the host compiler, and builds `libtcc1.a` with the
+  cross compiler. The compiler's source, configured for a native rebuild, is installed as
+  `/usr/src/tcc-extron-src.tar.gz`, so the OS can rebuild its own compiler:
+  `tar xzf /usr/src/tcc-extron-src.tar.gz && cd tinycc-* && make tcc libtcc1.a` (about 4 s).
+* **What links to what** - tcc links dynamically against the same `libc.so`/`ld.so` as every
+  other program (the ones gcc built), or statically against `libc.a` with `-static`. Mixing the
+  two compilers is safe because both follow the System V x86-64 ABI; `data/abi.c` proves it by
+  printing identical output when built by gcc+glibc on the host and by tcc on Extron (structs
+  by value of every ABI class, 18-argument calls, varargs built by tcc and read by libc's
+  `vsnprintf`, callbacks from `qsort`, `setjmp`, `long double`, threads with per-thread errno).
+* **Making tcc understand mlibc's headers** (all in the build scripts or in mlibc, none needs
+  libc changes): tcc is told Extron is not Linux (`__extron__` instead of `__linux__`); GCC's
+  predefined type and limit macros (`__UINT8_TYPE__`, `__INTMAX_MAX__`, ...) are generated from
+  GCC's table and added to tcc's predefines, minus the 128-bit and extended-float ones tcc cannot
+  honour; `errno` goes through `__errno_location()` for tcc because its linker cannot import a
+  thread-local variable from a shared library; `__MLIBC_INLINE_DEFINITION` is `static inline`
+  for tcc (it ignores `gnu_inline` and would emit duplicate globals); `endian.h` accepts
+  `__TINYC__`; the linker defines `__ehdr_start` for static programs; mlibc is built with
+  `-fno-gnu-unique` (tcc's linker rejects GCC's `STB_GNU_UNIQUE` C++ template statics in
+  `libc.a`).
+* **Tests** - `toolchain_test.sh` (in `/opt/tests`, so in `check-all`, 16 checks, ~40 s):
+  dynamic and static programs, a multi-file project with `make` and `ar`, the ABI cross-check,
+  the 40-check socket test built by tcc, zlib's `./configure && make && make test` from its
+  tarball, the compiler rebuilding itself and compiling with the result, and all 152 system
+  headers compiling on their own.
+* **Limits** - tcc has no C++, no `_Complex` (`complex.h`), no `__int128`, and only part of
+  GCC's extensions (SIMD, many builtins and attributes), and `lastlog.h` needs a `utmp.h` mlibc
+  lacks. The kernel, mlibc (C++, meson), and larger programs therefore still need the host's GCC:
+  this is native C development and a self-rebuilding compiler, not yet a fully self-hosting
+  system (that needs GCC and binutils).

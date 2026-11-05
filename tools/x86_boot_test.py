@@ -144,9 +144,10 @@ if RUN_TESTS:
     before = run("memfree")
     mark = len(buf)
     send("sh /bin/runtests")
-    done = wait(b"RUNTESTS DONE", 900, mark)
+    done = wait(b"RUNTESTS DONE", int(os.environ.get("SUITE_TIMEOUT", "900")), mark)
     text = buf[mark:].decode(errors="replace").replace("\r", "")
-    check("regression suite finished (no hang)", done)
+    check("regression suite finished (no hang)", done,
+          None if done else "stalled after: " + text.strip()[-1200:])
     fails = re.findall(r"\] [^\n]*\bFAIL\b[^\n]*", text)
     check("no regression test reported FAIL", not fails, "\n".join(fails[:10]))
     check("no test exited non-zero", "[exit status" not in text,

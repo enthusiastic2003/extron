@@ -72,6 +72,26 @@ fi
 # ---- Python ------------------------------------------------------------------
 [ -d build-x86_64/python/rootfs/usr ] && cp -a build-x86_64/python/rootfs/usr/. "$ROOT/usr/"
 
+# ---- GNU make (tools/build_x86_make.sh) ------------------------------------------
+[ -x build-x86_64/make/rootfs/usr/bin/make ] && \
+    install -m 755 build-x86_64/make/rootfs/usr/bin/make "$ROOT/usr/bin/make"
+
+# ---- C compiler: tcc, the C headers and link-time files (tools/build_x86_tcc.sh) ---------
+if [ -x build-x86_64/tcc/rootfs/usr/bin/tcc ]; then
+    cp -a build-x86_64/tcc/rootfs/usr/. "$ROOT/usr/"
+    SR="$UL/sysroot/usr"
+    cp -a "$SR/include" "$ROOT/usr/"                       # mlibc and Linux UAPI headers
+    for f in "$SR"/lib/*; do                               # crt1.o, libc.a, libm.so, ...
+        [ -e "$ROOT/usr/lib/$(basename "$f")" ] || cp -a "$f" "$ROOT/usr/lib/"
+    done
+    # Empty crti.o/crtn.o: tcc always links them, mlibc's crt1.o does all the work.
+    for o in crti crtn; do echo "" | gcc -x c -c -o "$ROOT/usr/lib/$o.o" -; done
+    ln -sf tcc "$ROOT/usr/bin/cc"
+    printf '#!/bin/sh\nexec tcc -ar "$@"\n' > "$ROOT/usr/bin/ar"
+    printf '#!/bin/sh\n# tcc -ar already writes the symbol index\nexit 0\n' > "$ROOT/usr/bin/ranlib"
+    chmod 755 "$ROOT/usr/bin/ar" "$ROOT/usr/bin/ranlib"
+fi
+
 # ---- DOOM (tools/build_x86_doom.sh) ---------------------------------------------
 if [ -x build-x86_64/doom/doom ]; then
     install -m 755 build-x86_64/doom/doom "$ROOT/usr/bin/doom"
@@ -86,6 +106,12 @@ if [ -d "$UL/out/tests" ]; then
     for s in usr/x86_64/tests/*.sh usr/x86_64/tests/*.bash usr/x86_64/tests/*.py; do
         [ -f "$s" ] && install -m 755 "$s" "$ROOT/opt/tests/"
     done
+    # Data for the on-OS toolchain test: an ABI program with the output gcc+glibc gives, the
+    # socket test source, and zlib's tarball (if it was downloaded for the library build).
+    mkdir -p "$ROOT/opt/tests/data"
+    cp usr/x86_64/tests/data/* "$ROOT/opt/tests/data/"
+    cp usr/mlibc_tests/mlibc_net_test.c "$ROOT/opt/tests/data/net_test.c"
+    [ -f build-x86_64/extlibs/dl/zlib-1.3.1.tar.gz ] && cp build-x86_64/extlibs/dl/zlib-1.3.1.tar.gz "$ROOT/opt/tests/data/"
     cat > "$ROOT/usr/bin/runtests" <<'RT'
 #!/bin/sh
 # Run every program in /opt/tests, report per-test status.

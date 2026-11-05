@@ -1,0 +1,20 @@
+-- structs by value
+3 x | 21 42 | 6.00 7 | 1.5 2.5 3.5 | 0.50 9 2.25 | big-struct 11
+sum=238
+-- many args
+96.000
+1.0000 0.3333
+-- varargs, built here and read by libc
+46.50
+103 [-5 str 3.250000 123456789012 z  2.50 ff 4000000000 1.500000 1 2 3 4 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0]
+-- callbacks from libc into this code
+0123456789 found=7
+-- setjmp/longjmp, errno, strto*
+longjmp value 42
+strtol 9223372036854775807 errno=1
+strtod 3.141593 strtold 2.718282
+-- threads, per-thread errno
+thread result 105, main errno still 0
+union 3ff0000000000000
+sizeof 8 16 16 12 16 44 16
+ABI OK
