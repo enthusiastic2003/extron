@@ -500,3 +500,25 @@ branch) run on Extron, so source code can be downloaded and built on the machine
   lacks. The kernel, mlibc (C++, meson), and larger programs therefore still need the host's GCC:
   this is native C development and a self-rebuilding compiler, not yet a fully self-hosting
   system (that needs GCC and binutils).
+
+## Known intermittent test failures
+
+Seen once each on 2026-11-05, never reproduced in isolation, cause not found. If either
+happens again, treat it as a real bug to chase, not noise.
+
+1. **`check-all`: the regression suite stalls.** The suite never printed `RUNTESTS DONE`
+   (the boot test waits 900 s), after which the guest stopped answering, so five checks failed
+   together (suite finished, memory after the suite, poweroff, data reached the disk, host
+   `e2fsck`). Which test stalled is unknown. Four later full runs and a standalone run passed.
+   When it recurs: run `SUITE_TIMEOUT=360 make -f Makefile.x86_64 check-all`; on a stall the boot
+   test prints `stalled after:` followed by the last output, which names the test.
+2. **`applets_test.sh`: `pipeline rc`.** `$(true | false; true | true && echo ok)` returned
+   nothing once, in the third of three consecutive `check-all` runs. 800 isolated iterations
+   (400 under BusyBox `sh`, 400 under bash) all passed.
+
+Both appeared only after the mlibc changes made for the tcc port (stdio flush at exit, header
+changes, the `-fno-gnu-unique` rebuild) and the addition of `toolchain_test.sh`; before that
+the suite had passed five or more runs in a row. Suspects, unproven: a rare timing race in
+fork/pipe/wait, or the stdio exit-flush change (mlibc commit `916856a8`). A bisect means
+reverting that commit, rebuilding the userland and repeating full runs (the rate is low, so
+many runs are needed).
