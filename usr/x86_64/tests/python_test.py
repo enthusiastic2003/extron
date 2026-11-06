@@ -416,7 +416,11 @@ def t_curses_readline():
     os.environ["TERM"] = "xterm"
     curses.setupterm("xterm", 1)
     check("curses.setupterm with a built-in terminal description", curses.tigetstr("clear") is not None)
-    check("curses: tigetnum cols/lines", curses.tigetnum("cols") == 80)
+    try:                                    # ncurses reports the real terminal width (the kernel
+        want = os.get_terminal_size(1).columns   # console tty reports its text grid), else 80
+    except OSError:
+        want = 80
+    check("curses: tigetnum cols/lines", curses.tigetnum("cols") == want)
     check("curses: tparm / cursor addressing", curses.tparm(curses.tigetstr("cup"), 2, 3) == b"\x1b[3;4H")
     import readline
     readline.add_history("print(1)")

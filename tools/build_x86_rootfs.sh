@@ -38,6 +38,62 @@ if [ -d "$EXTL" ]; then
     done
 fi
 
+# Development files for those libraries (headers, libfoo.so / libfoo.a, pkg-config, *-config),
+# so source built on the OS can link against them. Build-host prefixes are rewritten to /usr.
+EXTP="$REPO/build-x86_64/extlibs/prefix"
+if [ -d "$EXTP/include" ]; then
+    cp -a "$EXTP"/include/. "$ROOT/usr/include/"
+    for f in "$EXTP"/lib/*.a "$EXTP"/lib/*.so; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        cp -a "$f" "$ROOT/usr/lib/"
+    done
+    # Non-wide names resolve to the wide library (ncurses is built wide only).
+    for n in ncurses panel menu form; do
+        [ -e "$EXTP/lib/lib${n}w.so" ] && ln -sf lib${n}w.so "$ROOT/usr/lib/lib$n.so"
+    done
+    mkdir -p "$ROOT/usr/lib/pkgconfig"
+    for f in "$EXTP"/lib/pkgconfig/*.pc; do
+        [ -e "$f" ] && sed "s|$EXTP|/usr|g" "$f" > "$ROOT/usr/lib/pkgconfig/$(basename "$f")"
+    done
+    for f in "$EXTP"/bin/*-config; do
+        [ -e "$f" ] && sed "s|$EXTP|/usr|g" "$f" > "$ROOT/usr/bin/$(basename "$f")" \
+            && chmod 755 "$ROOT/usr/bin/$(basename "$f")"
+    done
+fi
+
+# OpenSSL: the command, its config, and the CA bundle (copied from the build host's
+# Mozilla-derived bundle; /etc/ssl is the --openssldir the library was built with).
+OSSL="$REPO/build-x86_64/extlibs/work/openssl"
+if [ -x "$OSSL/apps/openssl" ]; then
+    install -m 755 "$OSSL/apps/openssl" "$ROOT/usr/bin/openssl"
+    strip --strip-unneeded "$ROOT/usr/bin/openssl" 2>/dev/null || true
+    mkdir -p "$ROOT/etc/ssl/certs" "$ROOT/etc/ssl/private"
+    install -m 644 "$OSSL/apps/openssl.cnf" "$ROOT/etc/ssl/openssl.cnf"
+    chmod 700 "$ROOT/etc/ssl/private"
+    if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+        install -m 644 /etc/ssl/certs/ca-certificates.crt "$ROOT/etc/ssl/certs/ca-certificates.crt"
+        ln -sf certs/ca-certificates.crt "$ROOT/etc/ssl/cert.pem"
+    fi
+fi
+
+# OpenSSH (tools/build_x86_openssh.sh): client tools, sshd and its helpers. Password
+# authentication is unavailable (mlibc has no crypt()), so sshd_config is key-only.
+OSSH="$REPO/build-x86_64/openssh/rootfs"
+if [ -x "$OSSH/usr/sbin/sshd" ]; then
+    for d in usr/bin usr/sbin usr/libexec; do
+        mkdir -p "$ROOT/$d"
+        for f in "$OSSH/$d"/*; do
+            install -m 755 "$f" "$ROOT/$d/$(basename "$f")"
+            strip --strip-unneeded "$ROOT/$d/$(basename "$f")" 2>/dev/null || true
+        done
+    done
+    mkdir -p "$ROOT/etc/ssh" "$ROOT/var/empty" "$ROOT/run"
+    chmod 755 "$ROOT/var/empty"
+    install -m 644 "$OSSH/etc/ssh/moduli" "$OSSH/etc/ssh/ssh_config" "$ROOT/etc/ssh/"
+    install -m 644 usr/x86_64/config/sshd_config "$ROOT/etc/ssh/sshd_config"
+    install -m 755 usr/x86_64/config/start-sshd "$ROOT/usr/sbin/start-sshd"
+fi
+
 # ---- BusyBox: init, getty, login and every applet GNU does not replace ------
 for f in "$UL"/out/*; do
     [ -f "$f" ] || continue
@@ -89,7 +145,28 @@ if [ -x build-x86_64/tcc/rootfs/usr/bin/tcc ]; then
     ln -sf tcc "$ROOT/usr/bin/cc"
     printf '#!/bin/sh\nexec tcc -ar "$@"\n' > "$ROOT/usr/bin/ar"
     printf '#!/bin/sh\n# tcc -ar already writes the symbol index\nexit 0\n' > "$ROOT/usr/bin/ranlib"
-    chmod 755 "$ROOT/usr/bin/ar" "$ROOT/usr/bin/ranlib"
+    # ld: configure scripts (libtool) insist on finding one. tcc is the linker; this wrapper
+    # answers the version probes and forwards real link lines (dropping -m <emulation>).
+    cat > "$ROOT/usr/bin/ld" <<'LDEOF'
+#!/bin/sh
+# Minimal ld on top of tcc (no GNU binutils on Extron).
+for a in "$@"; do
+    case $a in
+        -v|-V|--version) echo "ld (tcc linker wrapper) 0.9.28"; exit 0;;
+    esac
+done
+args=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -m) shift;;                       # -m elf_x86_64
+        -m*) ;;
+        *) args="$args '$1'";;
+    esac
+    shift
+done
+eval exec tcc -nostdlib "$args"
+LDEOF
+    chmod 755 "$ROOT/usr/bin/ar" "$ROOT/usr/bin/ranlib" "$ROOT/usr/bin/ld"
 fi
 
 # ---- DOOM (tools/build_x86_doom.sh) ---------------------------------------------
@@ -144,6 +221,12 @@ fi
 
 # ---- configuration ------------------------------------------------------------
 echo "extron" > "$ROOT/etc/hostname"
+# Autotools: config.guess/config.sub that recognise Extron (tarballs ship older copies);
+# `update-config [dir]` copies them over a source tree's.
+mkdir -p "$ROOT/usr/share/misc"
+install -m 644 usr/x86_64/config/config.guess usr/x86_64/config/config.sub "$ROOT/usr/share/misc/"
+install -m 755 usr/x86_64/config/update-config "$ROOT/usr/bin/update-config"
+
 # Name resolution (mlibc's resolver): /etc/resolv.conf is the kernel's live view of what
 # DHCP learned (/proc/net/resolv.conf); the service and protocol tables are static.
 printf '127.0.0.1\tlocalhost extron\n' > "$ROOT/etc/hosts"
@@ -210,11 +293,11 @@ printf 'set enable-bracketed-paste off\n' > "$ROOT/etc/inputrc"
 printf '/dev/vda / ext2 rw 0 1\nproc /proc proc defaults 0 0\ndevtmpfs /dev devtmpfs defaults 0 0\n' > "$ROOT/etc/fstab"
 ln -sf /proc/mounts "$ROOT/etc/mtab"
 LOGIN_SH=/bin/sh; [ "$HAVE_BASH" = 1 ] && LOGIN_SH=/bin/bash
-printf 'root:x:0:0:root:/root:%s\nuser:x:1000:1000:Extron user:/home/user:%s\n' "$LOGIN_SH" "$LOGIN_SH" > "$ROOT/etc/passwd"
-printf 'root:x:0:\nuser:x:1000:\n' > "$ROOT/etc/group"
+printf 'root:x:0:0:root:/root:%s\nuser:x:1000:1000:Extron user:/home/user:%s\nsshd:x:74:74:sshd privilege separation:/var/empty:/bin/false\n' "$LOGIN_SH" "$LOGIN_SH" > "$ROOT/etc/passwd"
+printf 'root:x:0:\nuser:x:1000:\nsshd:x:74:\n' > "$ROOT/etc/group"
 # root has no password (development system); `user` has the password "user".
 USERHASH=$(openssl passwd -1 user 2>/dev/null || echo '*')
-printf 'root::19000:0:99999:7:::\nuser:%s:19000:0:99999:7:::\n' "$USERHASH" > "$ROOT/etc/shadow"
+printf 'root::19000:0:99999:7:::\nuser:%s:19000:0:99999:7:::\nsshd:*:19000:0:99999:7:::\n' "$USERHASH" > "$ROOT/etc/shadow"
 chmod 600 "$ROOT/etc/shadow"
 
 # ---- keep the user's files across a rebuild ------------------------------------

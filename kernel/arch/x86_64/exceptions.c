@@ -264,6 +264,14 @@ void exception_dispatch(struct arch_frame *f) {
                 kprintf(" %02x", ((const uint8_t *)f->rip)[i]);
             kprintf("\n");
         }
+        /* A few words from the top of the user stack (never crossing a page): return addresses
+         * to match against the program's and libraries' symbols. */
+        if (f->rsp >= 0x1000 && f->rsp < 0x00007FFFFFFFF000ULL - 64 && (f->rsp & 0xFFF) <= 0xFB8) {
+            kprintf("stack @RSP:");
+            for (int i = 0; i < 8; i++)
+                kprintf(" %lx", (unsigned long)((const uint64_t *)f->rsp)[i]);
+            kprintf("\n");
+        }
         proc_exit_current(-signal);
     }
 

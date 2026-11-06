@@ -131,6 +131,9 @@ struct vfs_node *pty_allocate_master(void) {
         if (!ptys[i].allocated) {
             ptys[i].allocated = true;
             ptys[i].slave_tty->termios = tty_table[0].termios; 
+            ptys[i].slave_tty->dev_mode = 0620;      /* crw--w---- root:root until chown/chmod */
+            ptys[i].slave_tty->dev_uid = 0;
+            ptys[i].slave_tty->dev_gid = 0;
             tty_flush_input(ptys[i].slave_tty);
             ptys[i].master_head = ptys[i].master_tail = 0;
             return &ptys[i].master_node;

@@ -166,6 +166,35 @@ static const struct vfs_node_ops console_ops = {
     .getattr = device_getattr,
 };
 
+/* /dev/ptsN: owner and mode live in the tty, so chown/chmod (what sshd and login do to the
+ * terminal they hand to a user) work and show up in stat(). */
+static int pts_getattr(struct vfs_node *n, struct vfs_attr *attr) {
+    struct tty *t = n->private;
+    memset(attr, 0, sizeof(*attr));
+    attr->ino = 100 + (uint64_t)(t - tty_table);
+    attr->type = VFS_NODE_DEVICE;
+    attr->mode = t->dev_mode;
+    attr->uid = t->dev_uid;
+    attr->gid = t->dev_gid;
+    attr->nlink = 1;
+    return 0;
+}
+
+static int pts_setattr(struct vfs_node *n, const struct vfs_setattr *a) {
+    struct tty *t = n->private;
+    if (a->valid & VFS_SET_MODE) t->dev_mode = a->mode & 07777;
+    if (a->valid & VFS_SET_UID)  t->dev_uid = a->uid;
+    if (a->valid & VFS_SET_GID)  t->dev_gid = a->gid;
+    return 0;
+}
+
+static const struct vfs_node_ops pts_ops = {
+    .read = console_read,
+    .write = console_write,
+    .getattr = pts_getattr,
+    .setattr = pts_setattr,
+};
+
 static const struct vfs_node_ops null_ops = {
     .read = null_read,
     .write = null_write,
@@ -306,7 +335,7 @@ static int devfs_lookup_child(struct vfs_mount *mount, struct vfs_dentry *parent
             struct tty *slave = pty_get_slave(index);
             if (slave) {
                 struct vfs_node *pts_node = kmalloc(sizeof(struct vfs_node));
-                vfs_node_init(pts_node, &console_ops, slave, VFS_NODE_DEVICE);
+                vfs_node_init(pts_node, &pts_ops, slave, VFS_NODE_DEVICE);
                 struct vfs_dentry *pts_dentry = kmalloc(sizeof(struct vfs_dentry));
                 vfs_dentry_init(pts_dentry, pts_node, parent, name, NULL);
                 *out = pts_dentry;
@@ -384,7 +413,7 @@ static const struct vfs_fs_ops devfs_fs_ops = {
 
 struct tty *devfs_get_tty(struct vfs_node *node) {
     if (node == &console_node) return &tty_table[0];
-    if (node->ops == &console_ops && node != &console_node) {
+    if ((node->ops == &console_ops && node != &console_node) || node->ops == &pts_ops) {
         return (struct tty *)node->private;
     }
     return NULL;

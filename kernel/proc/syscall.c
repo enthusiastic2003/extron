@@ -1204,6 +1204,50 @@ static long load_iov(struct proc *p, const struct user_msghdr *h, struct sock_io
     return (long)h->iovlen;
 }
 
+/* Control messages use the Linux ABI: struct cmsghdr { size_t len; int level; int type; }
+ * followed by data padded to 8 bytes. Only SOL_SOCKET/SCM_RIGHTS is understood. */
+#define CMSG_SOL_SOCKET 1
+#define CMSG_SCM_RIGHTS 1
+#define CMSG_HDR        16u
+#define CMSG_ALIGN8(n)  (((n) + 7u) & ~7ull)
+#define MSG_CTRUNC_FLAG 0x8
+#define MSG_CMSG_CLOEXEC_FLAG 0x40000000
+
+/* Collect the descriptions named by SCM_RIGHTS messages (references held). Returns the count or a
+ * negative errno; on error nothing is held. */
+static long collect_rights(struct proc *p, uint64_t control, uint64_t controllen,
+                           struct open_file **files) {
+    if (controllen > 4096 || !user_buffer_ok(p, control, controllen))
+        return -EINVAL;
+    uint8_t buf[4096];
+    memcpy(buf, (const void *)control, controllen);
+    int n = 0;
+    uint64_t off = 0;
+    while (off + CMSG_HDR <= controllen) {
+        uint64_t len = *(uint64_t *)(buf + off);
+        int32_t level = *(int32_t *)(buf + off + 8), type = *(int32_t *)(buf + off + 12);
+        if (len < CMSG_HDR || off + len > controllen) { n = -EINVAL; break; }
+        if (level != CMSG_SOL_SOCKET || type != CMSG_SCM_RIGHTS) { n = -EOPNOTSUPP; break; }
+        int count = (int)((len - CMSG_HDR) / 4);
+        if (n + count > SCM_MAX_FDS) { n = -EINVAL; break; }
+        for (int i = 0; i < count; i++) {
+            int fd = *(int32_t *)(buf + off + CMSG_HDR + 4 * (uint64_t)i);
+            struct open_file *f = file_grab(p, fd);
+            if (!f) { n = -EBADF; break; }
+            files[n++] = f;
+        }
+        if (n < 0) break;
+        off += CMSG_ALIGN8(len);
+    }
+    if (n < 0) {
+        /* `files` holds whatever was grabbed before the failure: release it. The count is lost
+         * with the negative return, so track it by re-scanning for non-NULL slots. */
+        for (int i = 0; i < SCM_MAX_FDS; i++)
+            if (files[i]) { file_drop(files[i]); files[i] = NULL; }
+    }
+    return n;
+}
+
 static uint64_t sys_sendmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
                             struct arch_frame *f) {
     (void)f;
@@ -1211,20 +1255,30 @@ static uint64_t sys_sendmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
     if (!user_buffer_ok(p, hdr_addr, sizeof(struct user_msghdr)))
         return (uint64_t)-EFAULT;
     struct user_msghdr h = *(const struct user_msghdr *)hdr_addr;
-    if (h.controllen)
-        return (uint64_t)-EOPNOTSUPP;      /* SCM_RIGHTS/CREDENTIALS: not yet */
+    struct open_file *files[SCM_MAX_FDS] = {0};
+    long nfiles = 0;
+    if (h.controllen) {
+        nfiles = collect_rights(p, h.control, h.controllen, files);
+        if (nfiles < 0)
+            return (uint64_t)nfiles;
+    }
     struct sock_iov iov[SOCK_IOV_MAX];
     long cnt = load_iov(p, &h, iov);
-    if (cnt < 0)
+    if (cnt < 0) {
+        for (long i = 0; i < nfiles; i++) file_drop(files[i]);
         return (uint64_t)cnt;
+    }
     uint8_t name[256];
     if (h.name && h.namelen) {
-        if (h.namelen > sizeof(name) || !user_buffer_ok(p, h.name, h.namelen))
+        if (h.namelen > sizeof(name) || !user_buffer_ok(p, h.name, h.namelen)) {
+            for (long i = 0; i < nfiles; i++) file_drop(files[i]);
             return (uint64_t)-EFAULT;
+        }
         memcpy(name, (const void *)h.name, h.namelen);
     }
     return (uint64_t)sock_sendmsg(p, (int)fd, h.name ? name : NULL,
-                                  h.name ? h.namelen : 0, iov, (int)cnt, (int)flags);
+                                  h.name ? h.namelen : 0, iov, (int)cnt, (int)flags,
+                                  files, (int)nfiles);
 }
 
 static uint64_t sys_recvmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
@@ -1242,10 +1296,16 @@ static uint64_t sys_recvmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
     uint32_t namelen = h.name ? h.namelen : 0;
     if (namelen > sizeof(name)) namelen = sizeof(name);
     int msg_flags = 0;
+    struct open_file *rights[SCM_MAX_FDS] = {0};
+    int nrights = 0;
     long r = sock_recvmsg(p, (int)fd, h.name ? name : NULL, h.name ? &namelen : NULL,
-                          iov, (int)cnt, (int)flags, &msg_flags);
-    if (r < 0)
+                          iov, (int)cnt, (int)flags, &msg_flags,
+                          h.controllen ? rights : NULL, h.controllen ? &nrights : NULL);
+    if (r < 0) {
+        for (int i = 0; i < nrights; i++)      /* taken with data that then could not be copied out */
+            file_drop(rights[i]);
         return (uint64_t)r;
+    }
     /* Re-validate: we may have slept. */
     if (!user_buffer_ok(p, hdr_addr, sizeof(struct user_msghdr)))
         return (uint64_t)-EFAULT;
@@ -1257,7 +1317,33 @@ static uint64_t sys_recvmsg(uint64_t fd, uint64_t hdr_addr, uint64_t flags,
             memcpy((void *)h.name, name, n);
         out->namelen = namelen;
     }
-    out->controllen = 0;
+    /* SCM_RIGHTS: install what fits in the caller's control buffer, close the rest. */
+    uint64_t written = 0;
+    if (nrights) {
+        int fit = h.controllen >= CMSG_HDR + 4 ? (int)((h.controllen - CMSG_HDR) / 4) : 0;
+        if (fit > nrights) fit = nrights;
+        int fds[SCM_MAX_FDS], done = 0;
+        for (int i = 0; i < nrights; i++) {
+            if (i < fit) {
+                int nfd = file_install_description(p, rights[i],
+                                                   (flags & MSG_CMSG_CLOEXEC_FLAG) != 0);
+                if (nfd >= 0) { fds[done++] = nfd; continue; }
+            }
+            file_drop(rights[i]);
+        }
+        if (done < nrights)
+            msg_flags |= MSG_CTRUNC_FLAG;
+        if (done && user_buffer_ok(p, h.control, CMSG_HDR + 4u * (uint64_t)done)) {
+            uint8_t *c = (uint8_t *)h.control;
+            *(uint64_t *)c = CMSG_HDR + 4u * (uint64_t)done;
+            *(int32_t *)(c + 8) = CMSG_SOL_SOCKET;
+            *(int32_t *)(c + 12) = CMSG_SCM_RIGHTS;
+            memcpy(c + CMSG_HDR, fds, 4u * (uint64_t)done);
+            written = CMSG_ALIGN8(CMSG_HDR + 4u * (uint64_t)done);
+            if (written > h.controllen) written = h.controllen;
+        }
+    }
+    out->controllen = written;
     out->flags = msg_flags;
     return (uint64_t)r;
 }

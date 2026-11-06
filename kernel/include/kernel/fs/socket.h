@@ -22,10 +22,17 @@ long sock_accept(struct proc *p, int fd, void *addr, uint32_t *addrlen, int flag
 long sock_connect(struct proc *p, int fd, const void *addr, size_t len);
 long sock_getname(struct proc *p, int fd, void *addr, uint32_t *addrlen, int peer);
 long sock_shutdown(struct proc *p, int fd, int how);
+#define SCM_MAX_FDS 8
+/* sendmsg: `files` (nfiles descriptions, references held by the caller) travel with the first
+ * byte; they are consumed whether or not the call succeeds. recvmsg: up to SCM_MAX_FDS
+ * descriptions come back through files/nfiles (references owned by the caller), or are closed
+ * if files is NULL. */
 long sock_sendmsg(struct proc *p, int fd, const void *name, size_t namelen,
-                  const struct sock_iov *iov, int cnt, int flags);
+                  const struct sock_iov *iov, int cnt, int flags,
+                  struct open_file **files, int nfiles);
 long sock_recvmsg(struct proc *p, int fd, void *name, uint32_t *namelen,
-                  const struct sock_iov *iov, int cnt, int flags, int *msg_flags);
+                  const struct sock_iov *iov, int cnt, int flags, int *msg_flags,
+                  struct open_file **files, int *nfiles);
 long sock_bytes_available(struct usock *s);
 long sock_opt(struct proc *p, int fd, int set, int level, int name, void *val, uint32_t *len);
 

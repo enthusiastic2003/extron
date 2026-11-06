@@ -90,6 +90,16 @@ struct dmsg {
 
 struct kcred { int32_t pid; uint32_t uid, gid; };
 
+/* Descriptors in flight (SCM_RIGHTS) on a stream socket: attached to the stream offset of the
+ * first byte of the sendmsg() that carried them. */
+struct fdq {
+    struct fdq *next;
+    uint64_t off;
+    uint64_t len;                           /* bytes of the sendmsg() that carried them */
+    int n;
+    struct open_file *f[SCM_MAX_FDS];
+};
+
 struct usock {
     int type;
     bool bound, listening, connected;
@@ -104,6 +114,8 @@ struct usock {
     /* stream receive ring */
     uint8_t *buf;
     size_t head, used;
+    uint64_t tx_total, rx_total;      /* stream bytes ever queued / consumed (SCM_RIGHTS offsets) */
+    struct fdq *fq_head, *fq_tail;    /* in-flight descriptors, in stream order */
     /* datagram / seqpacket receive queue */
     struct dmsg *dq_head, *dq_tail;
     size_t dq_count, dq_bytes;
@@ -154,6 +166,18 @@ static void notify(struct usock *s) {
     file_poll_notify();
 }
 
+/* Close every description in a detached fdq list. Never call with sock_lock held: dropping the
+ * last reference to a socket description takes it. */
+static void fdq_drop_list(struct fdq *q) {
+    while (q) {
+        struct fdq *next = q->next;
+        for (int i = 0; i < q->n; i++)
+            file_drop(q->f[i]);
+        kfree(q);
+        q = next;
+    }
+}
+
 static void free_dq(struct usock *s) {
     while (s->dq_head) {
         struct dmsg *m = s->dq_head;
@@ -166,7 +190,7 @@ static void free_dq(struct usock *s) {
 
 /* Detach `s` from the world. Returns the node whose reference the caller
  * must drop after unlocking (or NULL). Caller holds sock_lock. */
-static struct vfs_node *sock_unlink_locked(struct usock *s) {
+static struct vfs_node *sock_unlink_locked(struct usock *s, struct fdq **drop) {
     struct vfs_node *node = s->node;
     s->node = NULL;
     s->bound = false;
@@ -199,6 +223,10 @@ static struct vfs_node *sock_unlink_locked(struct usock *s) {
             if (*pp == c) { *pp = c->all_next; break; }
         if (c->buf) kfree(c->buf);
         free_dq(c);
+        if (c->fq_head) {                   /* in-flight descriptors: closed by the caller */
+            c->fq_tail->next = *drop;
+            *drop = c->fq_head;
+        }
         kfree(c);
     }
     s->nbacklog = 0;
@@ -213,10 +241,17 @@ void sock_release(struct usock *s) {
         kfree(s);
         return;
     }
+    struct fdq *drop = NULL;
     irq_spin_lock(&sock_lock);
-    struct vfs_node *node = sock_unlink_locked(s);
+    struct vfs_node *node = sock_unlink_locked(s, &drop);
     free_dq(s);
+    if (s->fq_head) {
+        s->fq_tail->next = drop;
+        drop = s->fq_head;
+        s->fq_head = s->fq_tail = NULL;
+    }
     irq_spin_unlock(&sock_lock);
+    fdq_drop_list(drop);
     if (node)
         vfs_node_release(node);
     if (s->buf)
@@ -681,20 +716,41 @@ static void sigpipe(struct proc *p, int flags) {
 
 /* ---- sending ---- */
 static long send_stream(struct proc *p, struct usock *s, int oflags,
-                        const struct sock_iov *iov, int cnt, int flags) {
+                        const struct sock_iov *iov, int cnt, int flags,
+                        struct open_file **files, int nfiles) {
     size_t total = iov_total(iov, cnt), sent = 0;
     bool nonblock = (oflags & O_NONBLOCK) || (flags & MSG_DONTWAIT);
+    struct fdq *marker = NULL;
+    long ret = 0;
+    if (nfiles) {
+        if (total == 0 || nfiles > SCM_MAX_FDS) {      /* the descriptors ride on a data byte */
+            for (int i = 0; i < nfiles; i++) file_drop(files[i]);
+            return -EINVAL;
+        }
+        marker = kmalloc(sizeof(*marker));
+        if (!marker) {
+            for (int i = 0; i < nfiles; i++) file_drop(files[i]);
+            return -ENOMEM;
+        }
+        marker->next = NULL;
+        marker->off = 0;
+        marker->len = total;
+        marker->n = nfiles;
+        for (int i = 0; i < nfiles; i++) marker->f[i] = files[i];
+    }
     irq_spin_lock(&sock_lock);
     if (!s->connected) {
         irq_spin_unlock(&sock_lock);
-        return -ENOTCONN;
+        ret = -ENOTCONN;
+        goto out;
     }
     while (sent < total || total == 0) {
         struct usock *d = s->peer;
         if (s->shut_wr || !d || d->shut_rd) {
             irq_spin_unlock(&sock_lock);
             sigpipe(p, flags);
-            return sent ? (long)sent : -EPIPE;
+            ret = sent ? (long)sent : -EPIPE;
+            goto out;
         }
         if (total == 0)
             break;
@@ -702,12 +758,14 @@ static long send_stream(struct proc *p, struct usock *s, int oflags,
         if (!room) {
             if (nonblock) {
                 irq_spin_unlock(&sock_lock);
-                return sent ? (long)sent : -EAGAIN;
+                ret = sent ? (long)sent : -EAGAIN;
+                goto out;
             }
             sleep(&d->space, &sock_lock);
             if (signal_pending_unblocked(my_thread())) {
                 irq_spin_unlock(&sock_lock);
-                return sent ? (long)sent : -4;
+                ret = sent ? (long)sent : -4;
+                goto out;
             }
             continue;
         }
@@ -718,19 +776,33 @@ static long send_stream(struct proc *p, struct usock *s, int oflags,
         long g = gather(p, iov, cnt, sent, tmp, chunk);
         if (g < 0) {
             irq_spin_unlock(&sock_lock);
-            return sent ? (long)sent : g;
+            ret = sent ? (long)sent : g;
+            goto out;
         }
         size_t tail = (d->head + d->used) % STREAM_BUF;
         size_t first = STREAM_BUF - tail;
         if (first > chunk) first = chunk;
         memcpy(d->buf + tail, tmp, first);
         memcpy(d->buf, tmp + first, chunk - first);
+        if (marker) {                       /* descriptors travel with this message's first byte */
+            marker->off = d->tx_total;
+            if (d->fq_tail) d->fq_tail->next = marker; else d->fq_head = marker;
+            d->fq_tail = marker;
+            marker = NULL;
+        }
+        d->tx_total += chunk;
         d->used += chunk;
         sent += chunk;
         notify(d);
     }
     irq_spin_unlock(&sock_lock);
-    return (long)sent;
+    ret = (long)sent;
+out:
+    if (marker) {                           /* never attached: the descriptors die with the error */
+        for (int i = 0; i < marker->n; i++) file_drop(marker->f[i]);
+        kfree(marker);
+    }
+    return ret;
 }
 
 static long send_dgram(struct proc *p, struct usock *s, int oflags,
@@ -829,29 +901,44 @@ static long send_dgram(struct proc *p, struct usock *s, int oflags,
 }
 
 long sock_sendmsg(struct proc *p, int fd, const void *name, size_t namelen,
-                  const struct sock_iov *iov, int cnt, int flags) {
+                  const struct sock_iov *iov, int cnt, int flags,
+                  struct open_file **files, int nfiles) {
     int oflags;
     struct usock *s = fd_sock(p, fd, &oflags);
+    long err = 0;
     if (!s)
-        return -ENOTSOCK;
+        err = -ENOTSOCK;
+    else if (s->inet)
+        err = nfiles ? -EOPNOTSUPP : 0;
+    else if (s->listening)
+        err = -EINVAL;
+    else if (is_stream(s) && name && namelen)
+        err = -EISCONN;
+    else if (!is_stream(s) && nfiles)
+        err = -EOPNOTSUPP;                  /* descriptor passing: stream sockets only */
+    if (err) {
+        for (int i = 0; i < nfiles; i++) file_drop(files[i]);
+        return err;
+    }
     if (s->inet)
         return inet_sock_sendmsg(p, s->inet, oflags, name, namelen, iov, cnt, flags);
-    if (s->listening)
-        return -EINVAL;
-    if (is_stream(s)) {
-        if (name && namelen)
-            return -EISCONN;
-        return send_stream(p, s, oflags, iov, cnt, flags);
-    }
+    if (is_stream(s))
+        return send_stream(p, s, oflags, iov, cnt, flags, files, nfiles);
     return send_dgram(p, s, oflags, name, namelen, iov, cnt, flags);
 }
 
 /* ---- receiving ---- */
 static long recv_stream(struct proc *p, struct usock *s, int oflags,
-                        const struct sock_iov *iov, int cnt, int flags) {
+                        const struct sock_iov *iov, int cnt, int flags,
+                        struct open_file **files, int *nfiles, int *msg_flags) {
     size_t want = iov_total(iov, cnt), got = 0;
+    struct fdq *taken = NULL;               /* delivered/discarded descriptors, freed after unlock */
+    long ret = 0;
     bool nonblock = (oflags & O_NONBLOCK) || (flags & MSG_DONTWAIT);
     bool peek = flags & MSG_PEEK;
+    bool got_fds = false;
+    uint64_t fd_end = 0;                    /* end of the message whose descriptors we delivered */
+    if (nfiles) *nfiles = 0;
     irq_spin_lock(&sock_lock);
     if (!s->connected && !s->peer_gone) {
         irq_spin_unlock(&sock_lock);
@@ -860,13 +947,13 @@ static long recv_stream(struct proc *p, struct usock *s, int oflags,
     for (;;) {
         while (!s->used && !s->peer_gone && !s->peer_shut_wr && !s->shut_rd) {
             if ((got && !(flags & MSG_WAITALL)) || nonblock) {
-                irq_spin_unlock(&sock_lock);
-                return got ? (long)got : -EAGAIN;
+                ret = got ? (long)got : -EAGAIN;
+                goto out;
             }
             sleep(s, &sock_lock);
             if (signal_pending_unblocked(my_thread())) {
-                irq_spin_unlock(&sock_lock);
-                return got ? (long)got : -4;
+                ret = got ? (long)got : -4;
+                goto out;
             }
         }
         if (!s->used || want == 0)
@@ -875,6 +962,33 @@ static long recv_stream(struct proc *p, struct usock *s, int oflags,
         if (n > want - got) n = want - got;
         uint8_t tmp[1024];
         if (n > sizeof(tmp)) n = sizeof(tmp);
+        if (!peek) {
+            /* Descriptors ride on the first byte of the message that carried them: hand them
+             * over with that byte, and never let one read span two such messages. */
+            struct fdq *q = s->fq_head;
+            if (q && q->off <= s->rx_total) {
+                if (got || got_fds)
+                    break;
+                s->fq_head = q->next;
+                if (!s->fq_head) s->fq_tail = NULL;
+                if (files && nfiles) {
+                    for (int i = 0; i < q->n; i++) files[i] = q->f[i];
+                    *nfiles = q->n;
+                    q->n = 0;               /* ownership moved to the caller */
+                } else if (msg_flags) {
+                    *msg_flags |= 0x8;      /* MSG_CTRUNC: nowhere to put them, they are closed */
+                }                           /* (closed with `taken` below) */
+                fd_end = q->off + q->len;
+                q->next = taken;
+                taken = q;
+                got_fds = true;
+                q = s->fq_head;
+            }
+            if (got_fds && fd_end > s->rx_total && fd_end - s->rx_total < n)
+                n = (size_t)(fd_end - s->rx_total);     /* a read ends where that message ends */
+            if (q && q->off > s->rx_total && q->off - s->rx_total < n)
+                n = (size_t)(q->off - s->rx_total);
+        }
         size_t first = STREAM_BUF - s->head;
         if (first > n) first = n;
         memcpy(tmp, s->buf + s->head, first);
@@ -892,23 +1006,29 @@ static long recv_stream(struct proc *p, struct usock *s, int oflags,
         }
         long w = scatter(p, rest, rc, tmp, n);
         if (w < 0) {
-            irq_spin_unlock(&sock_lock);
-            return got ? (long)got : w;
+            ret = got ? (long)got : w;
+            goto out;
         }
         if (!peek) {
             s->head = (s->head + (size_t)w) % STREAM_BUF;
             s->used -= (size_t)w;
+            s->rx_total += (uint64_t)w;
             wakeup(&s->space);
             file_poll_notify();
         }
         got += (size_t)w;
         if (peek || got >= want)
             break;
+        if (got_fds && s->rx_total >= fd_end)
+            break;                          /* finished the message that carried descriptors */
         if (!s->used && !(flags & MSG_WAITALL))
             break;
     }
+    ret = (long)got;
+out:
     irq_spin_unlock(&sock_lock);
-    return (long)got;
+    fdq_drop_list(taken);
+    return ret;
 }
 
 static long recv_dgram(struct proc *p, struct usock *s, int oflags,
@@ -979,8 +1099,10 @@ static long recv_dgram(struct proc *p, struct usock *s, int oflags,
 }
 
 long sock_recvmsg(struct proc *p, int fd, void *name, uint32_t *namelen,
-                  const struct sock_iov *iov, int cnt, int flags, int *msg_flags) {
+                  const struct sock_iov *iov, int cnt, int flags, int *msg_flags,
+                  struct open_file **files, int *nfiles) {
     int oflags;
+    if (nfiles) *nfiles = 0;
     struct usock *s = fd_sock(p, fd, &oflags);
     if (!s)
         return -ENOTSOCK;
@@ -993,7 +1115,7 @@ long sock_recvmsg(struct proc *p, int fd, void *name, uint32_t *namelen,
     if (is_stream(s)) {
         if (namelen)
             *namelen = 0;
-        return recv_stream(p, s, oflags, iov, cnt, flags);
+        return recv_stream(p, s, oflags, iov, cnt, flags, files, nfiles, msg_flags);
     }
     return recv_dgram(p, s, oflags, name, namelen, iov, cnt, flags, msg_flags);
 }
@@ -1005,7 +1127,7 @@ long sock_read(struct open_file *f, void *buffer, size_t count) {
     if (s->inet)
         return inet_sock_recvmsg(p, s->inet, f->flags, NULL, NULL, &iov, 1, 0, NULL);
     if (is_stream(s))
-        return recv_stream(p, s, f->flags, &iov, 1, 0);
+        return recv_stream(p, s, f->flags, &iov, 1, 0, NULL, NULL, NULL);
     return recv_dgram(p, s, f->flags, NULL, NULL, &iov, 1, 0, NULL);
 }
 
@@ -1016,7 +1138,7 @@ long sock_write(struct open_file *f, const void *buffer, size_t count) {
     if (s->inet)
         return inet_sock_sendmsg(p, s->inet, f->flags, NULL, 0, &iov, 1, 0);
     if (is_stream(s))
-        return send_stream(p, s, f->flags, &iov, 1, 0);
+        return send_stream(p, s, f->flags, &iov, 1, 0, NULL, 0);
     return send_dgram(p, s, f->flags, NULL, 0, &iov, 1, 0);
 }
 

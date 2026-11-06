@@ -501,6 +501,68 @@ branch) run on Extron, so source code can be downloaded and built on the machine
   this is native C development and a self-rebuilding compiler, not yet a fully self-hosting
   system (that needs GCC and binutils).
 
+## OpenSSL and OpenSSH
+
+**OpenSSL 3.5.4** (`tools/build_x86_libs.sh openssl`, tarball checked against the project's
+published SHA-256) is cross-built as shared `libssl.so.3` / `libcrypto.so.3` plus the `openssl`
+command, with `--openssldir=/etc/ssl`. The image carries `/etc/ssl/openssl.cnf` and a CA bundle
+copied from the build host (`/etc/ssl/certs/ca-certificates.crt`, `cert.pem` links to it), so
+`openssl s_client` verifies real servers. `-Bsymbolic` is removed from the generated Makefile
+because `ld.so` warns about DT_SYMBOLIC. `usr/x86_64/tests/openssl_test.sh` (26 checks: digest
+vectors, ciphers, ed25519/ECDSA/RSA keys and signatures, a CA and a signed server certificate,
+and a TLS 1.3 handshake with verification over loopback) is part of `/opt/tests`.
+BusyBox `wget` still uses its own TLS without certificate validation.
+
+**OpenSSH 10.6p2** (`tools/build_x86_openssh.sh`) provides `ssh`, `scp`, `sftp`, `ssh-keygen`,
+`ssh-agent` and `sshd`. The tarball hash is not an upstream-published value (OpenSSH only
+PGP-signs): it is what three independent OpenBSD mirrors served. Use:
+
+    start-sshd                      # in the guest; creates the host key on first use
+    ssh -p 2222 root@127.0.0.1      # from the host: `make x86-run` forwards 2222 -> 22
+
+Logins are **public-key only**: mlibc has no `crypt()`, so password authentication cannot work
+(`xcrypt()` is patched to fail and `sshd_config` disables passwords). Put your key in
+`~/.ssh/authorized_keys` (directory 700, file 600). Interactive sessions get a pty
+(`/dev/ptmx` + `/dev/ptsN`), `scp` and `sftp` work, and a 4 MiB file crosses in each direction
+byte-identical in about two seconds.
+
+Deviations from a stock OpenSSH build, all recorded in `tools/build_x86_openssh.sh`:
+
+* **No chroot jail for the pre-authentication child.** The kernel has no per-process root, so
+  `chroot()` is `ENOSYS`; the call is skipped. The child is still dropped to the unprivileged
+  `sshd` user (`setgroups` + `setuid`), but it is not confined to `/var/empty`.
+* **No pre-authentication sandbox** (`--with-sandbox=no`): there is no seccomp, the rlimit sandbox
+  needs `setrlimit` of `RLIMIT_FSIZE`/`NPROC` (the kernel only supports `RLIMIT_NOFILE`, and
+  answers `ENOTSUP` rather than pretend), and its select()-with-rlimit probe cannot run while
+  cross-compiling.
+* `getrrsetbyname()` (DNS host-key lookup) is a stub that fails; mlibc lacks `arpa/nameser.h`.
+* No lastlog/utmp/wtmp/btmp, no PAM.
+
+What it took on the OS side, all general facilities that other software will use:
+
+* **`SCM_RIGHTS` over AF_UNIX stream sockets** (`kernel/fs/socket.c`, `sys_sendmsg` /
+  `sys_recvmsg`): OpenSSH's monitor passes the pty descriptors to the session process. Descriptors
+  ride with the first byte of the `sendmsg()` that carried them; a read never spans two such
+  messages and ends where the carrying message ends; plain `read()` or a missing control buffer
+  closes them (`MSG_CTRUNC` is set when a control buffer is too small or absent); closing the
+  receiving socket closes anything still in flight. Datagram sockets refuse them
+  (`EOPNOTSUPP`). `usr/mlibc_tests/mlibc_scm_rights_test.c` has 27 checks, including across `fork`.
+* **`chown`/`chmod` on `/dev/ptsN`**: owner and mode live in the tty (`kernel/fs/devfs.c`), so
+  `sshd` and `login` can hand a terminal to a user.
+* **`getsockopt(IP_OPTIONS)` returns zero bytes** (it returned four, and sshd drops a connection
+  that claims IP options).
+* mlibc: **`getnameinfo` fills in the service** (it silently skipped it, so every port printed as
+  empty/0), `initgroups` is real, `sys_inet_configured` exists (`getaddrinfo` with
+  `AI_ADDRCONFIG`), `fflush` sets `errno`, and `__progname` / `program_invocation_*` are separate
+  variables set at startup.
+* mlibc **rtld**: an executable that links a *versioned* library (libcrypto) has its
+  copy-relocated data (`stdout`, `__progname`, ...) marked "local" in `.gnu.version`; the loader
+  refused to bind unversioned references to such definitions, which aborted every program that
+  linked libcrypto. Unversioned references now accept them.
+
+The kernel's user-fault report now also prints eight words from the top of the user stack, which
+is enough to match return addresses against a binary when something crashes.
+
 ## Known intermittent test failures
 
 Seen once each on 2026-11-05, never reproduced in isolation, cause not found. If either

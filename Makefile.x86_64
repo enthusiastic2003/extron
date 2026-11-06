@@ -74,7 +74,7 @@ DISK_ARGS  = $(if $(wildcard $(DISK)),$(DISK_QEMU))
 
 # A virtio-net NIC on QEMU's user-mode network: no host setup, DHCP gives the guest 10.0.2.15,
 # the host is 10.0.2.2, DNS 10.0.2.3, and the host's internet is reachable through NAT.
-NET_ARGS  ?= -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-modern=on
+NET_ARGS  ?= -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0,disable-modern=on
 
 # What the ESP carries. Default: a tiny initramfs whose /init mounts root=/dev/vda
 # and switches to it (USE_INITRD=0: no initramfs, the kernel mounts root= itself).

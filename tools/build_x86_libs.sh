@@ -155,7 +155,21 @@ build_sqlite() {
         && ln -sf libsqlite3.so.0.8.6 "$PREFIX/lib/libsqlite3.so.0" && ln -sf libsqlite3.so.0.8.6 "$PREFIX/lib/libsqlite3.so")
 }
 
-for lib in zlib bzip2 xz zstd libffi ncurses readline sqlite; do
+build_openssl() {
+    say "openssl"
+    fetch openssl-3.5.4.tar.gz https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz \
+        967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99 openssl
+    # CA certificates and openssl.cnf are looked up under /etc/ssl on the target.
+    # -Bsymbolic is dropped from the generated Makefile: ld.so warns about DT_SYMBOLIC.
+    (cd "$WORK/openssl" && ./Configure linux-x86_64 shared --prefix="$PREFIX" --openssldir=/etc/ssl --libdir=lib \
+        no-tests no-docs no-afalgeng no-ktls no-async no-secure-memory no-ssl3 no-comp \
+        >"$WORK/openssl.configure.log" 2>&1 \
+        && sed -i 's/ -Wl,-Bsymbolic//' Makefile \
+        && make -j"$JOBS" build_libs apps/openssl >"$WORK/openssl.make.log" 2>&1 \
+        && make install_dev install_runtime_libs >"$WORK/openssl.install.log" 2>&1) || return 1
+}
+
+for lib in zlib bzip2 xz zstd libffi ncurses readline sqlite openssl; do
     if want "$lib"; then
         "build_$lib" && finish "$lib" || { echo "FAILED: $lib (logs in $WORK)" >&2; exit 1; }
     fi

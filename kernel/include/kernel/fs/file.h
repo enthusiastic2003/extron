@@ -52,6 +52,10 @@ int     file_open_at(struct proc *p, const struct vfs_path *base,
                      const char *path, int flags, uint32_t mode);
 int     file_pipe(struct proc *p, int fds[2], int flags);
 int     file_dup(struct proc *p, int oldfd, int minimum, int cloexec);
+/* SCM_RIGHTS: hold a description in flight / install one received / release one. */
+struct open_file *file_grab(struct proc *p, int fd);
+int     file_install_description(struct proc *p, struct open_file *f, int cloexec);
+void    file_drop(struct open_file *f);
 int     file_dup2(struct proc *p, int oldfd, int newfd, int cloexec);
 int     file_get_fd_flags(struct proc *p, int fd);
 int     file_set_fd_flags(struct proc *p, int fd, int flags);

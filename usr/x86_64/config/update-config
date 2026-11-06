@@ -1,0 +1,10 @@
+#!/bin/sh
+# Replace the config.guess/config.sub that a source tarball ships (they predate Extron
+# and fail with "unable to guess system type") by the copies that know "extron".
+# usage: update-config [dir]    (default: current directory, searched recursively)
+dir=${1:-.}
+n=0
+for f in $(find "$dir" -name config.guess -o -name config.sub); do
+    cp /usr/share/misc/$(basename "$f") "$f" && n=$((n + 1))
+done
+echo "update-config: replaced $n file(s) under $dir"

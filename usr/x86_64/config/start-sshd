@@ -1,0 +1,14 @@
+#!/bin/sh
+# Start the SSH server. Generates the host key on first use. Logins are public-key only: put
+# your public key in ~/.ssh/authorized_keys (mode 600, directory mode 700). With the default
+# `make x86-run` network, the host reaches this server at 127.0.0.1 port 2222:
+#     ssh -p 2222 root@127.0.0.1
+[ -f /etc/ssh/ssh_host_ed25519_key ] || {
+    echo "generating the host key..."
+    ssh-keygen -q -t ed25519 -N "" -f /etc/ssh/ssh_host_ed25519_key || exit 1
+}
+mkdir -p /run /var/empty
+if [ -f /run/sshd.pid ] && kill -0 "$(cat /run/sshd.pid)" 2>/dev/null; then
+    echo "sshd already running (pid $(cat /run/sshd.pid))"; exit 0
+fi
+/usr/sbin/sshd -E /var/log/sshd.log && echo "sshd started (log: /var/log/sshd.log)"

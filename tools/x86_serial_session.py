@@ -16,7 +16,9 @@ if os.environ.get("EXTRON_DISK"):
 # EXTRON_NET=1: a virtio-net NIC on QEMU's user-mode network (DHCP 10.0.2.15, DNS
 # 10.0.2.3, the host at 10.0.2.2).
 if os.environ.get("EXTRON_NET"):
-    disk_args += ["-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0,disable-modern=on"]
+    # EXTRON_HOSTFWD=2222:22 forwards that host TCP port to the guest's (QEMU user networking).
+    fwd = ",hostfwd=tcp::%s-:%s" % tuple(os.environ["EXTRON_HOSTFWD"].split(":")) if os.environ.get("EXTRON_HOSTFWD") else ""
+    disk_args += ["-netdev", "user,id=n0" + fwd, "-device", "virtio-net-pci,netdev=n0,disable-modern=on"]
     # EXTRON_PCAP=file: also write everything the NIC sends and receives to a pcap file.
     if os.environ.get("EXTRON_PCAP"):
         disk_args += ["-object", f"filter-dump,id=f0,netdev=n0,file={os.environ['EXTRON_PCAP']}"]
@@ -66,7 +68,15 @@ if first == b"login: ":
     mark = len(buf)
     q.stdin.write(b"cd /\n"); q.stdin.flush()
     ok = pump_any([b"/ # "], 15, mark) is not None
+host_out = []
 for c in args:
+    if c.startswith("@host:"):
+        # A command run on the HOST at this point of the session (e.g. an ssh into the guest through
+        # EXTRON_HOSTFWD); its output is appended to the transcript.
+        r = subprocess.run(c[6:], shell=True, capture_output=True, text=True,
+                           timeout=float(os.environ.get("WAIT", "15")))
+        host_out.append("[host] $ %s\n%s%s[host] rc=%d" % (c[6:], r.stdout, r.stderr, r.returncode))
+        continue
     mark = len(buf)
     data = c.encode().replace(b"^C", b"\x03") + b"\n"
     if os.environ.get("PACE"):
@@ -83,3 +93,5 @@ if os.environ.get("FULL"):
     print(out)
 else:
     print(out[i-1:] if i >= 0 else out[-3000:])
+if host_out:
+    print("\n".join(host_out))

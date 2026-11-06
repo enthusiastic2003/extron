@@ -423,6 +423,28 @@ int file_pipe(struct proc *p, int fds[2], int flags) {
     return 0;
 }
 
+/* Descriptor passing (SCM_RIGHTS): hold an open file description while it is in flight. */
+struct open_file *file_grab(struct proc *p, int fd) {
+    if (!descriptor_ok(p, fd))
+        return NULL;
+    file_retain(p->files[fd]);
+    return p->files[fd];
+}
+
+/* Install a description (consuming the caller's reference on success) at the lowest free fd. */
+int file_install_description(struct proc *p, struct open_file *f, int cloexec) {
+    int fd = free_descriptor_from(p, 0);
+    if (fd < 0)
+        return -EMFILE;
+    p->files[fd] = f;
+    p->fd_flags[fd] = cloexec ? FD_CLOEXEC : 0;
+    return fd;
+}
+
+void file_drop(struct open_file *f) {
+    file_release(f);
+}
+
 int file_dup(struct proc *p, int oldfd, int minimum, int cloexec) {
     if (!descriptor_ok(p, oldfd))
         return -EBADF;

@@ -1128,6 +1128,12 @@ long inet_sock_opt(void *p, int set, int level, int name, void *val, uint32_t *l
         }
     } else if (level == IPPROTO_IP) {
         if (!set) ival = 0;                           /* IP_TOS/IP_TTL etc.: accepted, no effect */
+        if (!set && name == 4 /* IP_OPTIONS */) {     /* we never see any: report zero bytes (sshd drops a
+                                                       * connection that claims IP options) */
+            irq_spin_unlock(&net_spinlock);
+            *len = 0;
+            return 0;
+        }
     } else {
         r = -ENOPROTOOPT;
     }

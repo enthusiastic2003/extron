@@ -100,12 +100,13 @@ fi
 
 # ---- the system headers each compile on their own -------------------------------------------------
 # Known not to: complex.h (tcc has no _Complex), lastlog.h (mlibc ships no utmp.h), and the
-# kernel's linux/*.h, which are meant to be included after libc headers.
+# kernel's linux/*.h, which are meant to be included after libc headers; ffitarget.h is libffi's
+# private header (ffi.h includes it).
 bad=0; n=0; failed=
 cd /usr/include
 for h in *.h sys/*.h netinet/*.h arpa/*.h net/*.h; do
     [ -f "$h" ] || continue
-    case "$h" in complex.h|lastlog.h) continue;; esac
+    case "$h" in complex.h|lastlog.h|ffitarget.h) continue;; esac
     n=$((n + 1))
     printf '#include <%s>\nint main(void){return 0;}\n' "$h" > "$W/hs.c"
     cc -c "$W/hs.c" -o "$W/hs.o" 2>/dev/null || { bad=$((bad + 1)); failed="$failed $h"; }
