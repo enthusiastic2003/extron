@@ -31,9 +31,16 @@ static long pty_slave_write_out(struct tty *t, const char *buf, size_t count,
     if (!pair) return -ENODEV;
     irq_spin_lock(&pair->lock);
     size_t written = 0;
+    /* Output processing, as for any terminal: with OPOST|ONLCR a newline reaches the master as CR LF
+     * (without it a program's "\n" only moves down: the "staircase"). Programs that turn it off with
+     * tcsetattr (ssh, editors in raw mode) get their bytes untouched. */
+    bool onlcr = (t->termios.oflag & (0000001 /* OPOST */ | 0000004 /* ONLCR */))
+                 == (0000001 | 0000004);
     while (written < count) {
-        uint32_t next = (pair->master_head + 1) % TTY_BUFFER_SIZE;
-        if (next == pair->master_tail) {
+        char c = buf[written];
+        uint32_t need = (onlcr && c == '\n') ? 2 : 1;
+        uint32_t used = (pair->master_head + TTY_BUFFER_SIZE - pair->master_tail) % TTY_BUFFER_SIZE;
+        if (TTY_BUFFER_SIZE - 1 - used < need) {
             if (nonblock) {
                 irq_spin_unlock(&pair->lock);
                 return written ? (long)written : -EAGAIN;
@@ -45,8 +52,13 @@ static long pty_slave_write_out(struct tty *t, const char *buf, size_t count,
             }
             continue;
         }
-        pair->master_buf[pair->master_head] = buf[written++];
-        pair->master_head = next;
+        if (need == 2) {
+            pair->master_buf[pair->master_head] = '\r';
+            pair->master_head = (pair->master_head + 1) % TTY_BUFFER_SIZE;
+        }
+        pair->master_buf[pair->master_head] = c;
+        pair->master_head = (pair->master_head + 1) % TTY_BUFFER_SIZE;
+        written++;
     }
     irq_spin_unlock(&pair->lock);
     wakeup(&pair->master_buf);

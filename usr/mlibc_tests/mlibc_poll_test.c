@@ -168,10 +168,10 @@ static void test_pty_nonblocking(void) {
     check("canonical nonblocking read returns the completed line",
           read(slave, line, sizeof(line)) == 2
           && line[0] == 'x' && line[1] == '\n');
-    char echoed[2];
+    char echoed[3];                      /* the echo of a newline is CR LF (OPOST|ONLCR, the default) */
     check("PTY canonical echo is returned through the master",
-          read(master, echoed, sizeof(echoed)) == 2
-          && echoed[0] == 'x' && echoed[1] == '\n');
+          read(master, echoed, sizeof(echoed)) == 3
+          && echoed[0] == 'x' && echoed[1] == '\r' && echoed[2] == '\n');
 
     check("slave output reaches and wakes the PTY master",
           slave >= 0 && write(slave, "T", 1) == 1);
