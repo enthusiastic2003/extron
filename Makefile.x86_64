@@ -74,7 +74,8 @@ DISK_ARGS  = $(if $(wildcard $(DISK)),$(DISK_QEMU))
 
 # A virtio-net NIC on QEMU's user-mode network: no host setup, DHCP gives the guest 10.0.2.15,
 # the host is 10.0.2.2, DNS 10.0.2.3, and the host's internet is reachable through NAT.
-NET_ARGS  ?= -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0,disable-modern=on
+SSH_PORT  ?= 2222
+NET_ARGS  ?= -netdev user,id=n0,hostfwd=tcp::$(SSH_PORT)-:22 -device virtio-net-pci,netdev=n0,disable-modern=on
 
 # What the ESP carries. Default: a tiny initramfs whose /init mounts root=/dev/vda
 # and switches to it (USE_INITRD=0: no initramfs, the kernel mounts root= itself).
@@ -208,9 +209,21 @@ check-net: esp $(TEST_DISK)
 check-all: esp $(TEST_DISK)
 	python3 tools/x86_boot_test.py --runtests
 
-run: QEMU_DISPLAY = gtk
+# Headless by default: the console is this terminal (serial) and sshd starts at boot, so the usual
+# way in is `make x86-ssh` (or ssh -p 2222 root@127.0.0.1). Ctrl-C here stops the machine.
+# `make x86-run-gui` opens the graphical window instead (the framebuffer console, DOOM, ...).
+run: QEMU_DISPLAY = none
 run: esp $(BUILD)/OVMF_VARS.fd $(DISK) disk-tests
 	$(QEMU) $(QEMU_ARGS)
+
+run-gui: QEMU_DISPLAY = gtk
+run-gui: esp $(BUILD)/OVMF_VARS.fd $(DISK) disk-tests
+	$(QEMU) $(QEMU_ARGS)
+
+# Log in to the running machine over the forwarded port (host key checking is per-machine:
+# a rebuilt disk keeps its host key, a new disk gets a new one: ssh-keygen -R '[127.0.0.1]:2222').
+ssh:
+	ssh -p $(SSH_PORT) root@127.0.0.1
 
 # Headless boot under OVMF; passes iff the smoke test reports success.
 check: $(BUILD)/OVMF_VARS.fd
@@ -246,5 +259,5 @@ compdb:
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all esp run check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash gnumake tcc doom check-boot check-disk check-all check-doom check-net
+.PHONY: all esp run run-gui ssh check clean compdb userland check-userland soak disk rootfs rootfs-test disk-tests disk-clean check-persist libs python coreutils bash gnumake tcc doom check-boot check-disk check-all check-doom check-net
 -include $(DEPS)

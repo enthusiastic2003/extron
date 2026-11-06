@@ -7,7 +7,9 @@
 #
 #   tools/build_x86_rootfs.sh [OUT [SIZE_MB]]      default build-x86_64/rootfs.img, 512 MB
 # KEEP=1: carry /root, /home and /mnt over from an existing OUT (refresh the system,
-# keep the user's files). The image is sparse, so its size on the host stays small.
+# keep the user's files and the SSH host keys). The image is sparse, so its size on the host stays small.
+# SSHD_AUTOSTART=0|1: start sshd at boot (default 1; 0 for images whose name contains "test").
+# SSH_AUTHORIZED_KEYS=FILE: append that file's public keys to /root/.ssh/authorized_keys.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -270,6 +272,14 @@ hostname -F /etc/hostname 2>/dev/null
 mkdir -p /tmp /run /var/log /var/tmp
 chmod 1777 /tmp /var/tmp
 RC
+case "$(basename "$OUT")" in *test*) SSHD_DEFAULT=0;; *) SSHD_DEFAULT=1;; esac
+if [ "${SSHD_AUTOSTART:-$SSHD_DEFAULT}" = 1 ] && [ -x "$ROOT/usr/sbin/start-sshd" ]; then
+    cat >> "$ROOT/etc/init.d/rcS" <<'RC'
+# The SSH server (public-key logins; the first boot generates the host key, so run it in the
+# background and let the login prompt appear without waiting).
+/usr/sbin/start-sshd > /var/log/start-sshd.log 2>&1 &
+RC
+fi
 chmod 755 "$ROOT/etc/init.d/rcS"
 printf 'Welcome to Extron.\n\n' > "$ROOT/etc/issue"
 printf '\nExtron OS - a hobby POSIX kernel. Type "poweroff" to shut down.\n\n' > "$ROOT/etc/motd"
@@ -307,7 +317,24 @@ if [ "${KEEP:-0}" = 1 ] && [ -f "$OUT" ]; then
         debugfs -R "rdump /$d $KEEPDIR" "$OUT" >/dev/null 2>&1 || true
         [ -d "$KEEPDIR/$d" ] && { rm -rf "${ROOT:?}/$d"; cp -a "$KEEPDIR/$d" "$ROOT/$d"; }
     done
+    # SSH host keys: a rebuilt system must keep its identity, or every client sees "host key changed".
+    debugfs -R "rdump /etc/ssh $KEEPDIR" "$OUT" >/dev/null 2>&1 || true
+    for k in "$KEEPDIR"/ssh/ssh_host_*; do
+        [ -f "$k" ] && { mkdir -p "$ROOT/etc/ssh"; cp -p "$k" "$ROOT/etc/ssh/"; }
+    done
+    chmod 600 "$ROOT"/etc/ssh/ssh_host_*_key 2>/dev/null || true
     rm -rf "$KEEPDIR"
+fi
+
+# ---- optional: authorize a public key for root --------------------------------------
+if [ -n "${SSH_AUTHORIZED_KEYS:-}" ]; then
+    [ -f "$SSH_AUTHORIZED_KEYS" ] || { echo "SSH_AUTHORIZED_KEYS: $SSH_AUTHORIZED_KEYS not found" >&2; exit 1; }
+    mkdir -p "$ROOT/root/.ssh"; touch "$ROOT/root/.ssh/authorized_keys"
+    while IFS= read -r line; do
+        [ -n "$line" ] && ! grep -qxF "$line" "$ROOT/root/.ssh/authorized_keys" \
+            && printf '%s\n' "$line" >> "$ROOT/root/.ssh/authorized_keys"
+    done < "$SSH_AUTHORIZED_KEYS"
+    chmod 700 "$ROOT/root/.ssh"; chmod 600 "$ROOT/root/.ssh/authorized_keys"
 fi
 
 # ---- image ------------------------------------------------------------------------
