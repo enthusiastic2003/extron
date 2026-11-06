@@ -156,6 +156,18 @@ static void test_pty_nonblocking(void) {
     errno = 0;
     check("empty nonblocking PTY slave read reports EAGAIN",
           slave >= 0 && read(slave, &byte, 1) == -1 && errno == EAGAIN);
+    /* readline calls tcflow(tty, TCOON) after any signal; a missing backend used to abort bash on ^C. */
+    errno = 0;
+    check("tcflow(TCOON) on a terminal succeeds",
+          slave >= 0 && tcflow(slave, TCOOFF) == 0 && tcflow(slave, TCOON) == 0);
+    errno = 0;
+    check("tcflow with a bad action reports EINVAL",
+          slave >= 0 && tcflow(slave, 99) == -1 && errno == EINVAL);
+    int devnull = open("/dev/null", O_RDWR);
+    errno = 0;
+    check("tcflow on a non-terminal reports ENOTTY",
+          devnull >= 0 && tcflow(devnull, TCOON) == -1 && errno == ENOTTY);
+    if (devnull >= 0) close(devnull);
     struct pollfd slave_readable = { .fd = slave, .events = POLLIN };
     check("canonical PTY is not readable before line completion",
           write(master, "x", 1) == 1
