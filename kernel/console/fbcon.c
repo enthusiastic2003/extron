@@ -279,6 +279,8 @@ void fbcon_resume(void) {
 
 int fbcon_active(void) { return active; }
 
+void fbcon_get_size(unsigned *c, unsigned *r) { *c = cols; *r = rows; }
+
 int fbcon_init(void) {
     fb = fb_get();
     if (!fb || fb->depth != 32 || fb->width < 80 * FW || fb->height < 25 * FH) return -1;

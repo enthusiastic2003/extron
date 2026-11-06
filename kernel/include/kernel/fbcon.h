@@ -17,6 +17,7 @@
  */
 int  fbcon_init(void);          /* 0 if a framebuffer exists and the console is live */
 int  fbcon_active(void);
+void fbcon_get_size(unsigned *cols, unsigned *rows);   /* text grid, valid once active */
 void fbcon_putc(char c);        /* '\n' is a bare line feed; '\r' returns the column */
 void fbcon_write(const char *buf, size_t len);
 void fbcon_flush(void);

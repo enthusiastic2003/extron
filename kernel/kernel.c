@@ -250,8 +250,14 @@ void kernel_stage2(uint64_t mb2_addr) {
     if (fb_init(640, 480)) {
 #ifdef __x86_64__
         /* UEFI GOP framebuffer: use it as a text console mirroring serial. */
-        if (fbcon_init() == 0)
-            kprintf("fbcon: framebuffer console active\n");
+        if (fbcon_init() == 0) {
+            /* Programs size themselves from TIOCGWINSZ: report the real text grid. */
+            unsigned fc, fr;
+            fbcon_get_size(&fc, &fr);
+            struct tty_winsize ws = { (uint16_t)fr, (uint16_t)fc, 0, 0 };
+            tty_set_winsize(&tty_table[0], &ws);
+            kprintf("fbcon: framebuffer console active (%ux%u)\n", fc, fr);
+        }
 #else
         fb_test_pattern();
 #endif
