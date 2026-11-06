@@ -584,3 +584,10 @@ the suite had passed five or more runs in a row. Suspects, unproven: a rare timi
 fork/pipe/wait, or the stdio exit-flush change (mlibc commit `916856a8`). A bisect means
 reverting that commit, rebuilding the userland and repeating full runs (the rate is low, so
 many runs are needed).
+
+**Recurrence, 2026-11-06:** the applets `pipeline rc` check (`$(true | false; true | true && echo ok)`
+returned empty) failed again in a full `check-all` run, after OpenSSL/OpenSSH, SCM_RIGHTS and the
+loader changes (the run before it, with other fixes in progress, passed that check). So it is not
+confined to the earlier mlibc/toolchain change and has now been seen twice in roughly ten full runs.
+Still uninvestigated; the standing suspects are a fork/pipe/wait timing race and the stdio exit-flush
+path.
